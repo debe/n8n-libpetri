@@ -1,0 +1,27 @@
+# n8n clone (Sustainable Use License; never committed)
+.n8n/
+.n8n-*/
+
+# TypeScript / Node
+node_modules/
+dist/
+*.tsbuildinfo
+*.tgz
+junit*.xml
+coverage/
+
+# Conformance artefacts
+conformance-results/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Agent / harness metadata
+.claude/
+.pi/
+.rpiv/
+.serena/
+.tokensave

@@ -1,0 +1,54 @@
+{
+  "name": "n8n-libpetri",
+  "version": "0.1.0",
+  "description": "n8n workflow scheduler replaced by a libpetri Coloured Time Petri Net engine",
+  "private": true,
+  "homepage": "https://github.com/debe/n8n-libpetri",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/debe/n8n-libpetri.git",
+    "directory": "typescript"
+  },
+  "license": "Apache-2.0",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./compiler": {
+      "import": "./dist/compiler/index.js",
+      "types": "./dist/compiler/index.d.ts"
+    },
+    "./verify": {
+      "import": "./dist/verify/index.js",
+      "types": "./dist/verify/index.d.ts"
+    },
+    "./conformance": {
+      "import": "./dist/conformance/index.js",
+      "types": "./dist/conformance/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "check": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "libpetri": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: typescript
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      # libpetri shells out to the z3 executable (VER-013). Without it every
+      # verification test reports `unknown`, which vitest would count as a pass
+      # if the tests merely tolerated it. The gate test in tests/ fails the build
+      # when z3 is absent, so proofs cannot quietly become skips.
+      - uses: ./.github/actions/install-z3
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
