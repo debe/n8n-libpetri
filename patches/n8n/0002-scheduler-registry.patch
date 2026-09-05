@@ -1,0 +1,103 @@
+From a4f4e7cb923ada3edc7c1fc4b3969a54a3d2a2a4 Mon Sep 17 00:00:00 2001
+From: Dennis Berger <dbgh@knownhosts.org>
+Date: Sat, 5 Sep 2026 14:22:27 +0200
+Subject: [PATCH] refactor(core): Make the workflow scheduler pluggable
+ (no-changelog)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`processRunExecutionData()` constructed `StackScheduler` directly. It now asks
+`scheduler-registry.ts` for one, so a different `WorkflowScheduler` can be
+registered process-wide with `setWorkflowSchedulerFactory()` and every
+`WorkflowExecute` — including the ones the runners and the tests construct
+directly — picks it up without a change at any call site.
+`resetWorkflowSchedulerFactory()` restores the default. The factory is called
+once per execution, after the execution is set up and before the cancelable
+promise is created. While nothing is registered the scheduler is
+`StackScheduler`, and nothing changes: the execution-engine suite produces the
+same 1657 results.
+---
+ packages/core/src/execution-engine/index.ts   |  6 ++++
+ .../execution-engine/scheduler-registry.ts    | 29 +++++++++++++++++++
+ .../src/execution-engine/workflow-execute.ts  |  4 +--
+ 3 files changed, 37 insertions(+), 2 deletions(-)
+ create mode 100644 packages/core/src/execution-engine/scheduler-registry.ts
+
+diff --git a/packages/core/src/execution-engine/index.ts b/packages/core/src/execution-engine/index.ts
+index 4ae6f5dd..f683cf05 100644
+--- a/packages/core/src/execution-engine/index.ts
++++ b/packages/core/src/execution-engine/index.ts
+@@ -107,6 +107,12 @@ export { PollTriggerExecutor } from './poll-trigger-executor';
+ export { isEngineRequest } from './requests-response';
+ export * from './routing-node';
+ export * from './scheduled-task-manager';
++export {
++	getWorkflowSchedulerFactory,
++	resetWorkflowSchedulerFactory,
++	setWorkflowSchedulerFactory,
++	type WorkflowSchedulerFactory,
++} from './scheduler-registry';
+ export { StackScheduler } from './stack-scheduler';
+ export { TriggersAndPollers } from './triggers-and-pollers';
+ export type { PollErrorKind, PollTickEventMap } from './triggers-and-pollers';
+diff --git a/packages/core/src/execution-engine/scheduler-registry.ts b/packages/core/src/execution-engine/scheduler-registry.ts
+new file mode 100644
+index 00000000..bc50e933
+--- /dev/null
++++ b/packages/core/src/execution-engine/scheduler-registry.ts
+@@ -0,0 +1,29 @@
++import { StackScheduler } from './stack-scheduler';
++import type { WorkflowScheduler } from './workflow-scheduler';
++
++/** Creates the scheduler for one execution. */
++export type WorkflowSchedulerFactory = () => WorkflowScheduler;
++
++const defaultFactory: WorkflowSchedulerFactory = () => new StackScheduler();
++
++let factory = defaultFactory;
++
++/**
++ * Replace the scheduler every execution started from now on uses. This applies to
++ * `WorkflowExecute` instances constructed directly, as the runners and the tests do, so a
++ * different scheduler can be plugged in process-wide without touching any call site. The
++ * default is `StackScheduler`, n8n's execution loop.
++ */
++export function setWorkflowSchedulerFactory(next: WorkflowSchedulerFactory): void {
++	factory = next;
++}
++
++/** The factory `WorkflowExecute.processRunExecutionData()` calls once per execution. */
++export function getWorkflowSchedulerFactory(): WorkflowSchedulerFactory {
++	return factory;
++}
++
++/** Restore the default, `StackScheduler`. */
++export function resetWorkflowSchedulerFactory(): void {
++	factory = defaultFactory;
++}
+diff --git a/packages/core/src/execution-engine/workflow-execute.ts b/packages/core/src/execution-engine/workflow-execute.ts
+index 0504e7f9..830fad3c 100644
+--- a/packages/core/src/execution-engine/workflow-execute.ts
++++ b/packages/core/src/execution-engine/workflow-execute.ts
+@@ -90,7 +90,7 @@ import {
+ } from './partial-execution-utils';
+ import { handleRequest, isEngineRequest } from './requests-response';
+ import { RoutingNode } from './routing-node';
+-import { StackScheduler } from './stack-scheduler';
++import { getWorkflowSchedulerFactory } from './scheduler-registry';
+ import { TriggersAndPollers } from './triggers-and-pollers';
+ import { convertBinaryData } from '../utils/convert-binary-data';
+ 
+@@ -2227,7 +2227,7 @@ export class WorkflowExecute {
+ 		this.checkForWorkflowIssues(workflow);
+ 		this.handleWaitingState(workflow);
+ 
+-		const scheduler = new StackScheduler();
++		const scheduler = getWorkflowSchedulerFactory()();
+ 
+ 		return new PCancelable(async (resolve, _reject, onCancel) => {
+ 			this.setupCancellation(onCancel, hooks, startedAt);
+-- 
+2.50.1 (Apple Git-155)
+
