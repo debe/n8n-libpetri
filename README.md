@@ -94,7 +94,9 @@ sink_o:       one(X/nil_o)   (no Out spec: a genuine sink, CORE-043 AC4)
   `X_route_o` routes one output and marks `X/routed_o`, and `X_done` consumes all `routed_o`
   to refund `_budget` and mark `X/done`. Execution and verification stay linear in `k`.
 - Priority = DAG depth gives n8n's documented v1 depth-first completion at k = 1;
-  declaration order = canvas order (y, then x, ascending) gives sibling order.
+  declaration order = canvas order (y, then x, ascending) gives sibling order. One exception,
+  measured: an OR-input node's `arm` transition costs a scheduling cycle, so a shallower
+  sibling takes the budget unit in it and that node runs breadth-first (divergence #20).
 - `X/done` and `X/skipped` are markers. Read arcs on `Y/done` make `$('Y')` expression
   dependencies explicit; an unmet one is a stranded token the verifier catches statically.
 - `IRunExecutionData` is written exactly as n8n writes it, so `WorkflowDataProxy`, `$node`,
@@ -211,6 +213,63 @@ pairing is sound above k = 1 only if every node fires at most once per execution
 compiler checks (acyclic, and every input index has at most one producer). Otherwise k = 1.
 Lifting that is the genuine use of ν-lineage names and is deferred.
 
+The condition is about **arrival order**, not overlap: `X/idle` already makes two activations
+of one node structurally non-overlapping at every k (`X/idle + X/running = 1` is a found
+P-invariant). What breaks above k = 1 is that a node activated several times takes its
+payload → `runIndex` pairing from the order its inputs arrive, and that order becomes the
+producers' completion order rather than a structural fact.
+
+### Concurrency
+
+Above k = 1 several node actions are in flight at once. What makes that safe, what it changes,
+and how k is chosen; the analysis and the measurements are in
+[ADR 0006](docs/adr/0006-concurrency.md).
+
+**The payload rule: a node's input items are read-only.** A token holds the very
+`INodeExecutionData[]` array n8n produced, and `X_route` hands the same array to every edge of
+an output — exactly as `addNodeToBeExecuted` writes it by reference into every waiting slot and
+stack entry. What keeps two concurrent consumers apart is n8n's own lineage step:
+`addPairedItemLineage` returns `{ ...item, pairedItem }` copies rather than stamping in place,
+so every activation reads and writes its own item objects, and `assignPairedItems` — the one
+in-place `pairedItem` write left — only ever touches the node's own fresh output. We add no
+second copy: the lineage step is synchronous, so serialising it in the net would protect
+nothing, and it costs 19 ns per item (0.19 ms for 10 000 items). The copy is shallow, so each
+item's `json` stays shared; a node that mutates its input `json` in place already corrupts its
+sibling in n8n, sequentially — concurrency only makes it nondeterministic.
+
+**The pause claim.** `runExecutionData.waitTill` is one execution-global field, so above k = 1
+the scheduler has to decide which node put the execution to wait. The claim is made in the same
+synchronous turn in which a node's own `runNode` resolves: a node that started after the field
+was already set never claims, and of the nodes that saw it change during their own run the one
+whose run finished first keeps it. A refused claim is reported by diagnostic and the
+`executionStatus: 'waiting'` that `host.createTaskData` stamped on that run — it reads the same
+global field — is corrected to what the run actually was. The residual (a node that sets the
+field and then keeps working while a sibling finishes) is divergence #15. `lastNodeExecuted`
+becomes the last node to *complete* (#16), a sibling in flight when the execution halts or
+pauses — or one that starts inside the halt window, which lasts until `_halt` reaches the
+marking — finishes and is recorded (#17), and the dynamic-credentials flags are not node-scoped
+above k = 1 (#18) — keep k = 1 for workflows that use dynamically-resolved credentials.
+
+**The error contract.** `WorkflowScheduler.executionError` is the value `processRunExecutionData`
+persists the execution as a success or a failure by, and n8n keeps it in one field it clears at
+the top of every loop iteration and every retry. The scheduler keeps two instead: the **halt
+error**, written once by the activation whose failure ended the execution and never overwritten,
+and the **leftover** — an error a node's `onError` policy continued past — which the next
+activation to *complete* replaces. `executionError` is `haltError ?? leftoverError`. At k = 1
+completion order is n8n's iteration order, so the value is byte-identical; above it the leftover
+follows completion order, like `lastNodeExecuted` (#19). Without the split a sibling's catch,
+retry or start could erase a halt the net had already taken.
+
+**Choosing k.** `registerPetriScheduler({ budget })`; the vitest/registration hook reads it
+from the **`N8N_LIBPETRI_BUDGET`** environment variable (`src/n8n-vitest-setup.ts`), default 1,
+and anything not a positive integer falls back to 1. The compiler may lower it: read
+`CompiledWorkflow.effectiveBudget` and `budgetRestriction` for what a workflow actually got.
+`PetriScheduler.maxInFlight` reports the high-water mark of concurrent runs (`X_run` actions)
+of the last execution: a **lower bound** on `_budget + Σ(running + ok + retry) = k`, since a
+retry wait and an exhausted recording hold their unit without running the node. A `retryOnFail`
+node holds its unit across the retry wait (ADR 0004), so a retry-heavy workflow wants k above
+its retry count.
+
 ### Initial marking and the marking codec
 
 n8n stays the system of record. Trigger data goes onto the **start node's own `X/in`**: n8n
@@ -232,6 +291,18 @@ spec/         n8n concept → libpetri requirement mapping
 ```
 
 ## Status
+
+Milestone M3 (concurrency): the budget runs above 1. Two independent 500 ms branches take
+507 ms against n8n's 1006 ms, and every cell of the fan-out benchmark is
+`ceil(width / k) x 500 ms`; a chain with no parallelism to win costs the same at every k.
+The `IRunExecutionData` a workflow produces is identical at k in {1, 2, 4, 8} — runData,
+the resumable state and the scheduler contract — the one exception being a *halting*
+execution, where the nodes in flight at the halt still finish (divergence #17). Measured
+three ways: n8n's own suite per budget, the differential harness against a port of n8n's
+loop, and `tests/conformance/budget-equivalence.test.ts` as a committed gate. Reports:
+[`docs/conformance-m3.md`](docs/conformance-m3.md) (per-budget matrix),
+[`docs/differential.md`](docs/differential.md) (the differ and the benchmark numbers),
+[ADR 0006](docs/adr/0006-concurrency.md) (payload safety and the k > 1 semantics).
 
 Milestone M2 (engine): the `PetriScheduler` runs n8n's execution-engine suite at k = 1 —
 26/36 loop-driving cases and 1619/1621 helper cases (26/30 and 1621/1621 excluding the

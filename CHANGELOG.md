@@ -84,6 +84,74 @@ All notable changes to this project are documented here. The format follows
 - Divergence register extended with #11–#15 and an amendment to #2; ADR 0005 amended with the
   mapping that landed.
 
+- **Nodes run concurrently.** The `_budget` place is seeded with `k` unit tokens, so up to `k`
+  nodes whose inputs are ready run at the same time — the whole point of replacing a loop that
+  runs one node at a time. Two independent 500 ms HTTP calls now take ~500 ms, not ~1 s:
+
+  ```ts
+  registerPetriScheduler({ setWorkflowSchedulerFactory, nodeHelpers, StackScheduler, budget: 4 });
+  ```
+
+  The compiler decides whether the budget is safe to use and silently lowers it to 1 when it is
+  not — a workflow with a cycle, or with an input index fed by more than one producer, takes its
+  payload-to-`runIndex` pairing from arrival order, which above k = 1 is the producers' completion
+  order. When it lowers the budget it says so as a diagnostic
+  (`budget: k=4 lowered to 1 (multi-producer-input: C.0 has 2 producers)`). Across n8n's own
+  1657-case suite exactly two workflows are lowered; everything else runs at the budget asked for.
+- Same data at every budget. For every workflow the compiler leaves above k = 1, the
+  `IRunExecutionData` at k in {1, 2, 4, 8} is identical: payloads, `pairedItem`, `source`,
+  `executionStatus`, `metadata`, error shape, the resumable state (`nodeExecutionStack`,
+  `waitingExecution`, `waitingExecutionSource`, `contextData`, `waitTill`) and the scheduler's
+  own `executionError` / `closeFunction`. Only *ordering* moves, and every field that can move
+  has a register row. `tests/conformance/budget-equivalence.test.ts` is that statement as a test.
+- Input items are read-only. A node's output array is shared with every consumer it is wired to
+  — exactly as n8n shares it — so a node must not write into what it was handed. n8n's own
+  `addPairedItemLineage` already copies rather than stamping in place, so no second copy is
+  taken; ADR 0006 has the aliasing table and the cost measurements (~19 ns/item to copy, against
+  a 6.4x speed-up on a 25 ms-per-node workflow at k = 8).
+- `PetriScheduler.maxInFlight` reports the high-water mark of concurrent node runs of an
+  execution — a lower bound on how much of the budget was actually used.
+- Differential harness (`n8n-libpetri/conformance`, `docs/differential.md`): a faithful port of
+  n8n's own `stack-scheduler` loop runs the same fixture under the same host as the net, and the
+  two are compared on three levels — a **data gate** (per `(node, runIndex)`: payloads, source,
+  status, metadata, error, plus the resumable state and the scheduler contract), a
+  **happens-before** check (every dependency n8n realised must be ordered the same under the net)
+  and an **ordering** report where each moved activation is attributed to a numbered divergence
+  row. `npx tsx src/conformance/differ-cli.ts <fixtures> --budget 1 --budget 2` exits non-zero on
+  any unattributed difference or any mechanism no row names. 23 fixtures x k in {1, 2, 4}: 0 fail,
+  0 unattributed, 0 novel mechanisms, 0 unobserved happens-before edges.
+- Benchmark (`npm run bench`, numbers in `docs/differential.md`). Fan-out of N x 500 ms nodes,
+  mean ms: width 2 — n8n 1006, k=1 1019, k=2 507, k=4 508; width 4 — n8n 2010, k=1 2019, k=2 1007,
+  k=4 504; width 8 — n8n 4021, k=1 4023, k=2 2009, k=4 1006. A deep 8 x 500 ms chain, where there
+  is nothing to win, is within 0.2 % at every budget. Scheduling overhead over n8n's own loop on a
+  100-node chain of 0 ms actions: ~16 us per node warm (~79 us on a cold compiler cache), against
+  an 80 ms HTTP call or a 400 ms LLM call.
+- `scripts/run-conformance.sh --budget=N` runs n8n's suite at any budget. k = 1 keeps the M2
+  artefact names; k > 1 writes `libpetri-k<N>.*` and is compared against the k = 1 libpetri leg,
+  not the legacy baseline, so the matrix shows what the *budget* changed rather than re-reporting
+  the k = 1 divergences. Budget restrictions and decode diagnostics are collected per leg.
+- Conformance per budget (`docs/conformance-m3.md`). Loop-driving / helpers, and regressions
+  against each leg's reference: legacy 36/36 and 1621/1621, byte-identical to the unpatched
+  baseline; libpetri k=1 26/36 and 1619/1621, 12 regressions against the baseline; k=2 25/36 and
+  1618/1621 and k=4 26/36 and 1618/1621, **2 regressions against k = 1** at either budget. Both
+  are ordering, both are registered: the total execution order of a workflow with independent
+  branches (#21) and a Respond node that the net has already started when a sibling fails (#17).
+  No case moved from an order assertion to a data assertion at any budget.
+- Divergence register at 21 rows: #19 (`executionError` is split into a write-once halt error and
+  a completion-ordered leftover), #20 (an OR-input arm transition costs a scheduling cycle) and
+  #21 (total execution order is n8n's, and only n8n's, property) are new; #1, #11 and #17 are
+  widened by what the harnesses found. Every row M3 observed is now `designed`.
+- ADR 0006 (payload safety and the k > 1 semantics): the aliasing analysis, why no extra copy is
+  taken, the three hazard verdicts (waitTill claim, halt snapshot, in-flight sibling), and why
+  the k-safety check is sound as written.
+
 ### Changed
+- The concurrency budget is live. At k = 1 the engine remains n8n-sequential and byte-identical,
+  which is what M2 proved; above it, `executionIndex` records the order nodes *started* rather
+  than n8n's depth-first walk, and the execution-global fields n8n's loop owns —
+  `lastNodeExecuted`, `waitTill`, `executionError` — become properties of completion order.
+  Each is a numbered divergence (#15, #16, #19) rather than a silent difference. Keep k = 1 for a
+  workflow whose correctness depends on a failure suppressing a ready sibling (#17), or that uses
+  dynamically-resolved credentials (#18).
 - README per-node gadget now documents the routed `X_run`/`X_route` shape (libpetri's
   validator rejects the earlier nested-`xor` form on the retry and halt branches, ADR 0004).

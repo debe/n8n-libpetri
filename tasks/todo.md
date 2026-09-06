@@ -106,10 +106,11 @@ Model / compiler (outside M2's file sets)
       round of a node with unreachable producers double-counts the seeds (#8 / #10)
 
 Scheduler
-- [ ] k > 1 halt snapshot race (bounded): the marking snapshot is taken inside the halting
+- [x] k > 1 halt snapshot race (bounded): the marking snapshot is taken inside the halting
       action, so a token another node's `X_start` consumes between that instant and the `_halt`
       deposit is encoded as a pending entry too — one duplicated stack entry on resume.
-      Impossible at k = 1
+      Impossible at k = 1. Guarded for `X_start` in M3 (per-node start counters against the
+      snapshot's counts, FIFO drop); the `X_skip` half is still open, see M3
 - [ ] `subNodeExecutionResults` is rebuilt per attempt; n8n creates it once per popped entry
       (`stack-scheduler.ts:53`) and passes the same populated object to every `runNode` of the
       retry loop. Invisible at k = 1 with the AI path out of scope; fixing it means carrying the
@@ -124,9 +125,11 @@ Conformance / harness
       `src/conformance/classify.ts` or keep stating both figures as `docs/conformance-m2.md` does
 - [ ] Still open from M1: extend `LOOP_DRIVING_PATTERNS` deliberately (retryOnFail, cancellation,
       destination filtering, resume hooks, sub-workflows) and move the pinned counts
-- [ ] The conformance leg only runs at k = 1 (`N8N_LIBPETRI_BUDGET` defaults to 1). Every k > 1
+- [x] The conformance leg only runs at k = 1 (`N8N_LIBPETRI_BUDGET` defaults to 1). Every k > 1
       path is covered by `FakeHost` tests only. M3 should add a budget leg; expect #12-class
-      order failures to multiply, so the headline will need the data-equivalence-only variant
+      order failures to multiply, so the headline will need the data-equivalence-only variant —
+      done in M3: `run-conformance.sh --budget=N`, compared against the k = 1 libpetri leg so the
+      matrix shows what the budget changed; only 2 regressions at k = 2 and k = 4
 - [ ] `FakeHost` mirrors `WorkflowExecute` at `441970b` closely but not fully (no
       `convertBinaryData`, no `handleNodeErrorOutput`, no `sendChunk` hook, no AI-tool rewire
       paths); the real host is exercised only by the conformance run
@@ -138,7 +141,110 @@ Conformance / harness
       selects 36 of 1657. Update the rule when the pattern list moves
 
 ## M3 — Concurrency + differential report
-- [ ] k > 1 under the safety check; lineage-step copy; differ over both engines
+- [x] k > 1 under the safety check: the `_budget` place carries `k` unit tokens, the compiler
+      lowers `k` to 1 (with a diagnostic) on a cycle or a multi-producer input index, and
+      `PetriScheduler.maxInFlight` reports what was used
+- [x] Lineage-step copy: analysed rather than added — n8n's `addPairedItemLineage` already
+      `.map()`s to fresh shallow copies and every in-place stamp is on the node's own fresh
+      output, so no two concurrent activations can write the same object. The rule "input items
+      are read-only" is documented instead; aliasing table, options and costs in ADR 0006, proof
+      in `tests/scheduler/payload.test.ts` (an in-place-stamping host is shown to break at k = 2)
+- [x] The three hazard verdicts: the `waitTill` claim was a real defect (claimed on reaching the
+      recording path, not on the node's own resolution) and is fixed; the halt snapshot race is
+      bounded and guarded for `X_start`; an in-flight sibling at halt/pause is correct and
+      divergent (EXEC-040, row #17)
+- [x] `state.executionError` split into a write-once halt error and a completion-ordered leftover
+      (row #19); pinned by `tests/scheduler/execution-error.test.ts`, verified failing pre-fix
+- [x] Differ over both engines (`src/conformance/{harness,stack-reference,differ,differ-cli}.ts`,
+      `docs/differential.md`): a port of n8n's own loop against the net under one host, compared
+      on data, happens-before and attributed ordering. 23 fixtures × k ∈ {1, 2, 4}: 0 fail,
+      0 unattributed, 0 novel mechanisms, 0 unobserved edges
+- [x] Benchmark (`npm run bench`): the headline claim holds — two independent 500 ms branches
+      take 507 ms at k ≥ 2 against n8n's 1006 ms, every fan-out cell is `ceil(width/k) × 500 ms`,
+      a chain with nothing to win is within 0.2 % at every k, and the net costs ~16 µs per node
+      over n8n's loop warm
+- [x] Data equivalence at k > 1 measured three ways (n8n's suite per budget, the differ, and the
+      committed `tests/conformance/budget-equivalence.test.ts` gate) — identical `runData`,
+      resumable state and scheduler contract at k ∈ {1, 2, 4, 8}, the halting execution excepted
+      (row #17). `docs/conformance-m3.md`
+- [x] Register at 21 rows (#19, #20, #21 new; #1, #11, #17 widened); every row M3 observed
+      promoted from `proposed` to `designed`, #18 alone left `proposed` because no harness here
+      can measure it. ADR 0006 added
+
+### M3 open items (from the track reports)
+Behaviour a user can see
+- [ ] Divergence #17 is the one k > 1 behaviour change with a user-visible shape: a
+      `responseMode: responseNode` webhook answers the caller at k ≥ 2 where n8n's `break` would
+      have left it unanswered. The recommendation ("keep k = 1 where a failure must suppress a
+      ready sibling") is in the register and the report, but nothing enforces or warns about it —
+      the compiler's k-safety check does not consider it
+- [ ] Divergence #18 (`currentNodeUsedDynamicCredentials` / `…Attempted…` not node-scoped above
+      k = 1) is unfixable from the scheduler — the write is inside n8n's credential layer and the
+      window spans an await we do not own — and invisible to this harness, since `FakeHost` does
+      not mirror that layer. Either keep k = 1 for such workflows or upstream a per-activation
+      scope into `WorkflowExecute`. The differ deliberately excludes both fields from
+      `comparableTask` rather than compare two `undefined`s
+- [ ] Divergence #15 residual: a node that sets `runExecutionData.waitTill` and then keeps working
+      while a sibling finishes loses the claim, and the execution resumes the sibling instead of
+      the Wait node. Closing it needs a write barrier (`Object.defineProperty`) on the field plus
+      `AsyncLocalStorage` (`node:async_hooks`) around `host.runNode`. Designed in ADR 0006, not
+      built; pinned as a known limit in `concurrency.test.ts`
+- [ ] `closeFunction` is last-writer-wins in n8n too, so above k = 1 "last" becomes completion
+      order. Noted in ADR 0006, compared only as present/absent by the differ, and not registered
+      as its own row — if a workflow can register two close functions it deserves one
+
+Model / compiler
+- [ ] The `X_skip` half of the halt-snapshot race is unguarded: `X_start` increments a per-node
+      counter the snapshot subtracts, but `X_skip` is a structural transition with no bound
+      action, so a skip consuming an `in_empty`/`ready_i` token inside the same ≤ 2-microtask
+      window would be double-encoded. Two targeted experiments (400 runs sweeping sleep
+      durations, 520 runs sweeping microtask offsets) failed to reach the window; not fixed
+      blind, because a fix means binding an action to a structural transition and nothing here
+      could pin it with a failing test. Recorded in `docs/conformance-m3.md`
+- [ ] k-safety relaxation for self-serialising loops (a single-entry simple-cycle SCC with one
+      single-firing tree producer plus one cycle producer — the canonical Loop Over Items) is
+      specified with its proof obligations in ADR 0006 and not implemented: it needs a per-input
+      order-determined/multi-firing analysis in `src/compiler/graph.ts`, changes
+      `effectiveBudget` for cyclic fixtures and re-pins `tests/compiler/budget.test.ts`
+- [ ] Divergence #20 (an OR-input arm transition costs a scheduling cycle, so a shallower sibling
+      takes the budget unit in it and the net runs breadth-first where priority = DAG depth was
+      meant to reproduce n8n's depth-first order). A fix would keep structural transitions out of
+      the same scheduling round as real starts; data is unaffected
+
+Harness
+- [ ] The k > 1 conformance legs are compared against `conformance-results/libpetri.junit.xml`,
+      which must therefore be produced first; the script checks neither its age nor its
+      provenance, so a stale k = 1 artefact silently becomes the wrong reference
+- [ ] The differ's candidate leg has no timeout — cancellation is `close()`-only and
+      `run(timeoutMs)` is forbidden — so a net that never quiesces hangs it. The reference leg has
+      a 10 000-activation valve; the candidate leg has only the fixtures' own bounds
+- [ ] The row #17 attribution rule is coarse: any candidate-only activation in a halted, paused or
+      cancelled run is attributed to it. A tighter rule needs the activation's trace start to fall
+      after the halting activation's, and the halting instant is not observable from the trace
+- [ ] The differ inherits every `FakeHost` gap (no `convertBinaryData`, no
+      `handleNodeErrorOutput`, no `sendChunk` hook, no AI-tool rewire, no expression evaluation,
+      so divergence #7's `$('Y')` shape cannot be reproduced). Its verdicts are about the two
+      schedulers, not about `WorkflowExecute`; only the real conformance run covers the rest
+- [ ] The randomised soak that backs the equivalence claim (per-node jitter, every fixture at
+      k ∈ {2, 4, 8}, five seeds, ~2200 runs, zero findings) is not committed because it is
+      wall-clock-dependent. Gating on it needs a seeded, timer-free formulation
+- [ ] Timing-sensitive tests: `docs/differential.md`'s absolute benchmark numbers were measured at
+      load average ~4 and are upper bounds (the ratios reproduce under load, the absolutes inflate
+      3–5×); `concurrency.test.ts`'s wall-clock bounds and `tests/spikes/budget.test.ts` may be
+      flaky on a loaded runner; `differ.test.ts`'s safety-valve case carries an explicit 20 s
+      timeout for the same reason
+- [ ] Still open from M1/M2: the classifier counts the six out-of-scope AI-agent "waiting tools"
+      cases as loop-driving, so every headline needs the "excluding out-of-scope" restatement, and
+      `webhook-respond-branch-order.test.ts` is classified as a helper although it drives the
+      loop — which is why the second k > 1 regression lands in the helper column. Extend
+      `LOOP_DRIVING_PATTERNS` deliberately and move the pinned counts
+
+Upstream
+- [ ] libpetri: `PrecompiledNetExecutor.getMarking()` caches `this.marking` on its first call and
+      never invalidates it, so a second mid-run snapshot silently returns the first one's marking.
+      The scheduler takes exactly one (`haltMarking ??=`) and the halt-snapshot logic depends on
+      it being the one taken inside the halting action, so it is correct today only by accident —
+      worth a fix or a doc note upstream
 
 ## M4 — Verification
 - [ ] `verify(workflow)`: proper completion (per join input), dead nodes, exclusion, bounds,
