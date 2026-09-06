@@ -17,6 +17,9 @@
   "engines": {
     "node": ">=24"
   },
+  "bin": {
+    "n8n-libpetri": "./dist/verify/main.js"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -29,6 +32,10 @@
     "./verify": {
       "import": "./dist/verify/index.js",
       "types": "./dist/verify/index.d.ts"
+    },
+    "./verify/cli": {
+      "import": "./dist/verify/cli.js",
+      "types": "./dist/verify/cli.d.ts"
     },
     "./conformance": {
       "import": "./dist/conformance/index.js",
