@@ -36,7 +36,13 @@ export function setupN8nVitest(
     nodeHelpers: deps.NodeHelpers,
     StackScheduler: deps.StackScheduler,
     budget: Number.isInteger(budget) && budget >= 1 ? budget : 1,
-    ...(env.N8N_LIBPETRI_DIAGNOSTICS === '1' ? { onDiagnostic: (m: string) => console.warn(`[n8n-libpetri] ${m}`) } : {}),
+    // `process.stderr.write`, not `console.warn`: n8n-core's vitest config does not print
+    // captured console output, so a diagnostic written through the console never reaches
+    // `conformance-results/<label>.test.log` — which is where the budget leg reads the
+    // per-workflow k-safety restrictions from (`scripts/run-conformance.sh`).
+    ...(env.N8N_LIBPETRI_DIAGNOSTICS === '1'
+      ? { onDiagnostic: (m: string) => process.stderr.write(`[n8n-libpetri] ${m}\n`) }
+      : {}),
   });
   return { engine: 'libpetri', registration };
 }

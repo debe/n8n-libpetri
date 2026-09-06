@@ -42,7 +42,8 @@ import { Marking, PrecompiledNetExecutor, type EventStore, type Place, type Toke
 import type { ExecutionBaseError, IRunExecutionData, Workflow } from 'n8n-workflow';
 import { decodeExecutionData, encodeMarking, type EncodeMode } from '../codec.js';
 import {
-  analyse, compile, structuralHash, type CompiledWorkflow, type PlaceRole, type WorkflowDescription,
+  analyse, compile, structuralHash, type CompiledWorkflow, type NodeGadget, type PlaceRole,
+  type WorkflowDescription,
 } from '../compiler/index.js';
 import { describeWorkflow } from '../n8n/adapter.js';
 import type {
@@ -79,10 +80,30 @@ const REAPED_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
   'in-data', 'in-empty', 'edge-data', 'edge-empty', 'ready', 'hasdata',
 ]);
 
+/**
+ * The places one `X_start` firing takes a token from — one per activation, so the number of
+ * `X_start` firings since a marking snapshot is the number of tokens that snapshot holds on
+ * each of them and the net no longer does (`PetriScheduler.haltPending`).
+ */
+function startInputPlaces(g: NodeGadget): readonly Place<unknown>[] {
+  if (g.form === 'direct') return g.in === null ? [] : [g.in];
+  if (g.form === 'or') {
+    const hasdata = g.inputs[0]?.hasdata ?? null;
+    return hasdata === null ? [] : [hasdata];
+  }
+  const places: Place<unknown>[] = [];
+  for (const i of g.inputs) {
+    const p = g.form === 'choose-branch' && i.required ? i.readyData : i.ready;
+    if (p !== null) places.push(p);
+  }
+  return places;
+}
+
 export class PetriScheduler implements WorkflowScheduler {
   private readonly state: SchedulerState = {
-    executionError: undefined, closeFunction: undefined, fatal: undefined, haltMarking: undefined,
-    waitingNode: undefined,
+    haltError: undefined, leftoverError: undefined, closeFunction: undefined, fatal: undefined,
+    haltMarking: undefined, haltStarts: undefined, waitingNode: undefined, waitTillAtStart: undefined,
+    starts: new Map(), inFlight: 0, maxInFlight: 0,
   };
   private readonly cache: CompiledWorkflowCache;
   /** Diagnostics of the last `run()`, in order. */
@@ -92,12 +113,31 @@ export class PetriScheduler implements WorkflowScheduler {
   /** How the last `run()` ended. */
   outcome: SchedulerOutcome | undefined;
 
+  /**
+   * The most node runs (`X_run` actions, i.e. `host.runNode` calls) that were ever in flight
+   * at once during the last `run()` — README "Concurrency". Bounded by the effective budget
+   * k, because every such activation holds a `_budget` unit. It is a **lower bound** on the
+   * `_budget + Σ(running + ok + retry) = k` semiflow rather than a reading of it: a node
+   * waiting between retries and one recording an exhausted attempt each hold their unit
+   * without running anything, so the tokens in flight can exceed this number.
+   */
+  get maxInFlight(): number {
+    return this.state.maxInFlight;
+  }
+
   constructor(private readonly options: PetriSchedulerOptions) {
     this.cache = options.cache ?? new CompiledWorkflowCache();
   }
 
+  /**
+   * The contract value patch 0001 documents as "the error of the node that stopped the
+   * execution": the halt error if one activation ended the execution, otherwise what the
+   * last activation to complete left in n8n's per-iteration field. Above k = 1 the halt wins
+   * over every later completion, so a sibling that fails, retries or starts after the halt
+   * can no longer erase it (see {@link SchedulerState.haltError}).
+   */
   get executionError(): ExecutionBaseError | undefined {
-    return this.state.executionError;
+    return this.state.haltError ?? this.state.leftoverError;
   }
 
   get closeFunction(): Promise<void> | undefined {
@@ -134,10 +174,16 @@ export class PetriScheduler implements WorkflowScheduler {
     hooks: SchedulerHooks,
   ): Promise<void> {
     this.diagnostics.length = 0;
-    this.state.executionError = undefined;
+    this.state.haltError = undefined;
+    this.state.leftoverError = undefined;
     this.state.fatal = undefined;
     this.state.haltMarking = undefined;
+    this.state.haltStarts = undefined;
     this.state.waitingNode = undefined;
+    this.state.waitTillAtStart = runExecutionData.waitTill;
+    this.state.starts.clear();
+    this.state.inFlight = 0;
+    this.state.maxInFlight = 0;
 
     if (workflow.settings.executionOrder !== 'v1') {
       this.outcome = 'legacy';
@@ -145,7 +191,9 @@ export class PetriScheduler implements WorkflowScheduler {
       try {
         await legacy.run(host, workflow, runExecutionData, hooks);
       } finally {
-        this.state.executionError = legacy.executionError;
+        // The legacy scheduler computed the contract value itself; take it whole.
+        this.state.haltError = legacy.executionError;
+        this.state.leftoverError = undefined;
         this.state.closeFunction = legacy.closeFunction;
       }
       return;
@@ -162,6 +210,14 @@ export class PetriScheduler implements WorkflowScheduler {
     const compiled = this.compileDescription(description);
     this.compiled = compiled;
     for (const d of compiled.diagnostics) this.diagnostic(`compile: ${d}`);
+    if (compiled.budgetRestriction !== null && compiled.requestedBudget > 1) {
+      // The only place a budget leg can see that this workflow did *not* run at k: the
+      // compiler's k-safety check lowered it (README "Concurrency budget and its safety
+      // condition"). `scripts/run-conformance.sh` collects these into `<label>.budget.txt`.
+      this.diagnostic(
+        `budget: k=${compiled.requestedBudget} lowered to ${compiled.effectiveBudget} ` +
+        `(${compiled.budgetRestriction.reason}: ${compiled.budgetRestriction.detail})`);
+    }
 
     const initial = decodeExecutionData(compiled, executionData, {
       runData: runExecutionData.resultData.runData,
@@ -292,14 +348,34 @@ export class PetriScheduler implements WorkflowScheduler {
    */
   private haltPending(compiled: CompiledWorkflow, marking: Marking): Marking {
     const snapshot = this.state.haltMarking;
+    const startsAtSnapshot = this.state.haltStarts;
     this.state.haltMarking = undefined;
+    this.state.haltStarts = undefined;
     if (snapshot === undefined) return marking;
+    // Above k = 1 the snapshot can be one or more activations ahead of the reap: it is taken
+    // when the halting action writes its branch, and `_halt` only reaches the marking when
+    // that action resolves, so another node's `X_start` may consume a token in between and
+    // run it. Those activations are already recorded in `runData`; re-encoding them would
+    // put a second entry for the same run on `nodeExecutionStack` (ADR 0006). Drop as many
+    // of the snapshot's oldest tokens per start-input place as that node started since.
+    const drop = new Map<string, number>();
+    for (const g of compiled.netMap.nodes) {
+      const started = (this.state.starts.get(g.node) ?? 0) - (startsAtSnapshot?.get(g.node) ?? 0);
+      if (started <= 0) continue;
+      for (const p of startInputPlaces(g)) drop.set(p.name, started);
+      this.diagnostic(
+        `halted: node '${g.node}' started ${started} activation(s) after the halt snapshot; ` +
+        'not re-encoded as pending (k > 1)');
+    }
     const merged = Marking.empty();
     const add = (place: Place<unknown>, tokens: readonly Token<unknown>[]): void => {
       for (const t of tokens) merged.addToken(place, t);
     };
     for (const p of compiled.netMap.places) {
-      if (REAPED_ROLES.has(p.role)) add(p.place, snapshot.peekTokens(p.place));
+      if (REAPED_ROLES.has(p.role)) {
+        // FIFO: a start takes the oldest token, so the ones it took are at the front.
+        add(p.place, snapshot.peekTokens(p.place).slice(drop.get(p.name) ?? 0));
+      }
       add(p.place, marking.peekTokens(p.place));
     }
     return merged;

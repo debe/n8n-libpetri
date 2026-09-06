@@ -64,7 +64,23 @@ export const ENV_KEY = 'n8n';
 
 /** The per-execution fields `StackScheduler` keeps on itself, shared between scheduler and actions. */
 export interface SchedulerState {
-  executionError: ExecutionBaseError | undefined;
+  /**
+   * The error that ended the execution: n8n's `this.executionError` at the loop's `break`.
+   * Written **once**, by the activation whose failure took the halt branch, and never
+   * overwritten — above k = 1 a sibling is still running and its own catch, retry or start
+   * would otherwise clear it, and `processSuccessExecution` would persist a halted
+   * execution as a finished success (`workflow-execute.ts:2250-2255`).
+   */
+  haltError: ExecutionBaseError | undefined;
+  /**
+   * What n8n's per-iteration `this.executionError` still held when the last activation to
+   * *complete* finished: `undefined` unless that activation ended on an error its `onError`
+   * policy continued past. n8n clears the field at the top of every iteration (line 56) and
+   * every retry (line 107), so only the last iteration's value survives its `run()`; at
+   * k = 1 completion order *is* iteration order, so this is byte-identical, and above it the
+   * value follows completion order (divergence #19).
+   */
+  leftoverError: ExecutionBaseError | undefined;
   closeFunction: Promise<void> | undefined;
   /** An error the mirrored loop would have thrown out of `run()`; rethrown after quiescence. */
   fatal: unknown | undefined;
@@ -76,8 +92,32 @@ export interface SchedulerState {
    * after the failed entry the host pushed.
    */
   haltMarking: Marking | undefined;
-  /** The node that put the execution to wait; see {@link claimWait}. */
+  /**
+   * The start counts as they were when {@link SchedulerState.haltMarking} was taken. The
+   * snapshot is a marking, so it also holds the input tokens of activations that started
+   * between the instant it was taken and the instant `_halt` reached the marking; those
+   * are subtracted by the difference of these counts (`PetriScheduler.haltPending`).
+   */
+  haltStarts: ReadonlyMap<string, number> | undefined;
+  /** The node that put the execution to wait; see {@link observeWait}. */
   waitingNode: string | undefined;
+  /**
+   * `runExecutionData.waitTill` as `run()` found it. A field still holding that value was
+   * not set by any node of this execution, so no node may claim it and no recorded status
+   * is corrected: that is n8n's own reading of the field.
+   */
+  waitTillAtStart: Date | undefined;
+  /** How often each node's `X_start` / `X_start_unmet` has fired in this execution. */
+  readonly starts: Map<string, number>;
+  /**
+   * Node runs currently in flight: activations inside an `X_run` action, which is the only
+   * transition that calls `host.runNode`. A retry *wait* (`X_retry_wait`) and the exhausted
+   * recording (`X_exhausted`) hold a budget unit without running the node, and are not
+   * counted — README "Concurrency" defines the observable as concurrent **runs**.
+   */
+  inFlight: number;
+  /** The high-water mark of {@link SchedulerState.inFlight}: never above the budget k. */
+  maxInFlight: number;
 }
 
 export interface ExecutionEnv {
@@ -141,6 +181,23 @@ async function postRun(
 }
 
 /**
+ * What one node's attempt makes of `runExecutionData.waitTill` (divergence #15).
+ *
+ * - `claimed` — this node put the execution to wait: it takes the `waiting` branch and is
+ *   pushed back on `nodeExecutionStack` to re-run on resume, as n8n does.
+ * - `foreign` — the field is set, but another node claimed it. The field changed while this
+ *   node was running, so `host.createTaskData` stamped `executionStatus: 'waiting'` on a run
+ *   that in fact completed; the stamp is corrected to what the run actually was. Reachable
+ *   only above k = 1.
+ * - `none` — no pause, or a pause that was already there when this node started and that
+ *   nobody has claimed (n8n's own reading of the field, kept byte-identical).
+ */
+type WaitClaim = 'claimed' | 'foreign' | 'none';
+
+/** A memoised {@link observeWait} for one attempt: probed once, read by every branch. */
+type WaitProbe = () => WaitClaim;
+
+/**
  * Did **this** node put the execution to wait (n8n's `if (runExecutionData.waitTill)`)?
  * The field is execution-global, which is unambiguous for n8n — one node runs at a time and
  * `handleWaitingState` clears it before the scheduler runs (`workflow-execute.ts:1502-1503`,
@@ -151,20 +208,41 @@ async function postRun(
  * changed during this node's own attempt (`before` is read just ahead of its `runNode`), and
  * the first node to claim it keeps it. At k = 1 `before` is always `undefined` and no other
  * node can be between the two, so this is byte-identical to n8n's test.
+ *
+ * {@link probeWait} makes the claim in the same synchronous turn in which the node's own
+ * `runNode` resolves, so the claim order is the order the runs finished, not the order the
+ * recording paths happen to reach this test. What is left undecidable from outside the node
+ * — a node that sets the field and then keeps working while a sibling finishes — is a
+ * refused claim with a diagnostic (divergence #15).
  */
-function claimWait(env: ExecutionEnv, executionNode: INode, before: Date | undefined): boolean {
+function observeWait(env: ExecutionEnv, executionNode: INode, before: Date | undefined): WaitClaim {
   const { state, runExecutionData } = env;
   const waitTill = runExecutionData.waitTill;
-  if (!waitTill) return false;
-  if (state.waitingNode === executionNode.name) return true;
+  if (!waitTill) return 'none';
+  if (state.waitingNode === executionNode.name) return 'claimed';
+  // The value `run()` started with: no node of this execution set it, so this is n8n's own
+  // reading of the field (unreachable under v1 — `handleWaitingState` clears it at
+  // `workflow-execute.ts:1502-1503` before the scheduler runs).
+  if (waitTill === state.waitTillAtStart) return 'none';
   if (state.waitingNode === undefined && waitTill !== before) {
     state.waitingNode = executionNode.name;
-    return true;
+    return 'claimed';
   }
+  // Some node of this execution set it and this is not that node: either it has already
+  // claimed, or it is still running and will (this node started after the field changed).
   env.diagnostic(
     `node '${executionNode.name}': the execution was put to wait while this node was running` +
     `${state.waitingNode === undefined ? '' : ` (by '${state.waitingNode}')`}; recorded as a normal run (k > 1)`);
-  return false;
+  return 'foreign';
+}
+
+/**
+ * The claim probe of one attempt. Call it in the same turn as the node's own `runNode`
+ * resolution; every later branch reads the memoised answer.
+ */
+function probeWait(env: ExecutionEnv, executionNode: INode, before: Date | undefined): WaitProbe {
+  let claim: WaitClaim | undefined;
+  return () => (claim ??= observeWait(env, executionNode, before));
 }
 
 /**
@@ -179,16 +257,19 @@ async function finishSuccess(
   taskStartedData: ITaskStartedData,
   runIndex: number,
   raw: INodeExecutionData[][] | null | undefined,
-  waitTillBefore: Date | undefined,
+  wait: WaitProbe,
 ): Promise<Outcome> {
   const { host, runExecutionData } = env;
   let nodeSuccessData = host.assignPairedItems(raw, executionData);
   if (nodeSuccessData) runExecutionData.resultData.lastNodeExecuted = executionData.node.name;
   nodeSuccessData = host.ensureAlwaysOutputData(nodeSuccessData, executionData) ?? null;
-  if (nodeSuccessData === null && !claimWait(env, executionNode, waitTillBefore)) {
+  if (nodeSuccessData === null && wait() !== 'claimed') {
+    // `continue executionLoop`: the iteration ends here, with n8n's field cleared by the
+    // successful try and nothing recorded.
+    env.state.leftoverError = undefined;
     return { kind: 'ok', nodeSuccessData: [], runIndex };
   }
-  return record(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, undefined, waitTillBefore);
+  return record(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, undefined, wait);
 }
 
 /**
@@ -201,8 +282,10 @@ async function finishSuccess(
  *
  * `executionError` is this attempt's own (n8n's `this.executionError` is one field because
  * one node runs at a time; above k = 1 a sibling's failure must not be attributed to a node
- * that was already running). The shared `state.executionError` is kept as the contract
- * value: the error of the last node that failed.
+ * that was already running). This is the end of one n8n loop iteration, so it is also where
+ * the contract value is written: `haltError` when the error stops the execution, otherwise
+ * the `leftoverError` this iteration leaves behind — exactly the two things n8n's single
+ * field holds at the `break` and at the top of the next iteration.
  */
 async function record(
   env: ExecutionEnv,
@@ -212,7 +295,7 @@ async function record(
   runIndex: number,
   nodeSuccessDataIn: INodeExecutionData[][] | null | undefined,
   executionError: ExecutionBaseError | undefined,
-  waitTillBefore: Date | undefined,
+  wait: WaitProbe,
 ): Promise<Outcome> {
   const { host, runExecutionData, hooks } = env;
   let nodeSuccessData = nodeSuccessDataIn;
@@ -220,6 +303,13 @@ async function record(
     runExecutionData.resultData.runData[executionNode.name] = [];
   }
   const taskData = host.createTaskData(taskStartedData, executionData);
+  if (wait() === 'foreign' && taskData.executionStatus === 'waiting') {
+    // `createTaskData` reads the execution-global `waitTill` (`workflow-execute.ts:1996`).
+    // Another node claimed the pause while this one was running, so this run finished
+    // normally and must be recorded as such — the k = 1 status of the same run
+    // (divergence #15). Unreachable at k = 1: there the claimant is this node.
+    taskData.executionStatus = 'success';
+  }
   host.recordDynamicCredentialsUser();
 
   if (executionError !== undefined) {
@@ -227,15 +317,21 @@ async function record(
       executionNode, executionData, taskData, executionError, nodeSuccessData, runIndex, hooks,
     });
     nodeSuccessData = outcome.nodeSuccessData;
-    if (!outcome.continueExecution) return { kind: 'halt' };
+    if (!outcome.continueExecution) {
+      env.state.haltError ??= executionError;
+      return { kind: 'halt' };
+    }
   }
+  // The iteration completes; n8n's field still holds this attempt's error (nothing clears it
+  // until the *next* iteration starts), and `undefined` when the attempt succeeded.
+  env.state.leftoverError = executionError;
 
   host.normalizeNodeErrors(nodeSuccessData!);
   taskData.data = { main: nodeSuccessData } as ITaskDataConnections;
   host.rewireOutputLog(executionNode, taskData, nodeSuccessData!, runIndex);
   host.upsertTaskData(executionNode.name, runIndex, taskData);
 
-  if (claimWait(env, executionNode, waitTillBefore)) {
+  if (wait() === 'claimed') {
     await hooks.runHook('nodeExecuteAfter', [executionNode.name, taskData, runExecutionData]);
     // n8n: pushExecutionStack(executionData) — the codec writes the waiting token there.
     return { kind: 'waiting', executionData };
@@ -252,15 +348,15 @@ async function record(
 }
 
 /**
- * The `X/retry` outcome. n8n clears `this.executionError` at the top of the *next* try
- * (line 107) and always reaches it, so a transient failure is never observable outside the
- * retry loop. The net can stop between attempts (`_pause`, or `executor.close()` on a
- * cancellation: `X_retry_wait` never fires), and a leftover `executionError` would make
- * `processRunExecutionData` report the execution as failed instead of canceled
- * (`workflow-execute.ts:2240`). The failing final attempt re-sets it through {@link exhaust}.
+ * The `X/retry` outcome: no iteration has completed, so nothing is written to the contract
+ * value. n8n clears `this.executionError` at the top of the *next* try (line 107) and always
+ * reaches it, so a transient failure is never observable outside the retry loop. The net can
+ * stop between attempts (`_pause`, or `executor.close()` on a cancellation: `X_retry_wait`
+ * never fires), and an error left behind would make `processRunExecutionData` report the
+ * execution as failed instead of canceled (`workflow-execute.ts:2240`). The final attempt
+ * writes the value it ends on through {@link record}.
  */
-function retryOutcome(state: SchedulerState, payload: RetryPayload): Outcome {
-  state.executionError = undefined;
+function retryOutcome(payload: RetryPayload): Outcome {
   return { kind: 'retry', payload };
 }
 
@@ -276,29 +372,30 @@ function retryOutcome(state: SchedulerState, payload: RetryPayload): Outcome {
  * has recorded nothing yet, so it returns the index n8n kept in its local variable.
  */
 async function softAttempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): Promise<Outcome> {
-  const { host, workflow, runExecutionData, state } = env;
+  const { host, workflow, runExecutionData } = env;
   const { executionData } = payload;
   const executionNode = executionData.node;
   const taskStartedData = payload.taskStartedData!;
   const runIndex = host.computeRunIndex(executionData);
   const waitTillBefore = runExecutionData.waitTill;
+  const wait = probeWait(env, executionNode, waitTillBefore);
   const again = (reason: RetryReason): Outcome =>
-    retryOutcome(state, { executionData, attempt: payload.attempt + 1, taskStartedData, waitTillBefore, reason });
+    retryOutcome({ executionData, attempt: payload.attempt + 1, taskStartedData, waitTillBefore, reason });
   try {
     const runNodeData = await host.runNode(
       workflow, executionData, runExecutionData, runIndex, host.additionalData, host.mode, host.abortSignal);
+    wait(); // claim in the same turn as the resolution (divergence #15)
     if (g.retry !== null && checkFailure(runNodeData)) {
       return again({ kind: 'soft', runNodeData: runNodeData as IRunNodeResponse });
     }
     const nodeSuccessData = await postRun(env, executionNode, executionData, taskStartedData, runIndex, runNodeData);
-    return await finishSuccess(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, waitTillBefore);
+    return await finishSuccess(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, wait);
   } catch (error) {
     // A throw leaves the inner loop for n8n's outer `catch` (line 209); the next try runs the
     // whole body again, so it is a plain error retry from here on.
     const executionError = host.reportNodeExecutionError(error, executionNode, workflow);
-    state.executionError = executionError;
     if (g.retry !== null) return again({ kind: 'error', error: executionError });
-    return record(env, executionNode, executionData, taskStartedData, runIndex, null, executionError, waitTillBefore);
+    return record(env, executionNode, executionData, taskStartedData, runIndex, null, executionError, wait);
   }
 }
 
@@ -318,7 +415,9 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
   // Lines 53–56 (line 107 on later tries): fresh per-attempt state.
   const subNodeExecutionResults: EngineResponse = { actionResponses: [], metadata: {} };
   let nodeSuccessData: INodeExecutionData[][] | null | undefined = null;
-  state.executionError = undefined;
+  // n8n's line 56 (`this.executionError = undefined`) is not mirrored: it clears a field
+  // this activation does not own. What the previous iteration left is `state.leftoverError`,
+  // and this activation overwrites it when it completes (see {@link record}).
 
   let taskStartedData: ITaskStartedData;
   if (payload.attempt === 0) {
@@ -337,7 +436,10 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
   let canRetry = g.retry !== null;
   if (payload.attempt === 0) {
     // Lines 74–76: a filtered-out node is skipped entirely — no run, no task data, no hook.
-    if (host.isNodeFilteredOut(executionNode.name)) return { kind: 'ok', nodeSuccessData: [], runIndex };
+    if (host.isNodeFilteredOut(executionNode.name)) {
+      state.leftoverError = undefined;
+      return { kind: 'ok', nodeSuccessData: [], runIndex };
+    }
     // Lines 78–82: n8n defers the entry to the end of the stack and, once it comes round
     // again unchanged, throws its endless-loop error. Under v1 this is only reachable for an
     // entry without `data.main`, which no start action produces; a decoded one is dropped.
@@ -345,6 +447,7 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
       env.diagnostic(
         `node '${executionNode.name}': ensureInputData is false; n8n would defer the entry to the end of the ` +
         'stack (and then stop with its endless-loop error); the activation is dropped and nothing is recorded');
+      state.leftoverError = undefined;
       return { kind: 'ok', nodeSuccessData: [], runIndex };
     }
     // Lines 95–97.
@@ -356,10 +459,12 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
   }
 
   const waitTillBefore = runExecutionData.waitTill;
+  const wait = probeWait(env, executionNode, waitTillBefore);
   try {
     const pinnedOutput = host.getPinnedOutput(executionNode); // line 120
     if (pinnedOutput) {
       nodeSuccessData = pinnedOutput;
+      wait(); // no `runNode` to resolve; this is the same turn `waitTillBefore` was read in
     } else {
       // README "Expression references": the twin's token fails with n8n's own error.
       if (payload.unmetReference !== undefined) throw new UnmetReferenceError(payload.unmetReference);
@@ -368,45 +473,43 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
         workflow, executionData, runExecutionData, runIndex, host.additionalData, host.mode, host.abortSignal,
         subNodeExecutionResults,
       ); // lines 132–141
+      wait(); // claim in the same turn as the resolution (divergence #15)
       // Lines 143–160: the soft-failure re-run; the net decides whether a try is left.
       if (canRetry && checkFailure(runNodeData)) {
-        return retryOutcome(state, { executionData, attempt: payload.attempt + 1, taskStartedData, waitTillBefore, reason: { kind: 'soft', runNodeData: runNodeData as IRunNodeResponse } });
+        return retryOutcome({ executionData, attempt: payload.attempt + 1, taskStartedData, waitTillBefore, reason: { kind: 'soft', runNodeData: runNodeData as IRunNodeResponse } });
       }
       nodeSuccessData = await postRun(env, executionNode, executionData, taskStartedData, runIndex, runNodeData);
     }
-    return await finishSuccess(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, waitTillBefore);
+    return await finishSuccess(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, wait);
   } catch (error) {
     const executionError = host.reportNodeExecutionError(error, executionNode, workflow); // line 210
-    state.executionError = executionError;
     if (canRetry) {
-      return retryOutcome(state, { executionData, attempt: payload.attempt + 1, taskStartedData, waitTillBefore, reason: { kind: 'error', error: executionError } });
+      return retryOutcome({ executionData, attempt: payload.attempt + 1, taskStartedData, waitTillBefore, reason: { kind: 'error', error: executionError } });
     }
-    return record(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, executionError, waitTillBefore);
+    return record(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, executionError, wait);
   }
 }
 
 /** `X_exhausted`: the after-loop handling of the last attempt. */
 async function exhaust(env: ExecutionEnv, payload: RetryPayload): Promise<Outcome> {
-  const { host, state } = env;
+  const { host } = env;
   const { executionData, taskStartedData, reason } = payload;
   const executionNode = executionData.node;
   const runIndex = host.computeRunIndex(executionData);
-  // The attempt that produced this token read `waitTill` before its own `runNode`.
-  const waitTillBefore = payload.waitTillBefore;
+  // The attempt that produced this token read `waitTill` before its own `runNode`; probing
+  // here is the earliest point after that run, since the run itself is already over.
+  const wait = probeWait(env, executionNode, payload.waitTillBefore);
+  wait();
   if (reason.kind === 'error') {
-    const executionError = reason.error as ExecutionBaseError;
-    state.executionError = executionError;
-    return record(env, executionNode, executionData, taskStartedData, runIndex, null, executionError, waitTillBefore);
+    return record(env, executionNode, executionData, taskStartedData, runIndex, null, reason.error as ExecutionBaseError, wait);
   }
   // A soft failure with no try left is processed like any other output (line 176 on).
-  state.executionError = undefined;
   try {
     const nodeSuccessData = await postRun(env, executionNode, executionData, taskStartedData, runIndex, reason.runNodeData);
-    return await finishSuccess(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, waitTillBefore);
+    return await finishSuccess(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, wait);
   } catch (error) {
     const executionError = host.reportNodeExecutionError(error, executionNode, env.workflow);
-    state.executionError = executionError;
-    return record(env, executionNode, executionData, taskStartedData, runIndex, null, executionError, waitTillBefore);
+    return record(env, executionNode, executionData, taskStartedData, runIndex, null, executionError, wait);
   }
 }
 
@@ -457,7 +560,7 @@ function asExecutionError(error: unknown): ExecutionBaseError {
 
 /**
  * Runs `body` and writes its outcome; anything it throws (the mirrored loop would have
- * rejected `run()`) sets `executionError`, becomes the execution's fatal error and takes
+ * rejected `run()`) becomes the contract's halt error and the execution's fatal error, and takes
  * the halt branch — `stopped` (with `ran: true`, so nothing is re-queued) when the gadget
  * has no halt alternative — so the net quiesces and the token is never lost.
  */
@@ -474,13 +577,21 @@ async function guarded(
     outcome = await body();
   } catch (error) {
     env.state.fatal ??= error;
-    env.state.executionError = asExecutionError(error);
-    env.diagnostic(`node '${g.node}': fatal error outside n8n's node try (run() rejects after quiescence): ${env.state.executionError.message}`);
+    const fatal = asExecutionError(error);
+    // It ends the execution, so it is a halt error: write-once, never cleared by a sibling.
+    env.state.haltError ??= fatal;
+    env.diagnostic(`node '${g.node}': fatal error outside n8n's node try (run() rejects after quiescence): ${fatal.message}`);
     outcome = g.onError === 'stopWorkflow' ? { kind: 'halt' } : { kind: 'stopped', executionData, ran: true };
   }
   // The halt token this writes makes `_halt_reap` clear every pending activation on the next
   // cycle; n8n keeps them on its stack, so the marking is captured here, while they exist.
-  if (outcome.kind === 'halt') env.state.haltMarking ??= env.snapshotMarking();
+  // The start counts go with it: the marking is a *lower bound* on what the reap destroys —
+  // `_halt` only reaches the marking when this action resolves, and above k = 1 another
+  // node's `X_start` can consume one of these tokens in between (ADR 0006).
+  if (outcome.kind === 'halt' && env.state.haltMarking === undefined) {
+    env.state.haltMarking = env.snapshotMarking();
+    env.state.haltStarts = new Map(env.state.starts);
+  }
   write(ctx, g, map, outcome);
 }
 
@@ -537,6 +648,7 @@ function startInput(ctx: TransitionContext, env: ExecutionEnv, g: NodeGadget, ma
 function startAction(g: NodeGadget, map: NetMapView, unmetReference?: string): TransitionAction {
   return async (ctx) => {
     const env = envOf(ctx);
+    env.state.starts.set(g.node, (env.state.starts.get(g.node) ?? 0) + 1);
     const executionData = startInput(ctx, env, g, map);
     const payload: RunPayload = unmetReference === undefined
       ? { executionData, attempt: 0 }
@@ -549,8 +661,15 @@ function startAction(g: NodeGadget, map: NetMapView, unmetReference?: string): T
 
 function runAction(g: NodeGadget, map: NetMapView): TransitionAction {
   return async (ctx) => {
+    const { state } = envOf(ctx);
     const payload = ctx.input(g.running) as RunPayload;
-    await guarded(ctx, g, map, payload.executionData, () => attempt(envOf(ctx), g, payload));
+    state.inFlight++;
+    if (state.inFlight > state.maxInFlight) state.maxInFlight = state.inFlight;
+    try {
+      await guarded(ctx, g, map, payload.executionData, () => attempt(envOf(ctx), g, payload));
+    } finally {
+      state.inFlight--;
+    }
     ctx.output(g.idle, null);
   };
 }

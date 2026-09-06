@@ -47,7 +47,8 @@
     "build": "tsup",
     "check": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench": "vitest bench --run"
   },
   "dependencies": {
     "libpetri": "^4.1.0"
