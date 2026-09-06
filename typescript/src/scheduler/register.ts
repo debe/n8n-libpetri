@@ -29,16 +29,38 @@ export interface PetriSchedulerRegistration {
   readonly cache: CompiledWorkflowCache;
 }
 
+/**
+ * The diagnostic the registered factory emits the **first time n8n constructs a scheduler
+ * through it**, per module instance (i.e. per vitest test file).
+ *
+ * Registering a factory proves nothing about a conformance leg. A scope whose tests never
+ * reach `processRunExecutionData` — `packages/workflow`, which does not depend on n8n-core
+ * at all, or `packages/cli`, whose tests mock `n8n-core`'s `WorkflowExecute` before they get
+ * there — runs every case with the engine registered and never entered, and its junit is
+ * then evidence of patch neutrality, not of the engine (`docs/conformance-final.md`
+ * "Scopes"). One line per file that actually entered the engine turns "is this leg real?"
+ * into a number `scripts/run-conformance.sh` counts into `<label>.diagnostics.txt`.
+ */
+export const ENGINE_ENTERED_DIAGNOSTIC =
+  'engine entered: n8n constructed a scheduler through the registered factory';
+
 export function registerPetriScheduler(options: RegisterPetriSchedulerOptions): PetriSchedulerRegistration {
   const cache = new CompiledWorkflowCache(options.cacheCapacity ?? 16);
-  const factory: WorkflowSchedulerFactory = () => new PetriScheduler({
-    nodeHelpers: options.nodeHelpers,
-    legacy: () => new options.StackScheduler(),
-    budget: options.budget ?? 1,
-    cache,
-    ...(options.eventStore === undefined ? {} : { eventStore: options.eventStore }),
-    ...(options.onDiagnostic === undefined ? {} : { onDiagnostic: options.onDiagnostic }),
-  });
+  let entered = false;
+  const factory: WorkflowSchedulerFactory = () => {
+    if (!entered) {
+      entered = true;
+      options.onDiagnostic?.(ENGINE_ENTERED_DIAGNOSTIC);
+    }
+    return new PetriScheduler({
+      nodeHelpers: options.nodeHelpers,
+      legacy: () => new options.StackScheduler(),
+      budget: options.budget ?? 1,
+      cache,
+      ...(options.eventStore === undefined ? {} : { eventStore: options.eventStore }),
+      ...(options.onDiagnostic === undefined ? {} : { onDiagnostic: options.onDiagnostic }),
+    });
+  };
   options.setWorkflowSchedulerFactory(factory);
   return { factory, cache };
 }

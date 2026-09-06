@@ -309,7 +309,11 @@ describe('undrained places', () => {
     const m = c.sharedMarking();
     const t = items({ t: 1 });
     const ok: OkPayload = { nodeSuccessData: [t, []], runIndex: 4 };
-    put(m, gadget(c, 'IF').ok!, [ok]);
+    // IF routes two outputs, so `X_run` writes the outcome to `X/ok_0` and `X/ok_1` and
+    // there is no single `X/ok` (gadget.ts, SPLIT_ROUTING_ABOVE = 0). Each `X_route_o`
+    // would have drained its own; the encoder does the same, per output.
+    expect(gadget(c, 'IF').ok).toBeNull();
+    for (const o of gadget(c, 'IF').outputs) put(m, o.ok!, [ok]);
     const x = encodeMarking(c, live(m), emptyState(), { mode: 'cancelled', node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.A, data: { main: [t] }, source: { main: [src('IF', 0, 4)] } }]);
   });

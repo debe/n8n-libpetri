@@ -7,7 +7,7 @@
  */
 import type { WorkflowScheduler, WorkflowSchedulerFactory } from '../../src/n8n/host.js';
 import { ENGINE_ENV, setupN8nVitest } from '../../src/n8n-vitest-setup.js';
-import { PetriScheduler, registerPetriScheduler } from '../../src/scheduler/index.js';
+import { ENGINE_ENTERED_DIAGNOSTIC, PetriScheduler, registerPetriScheduler } from '../../src/scheduler/index.js';
 import { linear } from '../fixtures/workflows.js';
 import { FakeHost, fakeHooks, fakeNodeHelpers, fakeWorkflow, items, newRunExecutionData } from '../scheduler/support.js';
 
@@ -26,6 +26,26 @@ function registrySpy() {
 }
 
 describe('registerPetriScheduler', () => {
+  it('reports the first time n8n actually constructs a scheduler, once per registration', () => {
+    // Registering proves nothing about a conformance leg: `packages/cli` registers the
+    // engine in all 1104 of its unit files and constructs it in none, because every test
+    // that would reach `processRunExecutionData` mocks `n8n-core` first. This line is what
+    // `<label>.diagnostics.txt` counts, so a leg with none is reported as "registered, never
+    // entered" instead of as an engine result (docs/conformance-final.md).
+    const messages: string[] = [];
+    const registry = registrySpy();
+    const reg = registerPetriScheduler({
+      setWorkflowSchedulerFactory: registry.set, nodeHelpers: fakeNodeHelpers,
+      StackScheduler: FakeStackScheduler, onDiagnostic: (m) => messages.push(m),
+    });
+    expect(messages, 'registration alone must say nothing').toEqual([]);
+    reg.factory();
+    reg.factory();
+    expect(messages).toEqual([ENGINE_ENTERED_DIAGNOSTIC]);
+    // The factory that was registered is the one that counts.
+    expect(registry.calls).toEqual([reg.factory]);
+  });
+
   it('registers one factory; every scheduler it creates is a fresh PetriScheduler sharing the registration\'s cache and budget', async () => {
     const registry = registrySpy();
     const reg = registerPetriScheduler({

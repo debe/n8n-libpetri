@@ -352,11 +352,14 @@ describe('orInputNodesOf', () => {
 
 describe('renderDiffReport', () => {
   it('leads with the tally, names the mechanism and states what happens-before could not check', async () => {
-    const result = await diffFixture(DIFFER_FIXTURES.find((f) => f.name === 'multiProducer')!, 1);
+    // `ifBothOutputs`, not `multiProducer`: since the budget refund moved to `X_done`
+    // (SPLIT_ROUTING_ABOVE = 0) `multiProducer` reproduces n8n's order exactly and its
+    // report names no mechanism at all — which is what row #20 being fixed means.
+    const result = await diffFixture(DIFFER_FIXTURES.find((f) => f.name === 'ifBothOutputs')!, 1);
     const report = renderDiffReport([result], 'T');
     expect(report).toContain('# T');
-    expect(report).toContain('## multiProducer @ k=1');
-    expect(report).toContain('divergence #20 (or-input-arm)');
+    expect(report).toContain('## ifBothOutputs @ k=1');
+    expect(report).toContain('divergence #2 (stranded-join)');
     expect(report).not.toContain('not in the register');
     // Never silent about an edge it did not compare.
     expect(report).toContain('n8n edge(s) the net never realised (not comparable)');
@@ -444,16 +447,21 @@ describe('StackReferenceScheduler', () => {
  * built to make the net's concurrency visible in the `executionIndex` order.
  */
 const DIVERGENT: Readonly<Record<string, { budgets: readonly number[]; rows: readonly number[]; novel: readonly string[] }>> = {
-  // The OR-input arm costs a scheduling cycle, so `B` takes the budget unit in it and the
-  // net runs breadth-first where priority = depth alone would have been depth-first: #20.
-  multiProducer: { budgets: [1, 2, 4], rows: [20], novel: [] },
+  // `multiProducer` is deliberately absent: it was the row #20 fixture (the OR-input arm
+  // costing a scheduling cycle), and since the budget refund moved onto `X_done` it
+  // reproduces n8n's `Trigger, A, C, B, C` exactly, at every budget.
   userCycle: { budgets: [1, 2, 4], rows: [5, 11], novel: [] },
-  ifBothOutputs: { budgets: [1, 2, 4], rows: [2, 11, 12], novel: [] },
+  // Row #12 (join-unshift) and row #11's ordering half are gone with row #20: the join now
+  // fires in the same cycle its shallower sibling would have. What is left is the stranded
+  // join (#2), the payload order of `C`'s two runs (#11) and which node ran *last* (#5).
+  ifBothOutputs: { budgets: [1, 2, 4], rows: [2, 5, 11], novel: [] },
   // `lastNodeExecuted` moves because the branches finish out of n8n's order: row #16.
   parallelBranches: { budgets: [2, 4], rows: [16], novel: [] },
   // The stop surface: only reachable because these four fixtures exist.
   haltInFlight: { budgets: [2, 4], rows: [17], novel: [] },
-  destinationStop: { budgets: [1, 2, 4], rows: [13, 20], novel: [] },
+  // Depth-first restored, so `C` (the destination) now runs before `B` and `_pause` lands
+  // first: `B` never runs at all, which is what row #13 says a pending entry does.
+  destinationStop: { budgets: [1, 2, 4], rows: [13], novel: [] },
   runFilter: { budgets: [1, 2, 4], rows: [1], novel: [] },
   // The two n8n conformance cases that regress at k > 1 (`docs/conformance-m3.md`).
   // `complicatedMulti` names no row at all: every difference is the concurrency the budget

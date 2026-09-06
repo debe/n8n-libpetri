@@ -36,13 +36,15 @@ describe('buildMatrix', () => {
     expect(m.regressions).toEqual([]);
     expect(m.fixed).toEqual([]);
     expect(m.added).toEqual([]);
-    expect(m.loopDriving).toEqual({ total: 36, passed: 36, failed: 0, skipped: 0, missing: 0 });
-    expect(m.helper).toEqual({ total: 1621, passed: 1621, failed: 0, skipped: 0, missing: 0 });
-    // Pattern order, although the junit lists the waiting cases' file first; branch-order
-    // has no rows and is absent.
+    expect(m.loopDriving).toEqual({ total: 44, passed: 44, failed: 0, skipped: 0, missing: 0 });
+    expect(m.helper).toEqual({ total: 1613, passed: 1613, failed: 0, skipped: 0, missing: 0 });
+    // Pattern order, although the junit lists the waiting cases' file first and
+    // webhook-respond-branch-order.test.ts last.
     expect([...m.byPattern.entries()]).toEqual([
       ['execution-order', { total: 19, passed: 19, failed: 0, skipped: 0, missing: 0 }],
       ['hook-order', { total: 6, passed: 6, failed: 0, skipped: 0, missing: 0 }],
+      ['branch-order', { total: 4, passed: 4, failed: 0, skipped: 0, missing: 0 }],
+      ['respond-layout', { total: 4, passed: 4, failed: 0, skipped: 0, missing: 0 }],
       ['waiting', { total: 9, passed: 9, failed: 0, skipped: 0, missing: 0 }],
       ['partial', { total: 2, passed: 2, failed: 0, skipped: 0, missing: 0 }],
     ]);
@@ -74,8 +76,8 @@ describe('buildMatrix', () => {
     expect(m.rows.find((r) => r.name === MISSING_CASE)).toMatchObject({ baseline: 'fail', candidate: 'missing', verdict: 'changed' });
     expect(m.fixed).toEqual([]);
     expect(m.added.map((r) => [r.name, r.verdict])).toEqual([['WorkflowExecute > brand new > case', 'new']]);
-    expect(m.loopDriving).toEqual({ total: 36, passed: 35, failed: 1, skipped: 0, missing: 0 });
-    expect(m.helper).toEqual({ total: 1622, passed: 1620, failed: 0, skipped: 1, missing: 1 });
+    expect(m.loopDriving).toEqual({ total: 44, passed: 43, failed: 1, skipped: 0, missing: 0 });
+    expect(m.helper).toEqual({ total: 1614, passed: 1612, failed: 0, skipped: 1, missing: 1 });
     expect(m.rows.at(-1)!.name).toBe('WorkflowExecute > brand new > case');
 
     const fixedBack = buildMatrix(weakerBaseline, baseline);
@@ -104,8 +106,8 @@ describe('renderMatrix', () => {
     const md = renderMatrix(buildMatrix(baseline, baseline, { baselineLabel: 'baseline', candidateLabel: 'patched' }));
     const lines = md.split('\n');
     expect(lines[0]).toBe('# Conformance: baseline vs patched');
-    expect(lines[2]).toBe('**Loop-driving cases passed: 36/36** — execution-order 19/19, hook-order 6/6, branch-order 0/0, waiting 9/9, partial 2/2.');
-    expect(lines[4]).toBe('Pure-helper cases passed: 1621/1621.');
+    expect(lines[2]).toBe('**Loop-driving cases passed: 44/44** — execution-order 19/19, hook-order 6/6, branch-order 4/4, respond-layout 4/4, waiting 9/9, partial 2/2.');
+    expect(lines[4]).toBe('Pure-helper cases passed: 1613/1613.');
     expect(lines[6]).toBe('Case set and outcomes: identical (1657 cases).');
     expect(md).not.toContain('## Regressions');
     expect(md).toContain('## Loop-driving cases');
@@ -118,7 +120,7 @@ describe('renderMatrix', () => {
     const candidate = derive((c) => (c.name === LOOP_CASE ? { ...c, status: 'fail' } : c),
       [{ file: 'src/execution-engine/__tests__/workflow-execute.test.ts', name: 'a | b', status: 'pass', time: 0 }]);
     const md = renderMatrix(buildMatrix(baseline, candidate));
-    expect(md).toContain('**Loop-driving cases passed: 35/36** (1 failed)');
+    expect(md).toContain('**Loop-driving cases passed: 43/44** (1 failed)');
     expect(md).toContain('Case set and outcomes: 1 regression(s), 0 fixed, 1 new, 0 missing, 1658 cases in total.');
     expect(md).toContain(`## Regressions\n\n| file | case | baseline | candidate |\n|---|---|---|---|\n| src/execution-engine/__tests__/workflow-execute.test.ts | ${LOOP_CASE} | pass | fail |`);
     expect(md).toContain('| a \\| b | missing | pass |');
@@ -146,8 +148,8 @@ describe('runCli', () => {
   it('exits 0 and prints the report for identical reports', () => {
     const i = io({ a: xml, b: xml });
     expect(runCli(['a', 'b', '--require-identical'], i)).toBe(0);
-    expect(i.out.join('')).toContain('**Loop-driving cases passed: 36/36**');
-    expect(i.err.join('')).toBe('loop-driving 36/36 passed, helper 1621/1621 passed, 0 regression(s), identical: true\n');
+    expect(i.out.join('')).toContain('**Loop-driving cases passed: 44/44**');
+    expect(i.err.join('')).toBe('loop-driving 44/44 passed, helper 1613/1613 passed, 0 regression(s), identical: true\n');
   });
 
   it('writes to --out, labels the engines and fails on a regression', () => {
@@ -161,7 +163,7 @@ describe('runCli', () => {
     expect(runCli(['base', 'cand', '--baseline-label', 'legacy', '--candidate-label', 'libpetri', '--out', 'r.md'], i)).toBe(1);
     expect(i.out).toEqual([]);
     expect(i.written['r.md']).toContain('# Conformance: legacy vs libpetri');
-    expect(i.err.join('')).toBe('loop-driving 35/36 passed, helper 1621/1621 passed, 1 regression(s)\n');
+    expect(i.err.join('')).toBe('loop-driving 43/44 passed, helper 1613/1613 passed, 1 regression(s)\n');
   });
 
   it('distinguishes "no regression" from "identical"', () => {

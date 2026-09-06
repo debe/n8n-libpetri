@@ -72,9 +72,15 @@ export function resetNames(t: Transition): string[] {
   return t.resets.map((a) => a.place.name).sort();
 }
 
-/** The `Transition` object of a node's role (first match), by name lookup on the bound net. */
-export function transitionOf(c: CompiledWorkflow, node: string, role: Parameters<typeof c.netMap.transitionFor>[1]): Transition {
-  const info = c.netMap.transitionFor(node, role);
+/**
+ * The `Transition` object of a node's role (first match, or the one carrying `port`), by
+ * name lookup on the bound net. `port` picks one `X_route_o` of a node that routes several
+ * outputs; without it a multi-output node's first route comes back.
+ */
+export function transitionOf(
+  c: CompiledWorkflow, node: string, role: Parameters<typeof c.netMap.transitionFor>[1], port?: number,
+): Transition {
+  const info = c.netMap.transitionFor(node, role, port);
   if (info === undefined) throw new Error(`no ${role} transition on ${node}`);
   return c.netMap.transitionObject(info.name);
 }

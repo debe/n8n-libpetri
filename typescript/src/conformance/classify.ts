@@ -31,12 +31,22 @@ export interface LoopDrivingPattern {
 }
 
 /**
- * The files whose cases can be loop-driving: `workflow-execute*.test.ts`, i.e.
- * `workflow-execute`, `workflow-execute-process-process-run-execution-data`,
- * `workflow-execute-run-node` and `workflow-execute-node-error-reporting`. Only the first
- * two run whole workflows through the loop; the patterns below select those cases.
+ * The files whose cases can be loop-driving:
+ *
+ * - `workflow-execute*.test.ts` — `workflow-execute`,
+ *   `workflow-execute-process-process-run-execution-data`, `workflow-execute-run-node` and
+ *   `workflow-execute-node-error-reporting`. Only the first two run whole workflows through
+ *   the loop; the patterns below select those cases.
+ * - `webhook-respond-branch-order.test.ts` — **added in M4**. Every one of its eight cases
+ *   calls `workflowExecute.run()` on a two-child fan-out and asserts which child ran first,
+ *   which is the loop and nothing else; M2 and M3 left it in the helper column, so the one
+ *   k > 1 regression it carries (divergence #17) was reported outside the headline. Both
+ *   of its describe blocks are matched, so the file rule alone does not decide.
+ *
+ * Widening this regex moves cases between the two columns, so the counts it yields on the
+ * baseline are pinned in `tests/conformance/classify.test.ts`.
  */
-export const LOOP_DRIVING_FILE = /(^|\/)workflow-execute[^/]*\.test\.ts$/;
+export const LOOP_DRIVING_FILE = /(^|\/)(workflow-execute[^/]*|webhook-respond-branch-order)\.test\.ts$/;
 
 export const LOOP_DRIVING_PATTERNS: readonly LoopDrivingPattern[] = [
   {
@@ -60,9 +70,20 @@ export const LOOP_DRIVING_PATTERNS: readonly LoopDrivingPattern[] = [
     id: 'branch-order',
     pattern: /\bbranch(?:es)? order(?:ing)?\b/i,
     rationale:
-      'Ordering between sibling branches. Matches nothing in the workflow-execute files at ' +
-      'the pinned commit; the equivalent n8n suite lives in ' +
-      '`webhook-respond-branch-order.test.ts`, which the file rule leaves out.',
+      'Ordering between sibling branches: `webhook responseNode branch ordering` in ' +
+      '`webhook-respond-branch-order.test.ts`, four cases that run a `responseMode: ' +
+      'responseNode` webhook fanning out to a work node and a shared Respond node and ' +
+      'assert which of the two the loop ran first. Nothing in the workflow-execute files ' +
+      'matches it at the pinned commit.',
+  },
+  {
+    id: 'respond-layout',
+    pattern: /^the reported workflow layout$/,
+    rationale:
+      'The other block of `webhook-respond-branch-order.test.ts`: four `test.each` rows ' +
+      'that replay the canvas y coordinates of the workflow in n8n issue #36175 through ' +
+      'the same `workflowExecute.run()` helper and assert whether the Respond node ' +
+      'acknowledged before the agent. Same loop, same fan-out, different fixture.',
   },
   {
     id: 'waiting',

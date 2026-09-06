@@ -14,8 +14,9 @@ All notable changes to this project are documented here. The format follows
 - Emission rule: every connected output emits data or an explicit empty token; producers on a
   cycle emit `nil` instead, so downstream joins never wait on an edge that may never fire.
 - Per-node gadget with two-phase start/run, an explicit `X/idle` mutex and a routed outcome
-  (`X_run` → `X_route`); nodes with more than three connected outputs are routed per output so
-  execution and verification stay linear in the number of outputs.
+  (`X_run` → `X_route_o` → `X_done`); every node with a connected output is routed per output,
+  so execution and verification stay linear in the number of outputs and the budget refund
+  lands one cycle after the edge tokens (ADR 0004).
 - Join gadget: slot semantics matching n8n's first-free-slot allocator, enumerated
   data/empty combinations for Merge chooseBranch, partial `requiredInputs` arrays, and a
   diagnostic for joins n8n can never run (unwired required input).
@@ -28,8 +29,8 @@ All notable changes to this project are documented here. The format follows
 - Expression references `$('Y')`: read arcs on `Y/done` make the dependency explicit; a
   reference to a skipped or unreachable node runs the node with a tagged
   `UnmetReferencePayload` so n8n's own error surfaces; self/downstream references are reported.
-- Concurrency budget `_budget` with `_budget + Σ(running + ok + retry) = k` as a real
-  P-semiflow, and `joinReadyPlaces` per join input for proper-completion queries.
+- Concurrency budget `_budget` with `_budget + Σ(running + retry) + Σ_o(ok_o + routed_o) = k`
+  as a real P-semiflow, and `joinReadyPlaces` per join input for proper-completion queries.
 - Structural hash (v3) over the compiled shape, stable across cosmetic workflow edits.
 - Spike suite (`tests/spikes`) pinning every derived fact against libpetri 4.1.0, a z3 gate
   test (fails CI when proofs would silently become skips), and ADRs 0002–0005 (emission rule,
@@ -42,7 +43,7 @@ All notable changes to this project are documented here. The format follows
   (`setWorkflowSchedulerFactory` so an alternative scheduler can be registered without an
   environment variable); `scripts/verify-patch.sh` re-applies them and fails on drift.
 - Conformance harness (`n8n-libpetri/conformance`): dependency-free junit reader, explicit
-  loop-driving classification (36 of 1657 cases), per-engine matrix with
+  loop-driving classification (44 of 1657 cases since M4, 36 before it), per-engine matrix with
   same/regression/fixed/new/changed verdicts, Markdown report and CLI;
   `scripts/run-conformance.sh` runs the suite under both engines.
 
@@ -145,6 +146,62 @@ All notable changes to this project are documented here. The format follows
   taken, the three hazard verdicts (waitTill claim, halt snapshot, in-flight sibling), and why
   the k-safety check is sound as written.
 
+- **Verify a workflow before you activate it.** `verify(workflow)` (`n8n-libpetri/verify`) and
+  the `n8n-libpetri verify` command run six property families over the *same net the scheduler
+  executes* — there is no verification net — and answer each as a named check with its own
+  verdict:
+
+  ```bash
+  npx n8n-libpetri verify my-workflow.json --property dead-nodes
+  #   PROPERTY    CHECK            VERDICT   TIME
+  #   dead-nodes  Trigger can run  unknown   58ms
+  #   dead-nodes  A can run        unknown   367ms
+  #   dead-nodes  Never can run    VIOLATED  60ms
+  #
+  #   Findings (1)
+  #     1. [dead-nodes] Never can never run: no reachable marking ever puts a token on its
+  #        running place. The compiler already marks it unreachable from every start node.
+  ```
+
+  ```ts
+  import { verify } from 'n8n-libpetri/verify';
+  const report = await verify(description, { budget: 2 });
+  report.checks.filter((c) => c.verdict === 'violated');   // findings, with node paths
+  ```
+
+  Counterexamples come back as node paths (`Trigger -> A -> Merge`) and markings in node
+  terms, never as place names. Exit 0 clean, 1 on a finding (or on any `unknown` under
+  `--strict`), 2 on a usage error, 3 when no usable z3 resolved — a run that verified nothing
+  never looks like a clean one. `--json` carries the whole report, including every node shape
+  the CLI had to guess from a workflow export.
+- **What the verifier actually proves, measured** (`docs/verification.md`, ADR 0007). It
+  proves the structural family — the concurrency budget and its P-semiflow, one activation per
+  node, the retry bound, the join-slot discipline — and it finds dead nodes, on workflows up to
+  roughly 25 nodes. It does **not** decide the headline proper-completion question on a
+  compiled workflow (`unknown` at 600 s), it cannot prove a node *live* (that direction is a
+  SAT witness in a value-blind abstraction, so it is reported `unknown`, never `proven`), and
+  it says nothing about firing order or about values (VER-004). Every one of those limits is
+  pinned by a test, so an improvement in libpetri or z3 breaks the suite and forces the
+  document to be re-measured.
+- Conformance widened past the execution-engine filter (`docs/conformance-final.md`):
+  `scripts/run-conformance.sh --scope=execution-engine|core|workflow|cli|all`, each with its
+  own baseline and artefacts. The engine is measured on all of `packages/core`; the
+  `workflow` and `cli` scopes are patch-neutrality legs — 29 931 further cases that run with
+  the engine registered and never constructed — and the harness now counts factory
+  constructions per leg so "registered" is never reported as "measured". Re-measured for the
+  final report: `execution-engine` legacy 44/44 loop-driving + 1613/1613 helpers and
+  *identical* to the unpatched baseline, libpetri k = 1 35/44 + 1611/1613 with 11 regressions
+  (8 out-of-scope AI-agent tool dispatch, 3 registered divergences, 0 defects) and the engine
+  entered in 5 of 75 files, k = 2 32/44 + 1611/1613 with 3 regressions *against k = 1*;
+  `cli` legacy identical to its baseline and libpetri 20 328/20 328 with 0 regressions and the
+  engine never entered — patch neutrality across 20 328 cases, which the harness says out loud
+  rather than reporting as a pass.
+- `docs/state-of-the-project.md`: one page on what exists, what it is measured to do
+  (conformance per scope and budget, the benchmark, verification), what it deliberately does not
+  do (the divergence register in prose) and what the honest next steps are — including that n8n's
+  workflow JSON cannot express guards, real cycles, budgets or correlation ids, which is the
+  blocker for surfacing the net's expressiveness in the editor.
+
 ### Changed
 - The concurrency budget is live. At k = 1 the engine remains n8n-sequential and byte-identical,
   which is what M2 proved; above it, `executionIndex` records the order nodes *started* rather
@@ -153,5 +210,17 @@ All notable changes to this project are documented here. The format follows
   Each is a numbered divergence (#15, #16, #19) rather than a silent difference. Keep k = 1 for a
   workflow whose correctness depends on a failure suppressing a ready sibling (#17), or that uses
   dynamically-resolved credentials (#18).
-- README per-node gadget now documents the routed `X_run`/`X_route` shape (libpetri's
-  validator rejects the earlier nested-`xor` form on the retry and halt branches, ADR 0004).
+- README per-node gadget now documents the routed `X_run`/`X_route_o`/`X_done` shape
+  (libpetri's validator rejects the earlier nested-`xor` form on the retry and halt branches,
+  ADR 0004).
+- **The `_budget` refund moved from `X_route` to `X_done`, one scheduling cycle later**, and
+  every node with a connected output now routes per output. This is the one model change of
+  the project so far, and it is what restores n8n's depth-first order at budget 1: libpetri's
+  executor snapshots its ready set before firing, so a join or OR consumer needs one extra
+  cycle for its `arm`, and refunding in the same firing that deposited the edge tokens let a
+  shallower budget-blocked sibling take the unit first. n8n's own
+  `v1 execution order > should execute nodes in the correct order, depth-first & the most
+  top-left one first` fails without the change and passes with it. Divergence #20 is `fixed`;
+  the honest costs are a `destinationStop` sibling that no longer runs (#13) and, on one
+  fixture, `lastNodeExecuted` at k = 1 (#16). Places and transitions per node go up by one
+  each; the flatteners get cheaper.

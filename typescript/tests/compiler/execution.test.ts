@@ -52,7 +52,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('forward-all actions on %s', 
     expect(doneCounts(c, marking)).toEqual({ Trigger: 1, IF: 1, A: 1, B: 1, Merge: 1, End: 1 });
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(1);
     expect(started(store, (n) => n.startsWith('id:Merge/'))).toEqual([
-      'id:Merge/arm_e0_data', 'id:Merge/arm_e5_data', 'id:Merge/start', 'id:Merge/run', 'id:Merge/route',
+      'id:Merge/arm_e0_data', 'id:Merge/arm_e5_data', 'id:Merge/start', 'id:Merge/run', 'id:Merge/route', 'id:Merge/done',
     ]);
     const merge = c.netMap.node('Merge');
     expect(tokenCounts(marking, merge.inputs.map((i) => i.free!))).toEqual([1, 1]);
@@ -106,7 +106,7 @@ describe('action binding', () => {
   it('compile() binds placeholders; a binder returning null keeps them; withActions re-binds without touching the original', () => {
     const seen: string[] = [];
     const c = compile(linear, { actions: (info) => { seen.push(info.role); return null; } });
-    expect(new Set(seen)).toEqual(new Set(['start', 'run', 'route', 'skip', 'reap', 'sink'].filter((r) => r !== 'sink')));
+    expect(new Set(seen)).toEqual(new Set(['start', 'run', 'route', 'done', 'skip', 'reap', 'sink'].filter((r) => r !== 'sink')));
     const program = c.program;
     const rebound = c.withActions(forwardAllActions());
     expect(rebound.net).not.toBe(c.net);

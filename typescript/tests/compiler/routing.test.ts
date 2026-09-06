@@ -1,8 +1,11 @@
 /**
- * README "Verifier scaling": above `SPLIT_ROUTING_ABOVE` connected outputs a node routes
- * per output (`X/ok_o`, `X_route_o`, `X/routed_o`, `X_done`), so the flat branch count the
- * verifier's flatteners see (IO-016, `enumerateBranches`) is linear in the output count
- * instead of `2^k`. Nodes with at most three connected outputs keep the single `X_route`.
+ * Per-output routing: every node with at least one connected output routes through
+ * `X/ok_o` → `X_route_o` → `X/routed_o` → `X_done` (`SPLIT_ROUTING_ABOVE` is 0), which
+ * keeps the flat branch count the verifier's flatteners see (IO-016, `enumerateBranches`)
+ * linear in the output count instead of `2^k`, and puts the `_budget` refund on `X_done`,
+ * one scheduling cycle after the edge tokens land. A node with **no** connected output
+ * keeps a single `X_route` that refunds the budget itself. With exactly one connected
+ * output the per-output names collapse to the unindexed `X/ok`, `X_route`, `X/routed`.
  */
 import { enumerateBranches } from 'libpetri';
 import { compile, forwardAllActions, routingActions, SPLIT_ROUTING_ABOVE, type CompiledWorkflow } from '../../src/compiler/index.js';
@@ -21,10 +24,12 @@ function branchTotal(c: CompiledWorkflow, node?: string): number {
 }
 
 describe('split routing structure', () => {
-  it('the threshold is three connected outputs', () => {
-    expect(SPLIT_ROUTING_ABOVE).toBe(3);
-    expect(gadget(compile(diamond), 'IF').splitRouting).toBe(false);
-    expect(gadget(compile(fanOut4), 'Q').splitRouting).toBe(true);
+  it('every node with a connected output routes per output; a node with none does not', () => {
+    expect(SPLIT_ROUTING_ABOVE).toBe(0);
+    expect(gadget(compile(diamond), 'IF').splitRouting).toBe(true);   // 2 outputs
+    expect(gadget(compile(diamond), 'Trigger').splitRouting).toBe(true); // 1 output
+    expect(gadget(compile(fanOut4), 'Q').splitRouting).toBe(true);    // 4 outputs
+    expect(gadget(compile(diamond), 'End').splitRouting).toBe(false); // terminal
   });
 
   it('X_run succeeds into and(ok_o …); X_route_o: one(ok_o) → and(xor(data_o, empty_o), routed_o); X_done: one(routed_*) → and(_budget, done)', () => {
@@ -59,13 +64,40 @@ describe('split routing structure', () => {
     expect(c.netMap.placeFor('Q', 'routed', 3)!.name).toBe('id:Q/routed_3');
   });
 
-  it('a node with at most three connected outputs keeps one X_route refunding the budget itself', () => {
+  it('a node with no connected output keeps one X_route refunding the budget itself', () => {
+    const c = compile(diamond);
+    const g = gadget(c, 'End');
+    expect(g.transitions.routes).toEqual(['id:End/route']);
+    expect(g.transitions.done).toBeNull();
+    expect(g.outputs).toEqual([]);
+    expect(g.ok!.name).toBe('id:End/ok');
+    expect(outputNames(transitionOf(c, 'End', 'route'))).toEqual(['_budget', 'id:End/done']);
+  });
+
+  it('one connected output: the per-output names collapse, X_done still refunds the budget', () => {
+    const c = compile(diamond);
+    const g = gadget(c, 'Trigger');
+    // The single X/ok_o is named X/ok and is what NodeGadget.ok points at.
+    expect(g.outputs.map((o) => [o.index, o.ok!.name, o.routed!.name])).toEqual([[0, 'id:Trigger/ok', 'id:Trigger/routed']]);
+    expect(g.ok).toBe(g.outputs[0]!.ok);
+    expect(g.transitions.routes).toEqual(['id:Trigger/route']);
+    expect(g.transitions.done).toBe('id:Trigger/done');
+    // X_run's success branch is the bare place, exactly as it was before routing split.
+    expect(outputNames(transitionOf(c, 'Trigger', 'route'))).toEqual(['id:IF/in', 'id:IF/in_empty', 'id:Trigger/routed']);
+    const done = c.netMap.transitionObject(g.transitions.done!);
+    expect(inputNames(done)).toEqual(['id:Trigger/routed']);
+    expect(outputNames(done)).toEqual(['_budget', 'id:Trigger/done']);
+    expect(c.netMap.placeFor('Trigger', 'ok', 0)!.name).toBe('id:Trigger/ok');
+    expect(c.netMap.transitionFor('Trigger', 'route', 0)!.name).toBe('id:Trigger/route');
+  });
+
+  it('two connected outputs are indexed', () => {
     const c = compile(diamond);
     const g = gadget(c, 'IF');
-    expect(g.transitions.routes).toEqual(['id:IF/route']);
-    expect(g.transitions.done).toBeNull();
-    expect(g.outputs.every((o) => o.ok === null && o.routed === null)).toBe(true);
-    expect(outputNames(transitionOf(c, 'IF', 'route'))).toContain('_budget');
+    expect(g.ok).toBeNull();
+    expect(g.transitions.routes).toEqual(['id:IF/route_0', 'id:IF/route_1']);
+    expect(g.transitions.done).toBe('id:IF/done');
+    expect(g.outputs.map((o) => o.ok!.name)).toEqual(['id:IF/ok_0', 'id:IF/ok_1']);
   });
 
   it('Switch(20): the branch count is linear in the output count (47 for the Switch, not 2^20)', () => {
@@ -78,9 +110,9 @@ describe('split routing structure', () => {
     // every X_run, +2 per node) + 20 routes × 2 + done 1 + skip 1
     expect(branchTotal(c, 'Switch')).toBe(47);
     expect(branchTotal(c, 'Switch')).toBeLessThan(100);
-    // Whole net: 20 leaves × 7 (start 1, run 4, route 1, skip 1) + Trigger 7 (start 1, run 4,
-    // route 2) + Switch 47 + reap 1. Still linear in the output count.
-    expect(branchTotal(c)).toBe(195);
+    // Whole net: 20 leaves × 7 (start 1, run 4, route 1, skip 1: terminal, so no X_done) +
+    // Trigger 8 (start 1, run 4, route 2, done 1) + Switch 47 + reap 1. Still linear.
+    expect(branchTotal(c)).toBe(196);
     expect(branchTotal(c)).toBeLessThan(200);
     expect(c.program.transitionCount).toBe(c.net.transitions.size);
   });

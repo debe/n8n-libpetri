@@ -10,8 +10,10 @@
  * X_run:        one(X/running) → and( xor( X/ok, [X/retry], [and(_halt, _budget)],
  *                                          and(X/waiting, _pause, _budget), and(X/stopped, _pause, _budget) ),
  *                                     X/idle )                                    priority depth + 1
- * X_route:      one(X/ok) → and( per connected output o: xor( and(data edges_o), and(empty edges_o) | X/nil_o ),
- *                                _budget, X/done )                                priority depth + 1
+ * X_route_o:    one(X/ok_o) → and( xor( and(data edges_o), and(empty edges_o) | X/nil_o ),
+ *                                  X/routed_o )                                   priority depth + 1
+ * X_done:       one(X/routed_0) … one(X/routed_k-1) → and( _budget, X/done )      priority depth + 1
+ *   (a node with no connected output keeps one X_route: one(X/ok) → and(_budget, X/done))
  * X_skip:       one(X/in_empty) → and( empty tree edges, X/skipped )              priority depth
  * X_retry_wait: one(X/retry) one(X/tries) one(X/idle) inhibitor(_halt) inhibitor(_halted) inhibitor(_pause)
  *               delayed(waitBetweenTries) → X/running                             priority depth
@@ -29,12 +31,16 @@
  * structural transitions and quiesces with every token on an in / ready / hasdata /
  * waiting place, where the marking codec reads it (README "Retries, halt, cancellation").
  *
- * **Verifier scaling** (README): the flatteners expand `and` of `k` `xor`s into `2^k`
- * virtual transitions (IO-016), so above {@link SPLIT_ROUTING_ABOVE} connected outputs the
- * success branch of `X_run` / `X_exhausted` produces `and(X/ok_o …)`, each
- * `X_route_o: one(X/ok_o) → and(xor(…), X/routed_o)` routes one output and
- * `X_done: one(X/routed_0) … → and(_budget, X/done)` refunds the budget. The P-semiflow
- * then reads `n·_budget + n·running + n·retry + Σ_o(ok_o + routed_o) = n·k`.
+ * **Per-output routing** ({@link SPLIT_ROUTING_ABOVE}, now 0): every node with at least one
+ * connected output has its success branch produce `and(X/ok_o …)`, one
+ * `X_route_o: one(X/ok_o) → and(xor(…), X/routed_o)` per output, and a single
+ * `X_done: one(X/routed_0) … → and(_budget, X/done)`. That keeps the flatteners linear in
+ * the output count (IO-016: `and` of `k` `xor`s is `2^k` virtual transitions) *and* puts the
+ * budget refund one scheduling cycle after the edge tokens, which is the cycle a join / OR
+ * consumer's `arm` fires in — see {@link SPLIT_ROUTING_ABOVE} for why that is what makes
+ * priority = DAG depth reproduce n8n's depth-first order. With exactly one connected output
+ * the per-output names collapse to the unindexed `X/ok`, `X_route`, `X/routed`. The
+ * P-semiflow reads `n·_budget + n·running + n·retry + Σ_o(ok_o + routed_o) = n·k`.
  *
  * Input sides (README "Join gadget", "OR-inputs"; ADR 0003):
  * - `join`: `arm_e_data` / `arm_e_empty` per edge consuming `X/free_i`, `X/ready_i`,
@@ -74,8 +80,36 @@ import type {
   TransitionInfo, TransitionRole, Variant,
 } from './types.js';
 
-/** Nodes with more connected outputs than this route per output (README "Verifier scaling"). */
-export const SPLIT_ROUTING_ABOVE = 3;
+/**
+ * Nodes with more connected outputs than this route per output: `X_route_o` deposits the
+ * edge tokens and marks `X/routed_o`, and a single `X_done` refunds `_budget` once every
+ * output is routed.
+ *
+ * **Zero, i.e. every node that has an output at all.** Two independent reasons, and the
+ * second is why the threshold is not 3 any more:
+ *
+ * 1. *Verifier scaling* (README, IO-016): the SMT and SCG flatteners expand an `and` of `k`
+ *    `xor`s into `2^k` virtual transitions, and the split turns that into `k` transitions
+ *    with one `xor` each. At `k = 1` both shapes flatten to two branches, so the split
+ *    neither helps nor hurts the small nodes it now also applies to.
+ * 2. *Scheduling phase* (M4). The executor collects its ready set from the enablement flags
+ *    **before** the firing pass and only `updateDirtyTransitions()` sets them, so a
+ *    transition another firing enables during that pass can fire no earlier than the next
+ *    cycle (`precompiled-net-executor.ts` `fireReadyGeneral`). A join / OR consumer needs
+ *    one such extra cycle for its `arm`, while a direct consumer does not — so when
+ *    `X_route` deposited the edge tokens and refunded `_budget` in one firing, the shallower
+ *    budget-blocked sibling was evaluable a full cycle before the deeper armed consumer and
+ *    took the unit, and the net ran breadth-first exactly where priority = DAG depth was
+ *    meant to give n8n's depth-first order. Refunding on `X_done` — one cycle after the edge
+ *    tokens land, which is the cycle the `arm` fires in — puts both candidate `X_start`s in
+ *    the same ready set, where priority decides. Measured: n8n's own
+ *    `v1 execution order > should execute nodes in the correct order, depth-first & the most
+ *    top-left one first` passes with it and fails without it (`docs/conformance-final.md`).
+ *
+ * A node with **no** connected output keeps the single `X_route`, which has no edge token to
+ * deposit and therefore no `arm` to wait for; it refunds `_budget` itself.
+ */
+export const SPLIT_ROUTING_ABOVE = 0;
 
 /** A consumer-owned host edge place pair (created by `compile`, bound into both subnets). */
 export interface HostEdgeSlot {
@@ -349,6 +383,11 @@ export function buildNodeGadget(
   const outputs: LocalOutput[] = [];
   const connectedOutputs = new Set(outgoing.map((e) => e.outputIndex)).size;
   const split = connectedOutputs > SPLIT_ROUTING_ABOVE;
+  // A node with a single connected output has one of each per-output name, so it keeps the
+  // unindexed `ok` / `route` / `routed` it carried before the threshold moved to 0. The
+  // `port` metadata still records the real output index, which need not be 0 (an IF wired
+  // only on its false branch routes output 1 through `X/ok`).
+  const sfx = (o: number): string => (connectedOutputs === 1 ? '' : `_${o}`);
   for (let o = 0; o < a.outputCount; o++) {
     const edges: LocalEdge[] = [];
     for (const e of outgoing) {
@@ -365,11 +404,13 @@ export function buildNodeGadget(
     }
     if (edges.length === 0) continue; // unconnected outputs get no places
     const nil = cyclic ? internal(`nil_${o}`, 'nil', o) : null;
-    const okO = split ? internal(`ok_${o}`, 'ok', o) : null;
-    const routedO = split ? internal(`routed_${o}`, 'routed', o) : null;
+    const okO = split ? internal(`ok${sfx(o)}`, 'ok', o) : null;
+    const routedO = split ? internal(`routed${sfx(o)}`, 'routed', o) : null;
     outputs.push({ index: o, edges, nil, ok: okO, routed: routedO });
   }
-  const ok = split ? null : internal('ok', 'ok', null);
+  // `X/ok`: the unsplit single place, or — when exactly one output is routed — that
+  // output's own `ok`, which is the same place under the same name.
+  const ok = split ? (outputs.length === 1 ? outputs[0]!.ok : null) : internal('ok', 'ok', null);
   const skipEmpties: Out[] = [];
   for (const out of outputs) for (const e of out.edges) if (e.empty !== null) skipEmpties.push(outPlace(e.empty));
 
@@ -404,7 +445,7 @@ export function buildNodeGadget(
     andOf(out.edges.map((e) => outPlace(e.data))),
     out.nil !== null ? outPlace(out.nil) : andOf(out.edges.map((e) => outPlace(e.empty!))),
   );
-  const success: Out = split ? and(...outputs.map((o) => outPlace(o.ok!))) : outPlace(ok!);
+  const success: Out = split ? andOf(outputs.map((o) => outPlace(o.ok!))) : outPlace(ok!);
   const haltBranch = and(outPlace(halt), outPlace(budget));
   // The two pause outcomes: the budget is refunded here since nothing routes afterwards.
   const waitingBranch = and(outPlace(waiting), outPlace(pause), outPlace(budget));
@@ -458,7 +499,7 @@ export function buildNodeGadget(
   let doneName: string | null = null;
   if (split) {
     for (const out of outputs) {
-      const local = `route_${out.index}`;
+      const local = `route${sfx(out.index)}`;
       body.push(Transition.builder(local)
         .inputs(one(out.ok!))
         .outputs(and(routingOf(out), outPlace(out.routed!)))
@@ -650,8 +691,8 @@ export function buildNodeGadget(
       isErrorOutput: o.index === a.errorOutputIndex,
       edges: o.edges.map(slot),
       nil: opt(o.nil, `nil_${o.index}`),
-      ok: opt(o.ok, `ok_${o.index}`),
-      routed: opt(o.routed, `routed_${o.index}`),
+      ok: opt(o.ok, `ok${sfx(o.index)}`),
+      routed: opt(o.routed, `routed${sfx(o.index)}`),
     }));
     return {
       node: name, id, type: a.node.type, typeVersion: a.node.typeVersion,
@@ -661,6 +702,8 @@ export function buildNodeGadget(
       in: inFinal === null ? null : lookup(inFinal),
       inEmpty: inEmptyFinal === null ? null : lookup(inEmptyFinal),
       running: lookup(F('running')), idle: lookup(F('idle')),
+      // Non-null only when its local name is exactly `ok`: the unsplit place, or the one
+      // routed output's own `ok_o` whose index collapses away (`sfx`).
       ok: opt(ok, 'ok'), splitRouting: split, done: lookup(F('done')),
       skipped: hasSkip || referenced ? lookup(F('skipped')) : null,
       hasdata: opt(hasdata, 'hasdata'),

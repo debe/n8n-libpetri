@@ -1,7 +1,7 @@
 # ADR 0004 — Two-phase start/run, the routed outcome, and the concurrency budget
 
-Status: accepted (2026-09-04). Amends the `X_run` output shape in `README.md`
-("Per-node gadget"): the README still shows the single-transition shape this ADR replaces.
+Status: accepted (2026-09-04); **amended in M4** (2026-09-06), see "M4 amendment: the refund
+moved to `X_done`" below. The shape here is the one `README.md` "Per-node gadget" documents.
 
 ## Context
 
@@ -45,26 +45,31 @@ X_start:      one(X/in) one(_budget) one(X/idle) inhibitor(_halt) inhibitor(_hal
                                                                         priority = depth(X)
 X_run:        one(X/running) → and( xor( X/ok, [X/retry], and(_halt, _budget) ), X/idle )
               action: host.runNode(...)                                 priority = depth(X) + 1
-X_route:      one(X/ok) → and( per output i: xor(and(data edges_i), and(empty|nil edges_i)),
-                               _budget, X/done )
-              action: route the result                                  priority = depth(X) + 1
+X_route_o:    one(X/ok_o) → and( xor(and(data edges_o), and(empty|nil edges_o)), X/routed_o )
+              one per connected output                                  priority = depth(X) + 1
+X_done:       one(X/routed_0) … one(X/routed_k-1) → and( _budget, X/done )
+                                                                        priority = depth(X) + 1
 X_retry_wait: one(X/retry) one(X/tries) one(X/idle) inhibitor(_halt) inhibitor(_halted)
               timing delayed(waitBetweenTries) → X/running              priority = depth(X)
 X_exhausted:  one(X/retry) inhibitor(X/tries) → xor( X/ok, and(_halt, _budget) )
 ```
 
-- **The budget is held from `X_start` until `X_route`** deposits the edges (success), is
-  refunded on the halt branch by `X_run` / `X_exhausted`, and is held across the retry wait.
-  `_budget + Σ(X/running + X/ok + X/retry) = k` is the P-semiflow. Refunding in `X_route`
-  rather than in `X_run` is deliberate: the refund lands in the same completion as the edge
-  tokens, so a successor's `X_start` and a budget-blocked sibling's `X_start` re-enable in
-  the same cycle with the same enablement timestamp, and **priority alone** picks the
-  successor (depth-first). Refunding one transition earlier lets the sibling take the budget
-  before the successor's edge exists, which breaks depth-first at k = 1.
+- **The budget is held from `X_start` until `X_done`**, one transition *after* the edge
+  tokens are deposited (success); it is refunded on the halt branch by `X_run` /
+  `X_exhausted` and on the two pause outcomes, and it is held across the retry wait.
+  `_budget + Σ(X/running + X/retry) + Σ_o(X/ok_o + X/routed_o) = k` is the P-semiflow.
+  Refunding after `X_run` rather than in it is what makes depth-first work at all: a
+  successor's `X_start` and a budget-blocked sibling's `X_start` must become evaluable in the
+  same scheduling cycle, so that **priority alone** picks the successor. Refunding one
+  transition *earlier* (in `X_run`) lets the sibling take the budget before the successor's
+  edge exists, which breaks depth-first at k = 1. Refunding one transition *later* than the
+  edge deposit is the M4 amendment below — the original `X_route` refund was one cycle too
+  early for a join / OR consumer, whose `arm` has to fire before its `X_start` can be
+  evaluated at all.
 - **`X/idle`** is the explicit per-node mutex. It makes `X/idle + X/running = 1` a found
   P-invariant and `placeBound(X/running, 1)` provable.
 - **Priority = depth** (longest path from the trigger, back edges ignored) on `X_start`,
-  depth + 1 on `X_run` / `X_route`. With equal priorities the executor falls back to
+  depth + 1 on `X_run` / `X_route_o` / `X_done`. With equal priorities the executor falls back to
   declaration order (EXEC-002 AC3; the all-immediate fast path fires in declaration order
   outright), and declaration order is canvas order.
 - **The action never throws.** A node failure is the `X/retry` or halt branch; the halt
@@ -73,25 +78,61 @@ X_exhausted:  one(X/retry) inhibitor(X/tries) → xor( X/ok, and(_halt, _budget)
 - **Halt.** `_halt` inhibits every `X_start` and `X_retry_wait`; `_halt_reap: one(_halt)
   reset(edge, ready and in places) → _halted` clears the net in one firing (CORE-034,
   EXEC-013); starts also inhibit on `_halted`. In-flight actions complete (EXEC-040) and
-  `X_route` still records their output, which lands *after* the reap and stays in the
+  `X_route_o` still records their output, which lands *after* the reap and stays in the
   marking; the scheduler reports it as such.
+
+## M4 amendment: the refund moved from `X_route` to `X_done`, for every node with an output
+
+The reasoning above is unchanged and the conclusion needed one more step. The refund has to
+land in the cycle in which **both** candidate `X_start`s are evaluable, and that is one cycle
+later than this ADR assumed for a join or OR consumer.
+
+libpetri's executor collects its ready set from the enablement flags **before** the firing
+pass, and only `updateDirtyTransitions()` sets them (`precompiled-net-executor.ts`,
+`fireReadyGeneral`), so a transition another firing enables *during* that pass fires no
+earlier than the next cycle. A direct consumer's `X_start` is enabled by the edge token
+itself; a join / OR consumer's needs its `arm` to fire first, one cycle later. With the
+refund in `X_route`, the shallower budget-blocked sibling was evaluable a full cycle before
+the armed deeper consumer and took the unit — breadth-first, exactly where priority = DAG
+depth was meant to give n8n's depth-first order (divergence #20).
+
+So `SPLIT_ROUTING_ABOVE` moved from 3 to **0**: every node with at least one connected output
+uses the split shape this ADR's block now shows — `X_route_o` deposits the edge tokens and
+marks `X/routed_o`, and `X_done` refunds `_budget` one cycle later, which is the cycle the
+`arm` fires in. Both candidate `X_start`s then land in one ready set and priority decides. A
+node with no connected output keeps a single `X_route` that refunds the budget itself: it has
+no edge token to deposit and no `arm` to wait for.
+
+A priority band was tried first — give every structural transition a priority above every
+start — and **measured to change nothing**, for the reason above: priority orders the
+snapshot, it does not extend it.
+
+Cost: one place and one transition per node with an output, and one extra (synchronous)
+executor cycle per node completion. The flatteners get *cheaper*: the `and` of `k` `xor`s
+that IO-016 expands into `2^k` virtual transitions becomes `k` transitions of one `xor`.
+Measured: n8n's own `v1 execution order > should execute nodes in the correct order,
+depth-first & the most top-left one first` fails without the change and passes with it, and
+the differ goes from 46 pass / 23 divergent to 49 / 20 — with one honest cost, a
+destination-stop fixture that now leaves a sibling unrun (divergence #13). Full evidence in
+[`docs/conformance-final.md`](../conformance-final.md).
 
 ## Consequences
 
 - At k = 1 two 200 ms nodes take ~400 ms and at k = 2 ~200 ms, with the budget back at k
   either way. `placeBound(_budget, k)` is proven; `mutualExclusion(A/running, B/running)` is
   proven at k = 1 and violated at k = 2, so the exclusion proof is real.
-- One extra structural transition (`X_route`) per node; it fires in microseconds and adds
-  2^(outputs) flat transitions for the verifier exactly as the README shape would have.
+- Two extra structural transitions (`X_route_o`, `X_done`) per node; they fire in
+  microseconds, and per-output routing keeps the flat transition count linear in the output
+  count instead of `2^(outputs)`.
 - Retries hold the budget while waiting. The README refunds `_budget` on the retry branch
   and re-acquires it in `X_retry_wait`; with the routed outcome that would also require
   `X_exhausted` to acquire `_budget` (its `X/ok` token reaches `X_route`, which refunds), so
   an exhausted node would queue for a slot merely to declare exhaustion, and forgetting that
   arc inflates the budget by one per exhaustion. Holding the budget keeps the semiflow
-  `_budget + Σ(running + ok + retry) = k` and is n8n's k = 1 behaviour (retries happen
+  `_budget + Σ(running + retry) + Σ_o(ok_o + routed_o) = k` and is n8n's k = 1 behaviour (retries happen
   inside `runNode`). At k > 1 it is a policy choice; revisit if retry-heavy workflows
   starve siblings.
-- `README.md` must be updated to this shape; until then this ADR is authoritative.
+- `README.md` "Per-node gadget" documents this shape, amendment included.
 - The nested-`xor` behaviour is reported upstream to libpetri as a finding: IO-015's text
   ("Xor — satisfied iff exactly one child is satisfied") reads as a per-node predicate that an
   enclosing `xor` should be able to select over, the outcome currently depends on child order

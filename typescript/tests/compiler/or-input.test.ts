@@ -111,7 +111,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('OR input end to end on %s (I
     expect(count(c, marking, 'id:Merge/free_1')).toBe(1);
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(1);
     expect(started(store, (n) => n.startsWith('id:C/'))).toEqual([
-      'id:C/arm_e2_data', 'id:C/arm_e3_empty', 'id:C/start', 'id:C/run', 'id:C/route', 'id:C/clear_0',
+      'id:C/arm_e2_data', 'id:C/arm_e3_empty', 'id:C/start', 'id:C/run', 'id:C/route', 'id:C/clear_0', 'id:C/done',
     ]);
   });
 

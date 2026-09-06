@@ -31,37 +31,48 @@ import { declarationOrder } from './support.js';
  * `pauseOutcomes(nodeCount)` places and no transition.
  */
 const pauseOutcomes = (nodeCount: number): number => 2 * nodeCount + 1;
+
+/**
+ * M4 (`SPLIT_ROUTING_ABOVE` = 0, gadget.ts): a node with `o >= 1` connected outputs routes
+ * per output — `o` `X_route_o` plus one `X_done`, owning `o` `X/ok_o` and `o` `X/routed_o`.
+ * The per-node counts above still charge it the *old* single `X_route` / `X/ok`, so every
+ * such node adds `o` transitions and `2o - 1` places on top. Nodes that already routed per
+ * output (`switch20`'s Switch, `fanOut4`'s Q) and terminal nodes (`o = 0`, which keep one
+ * `X_route` refunding the budget itself) add nothing and are not listed.
+ */
+const routeT = (...outs: readonly number[]): number => outs.reduce((a, o) => a + o, 0);
+const routeP = (...outs: readonly number[]): number => outs.reduce((a, o) => a + 2 * o - 1, 0);
 const EXPECTED: Record<keyof typeof ALL, { transitions: number; places: number }> = {
-  linear: { transitions: 3 + 3 * 4 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) },
-  fanOut: { transitions: 3 + 3 * 4 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) },
+  linear: { transitions: 3 + 3 * 4 + 1 + routeT(1, 1, 1), places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) + routeP(1, 1, 1) },
+  fanOut: { transitions: 3 + 3 * 4 + 1 + routeT(1), places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) + routeP(1) },
   // Trigger, IF, A, B, End direct; Merge = join(2 inputs, 2 tree edges): 3 + 1 + 4 arms = 8 / 5 + 4 + 1 = 10.
-  diamond: { transitions: 3 + 4 * 4 + 8 + 1, places: 5 + 4 * 5 + 10 + 6 * 2 + 3 + pauseOutcomes(6) },
+  diamond: { transitions: 3 + 4 * 4 + 8 + 1 + routeT(1, 1, 2, 1, 1), places: 5 + 4 * 5 + 10 + 6 * 2 + 3 + pauseOutcomes(6) + routeP(1, 1, 2, 1, 1) },
   // Switch routes per output: start run + 20 route_o + done + skip = 24 / idle running done skipped + 20 ok_o + 20 routed_o = 44.
-  switch20: { transitions: 3 + 24 + 20 * 4 + 1, places: 5 + 44 + 20 * 5 + 21 * 2 + 3 + pauseOutcomes(22) },
+  switch20: { transitions: 3 + 24 + 20 * 4 + 1 + routeT(1), places: 5 + 44 + 20 * 5 + 21 * 2 + 3 + pauseOutcomes(22) + routeP(1) },
   // Merge chooseBranch: start run route + skip_de skip_ed skip_ee + 4 arms = 10 / 5 + 2 free + 4 ready = 11.
-  chooseBranch: { transitions: 3 + 4 + 10 + 4 + 1, places: 5 + 5 + 11 + 5 + 4 * 2 + 3 + pauseOutcomes(4) },
+  chooseBranch: { transitions: 3 + 4 + 10 + 4 + 1 + routeT(1, 2, 1), places: 5 + 5 + 11 + 5 + 4 * 2 + 3 + pauseOutcomes(4) + routeP(1, 2, 1) },
   // C = OR(1 input, 2 tree edges): start run route skip clear + 4 arms = 9 / 5 + ready_0 hasdata_0 ran_0 = 8.
-  multiProducer: { transitions: 3 + 4 + 4 + 9 + 1, places: 5 + 5 + 5 + 8 + 4 * 2 + 3 + pauseOutcomes(4) },
+  multiProducer: { transitions: 3 + 4 + 4 + 9 + 1 + routeT(1, 1, 1), places: 5 + 5 + 5 + 8 + 4 * 2 + 3 + pauseOutcomes(4) + routeP(1, 1, 1) },
   // Loop = cyclic join(1 input: tree + cycle edge; 2 connected outputs): 3 + skip + 3 arms + 2 sinks = 9 /
   //   5 + free ready hasdata + 2 nil = 10. Body = cyclic direct on a cycle edge, 1 output: 4 / 5. After direct: 4 / 5.
   //   Edges: 2 tree (Trigger->Loop, Loop->After) + 2 cycle (Loop->Body, Body->Loop) = 6.
-  loopOverItems: { transitions: 3 + 9 + 4 + 4 + 1, places: 5 + 10 + 5 + 5 + 6 + 3 + pauseOutcomes(4) },
+  loopOverItems: { transitions: 3 + 9 + 4 + 4 + 1 + routeT(1, 2, 1), places: 5 + 10 + 5 + 5 + 6 + 3 + pauseOutcomes(4) + routeP(1, 2, 1) },
   // A = cyclic join(1 input: tree + cycle; 1 output): 3 + skip + 3 arms + 1 sink = 8 / 5 + 3 + 1 nil = 9.
   //   B = cyclic direct on a cycle edge, 1 output (two edges): 4 / 5. Exit direct: 4 / 5. Edges: 2 tree + 2 cycle = 6.
-  userCycle: { transitions: 3 + 8 + 4 + 4 + 1, places: 5 + 9 + 5 + 5 + 6 + 3 + pauseOutcomes(4) },
-  twoTriggers: { transitions: 3 + 3 + 8 + 4 + 1, places: 5 + 5 + 10 + 5 + 3 * 2 + 3 + pauseOutcomes(4) },
+  userCycle: { transitions: 3 + 8 + 4 + 4 + 1 + routeT(1, 1, 1), places: 5 + 9 + 5 + 5 + 6 + 3 + pauseOutcomes(4) + routeP(1, 1, 1) },
+  twoTriggers: { transitions: 3 + 3 + 8 + 4 + 1 + routeT(1, 1, 1), places: 5 + 5 + 10 + 5 + 3 * 2 + 3 + pauseOutcomes(4) + routeP(1, 1, 1) },
   // B references A (reachable avoiding B): B gets a start_unmet twin.
-  expressionRef: { transitions: 3 + 4 + 4 + 5 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) },
-  retry: { transitions: 3 + 6 + 4 + 1, places: 5 + 7 + 5 + 2 * 2 + 3 + pauseOutcomes(3) },
-  continueErrorOutput: { transitions: 3 + 3 * 4 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) },
-  ifHalf: { transitions: 3 + 4 + 4 + 1, places: 5 + 5 + 5 + 2 * 2 + 3 + pauseOutcomes(3) },
+  expressionRef: { transitions: 3 + 4 + 4 + 5 + 1 + routeT(1, 2), places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) + routeP(1, 2) },
+  retry: { transitions: 3 + 6 + 4 + 1 + routeT(1, 1), places: 5 + 7 + 5 + 2 * 2 + 3 + pauseOutcomes(3) + routeP(1, 1) },
+  continueErrorOutput: { transitions: 3 + 3 * 4 + 1 + routeT(1, 2), places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) + routeP(1, 2) },
+  ifHalf: { transitions: 3 + 4 + 4 + 1 + routeT(1, 1), places: 5 + 5 + 5 + 2 * 2 + 3 + pauseOutcomes(3) + routeP(1, 1) },
   // C = OR(2 tree edges): 9 / 8; Merge = join(2 inputs, 2 tree edges): 8 / 10; 6 tree edges.
-  ifBothOutputs: { transitions: 3 + 4 + 9 + 8 + 4 + 1, places: 5 + 5 + 8 + 10 + 5 + 6 * 2 + 3 + pauseOutcomes(5) },
+  ifBothOutputs: { transitions: 3 + 4 + 9 + 8 + 4 + 1 + routeT(1, 2, 1, 1), places: 5 + 5 + 8 + 10 + 5 + 6 * 2 + 3 + pauseOutcomes(5) + routeP(1, 2, 1, 1) },
   // Q splits: start run + 4 route_o + done + skip = 8 / idle running done skipped + 4 ok_o + 4 routed_o = 12.
-  fanOut4: { transitions: 3 + 8 + 4 * 4 + 1, places: 5 + 12 + 4 * 5 + 5 * 2 + 3 + pauseOutcomes(6) },
+  fanOut4: { transitions: 3 + 8 + 4 * 4 + 1 + routeT(1), places: 5 + 12 + 4 * 5 + 5 * 2 + 3 + pauseOutcomes(6) + routeP(1) },
   // M = choose-branch(3 inputs, required [0, 1]): 3 + skips de ed ee + 6 arms = 12 /
   //   5 + 3 free + ready_0_data ready_0_empty ready_1_data ready_1_empty ready_2 = 13. 7 tree edges.
-  partialRequired: { transitions: 3 + 12 + 4 * 4 + 1, places: 5 + 13 + 4 * 5 + 7 * 2 + 3 + pauseOutcomes(6) },
+  partialRequired: { transitions: 3 + 12 + 4 * 4 + 1 + routeT(1, 1, 1, 1, 1), places: 5 + 13 + 4 * 5 + 7 * 2 + 3 + pauseOutcomes(6) + routeP(1, 1, 1, 1, 1) },
 };
 
 const DEPTHS: Record<keyof typeof ALL, Record<string, number>> = {

@@ -17,8 +17,10 @@ import type { WorkflowAnalysis } from './graph.js';
 export function structuralHash(analysis: WorkflowAnalysis): string {
   const canonical = {
     // 2: clamped retry params (retryParamsOf); 3: classified references, OR form, split
-    // routing; 4: start-node set, _pause, X/waiting and X/stopped outcomes
-    v: 4,
+    // routing; 4: start-node set, _pause, X/waiting and X/stopped outcomes; 5: per-output
+    // routing for every node with an output (SPLIT_ROUTING_ABOVE = 0), so `_budget` is
+    // refunded by X_done one cycle after the edge tokens land
+    v: 5,
     start: analysis.startNode,
     starts: [...analysis.startNodes],
     nodes: analysis.nodes.map((a) => ({

@@ -14,16 +14,18 @@ const loopDriving = cases.filter((c) => classifyCase(c).loopDriving);
 const short = (file: string) => file.replace('src/execution-engine/__tests__/', '');
 
 describe('LOOP_DRIVING_FILE', () => {
-  it('accepts the four workflow-execute files and nothing else', () => {
+  it('accepts the four workflow-execute files plus webhook-respond-branch-order, and nothing else', () => {
     const files = [...new Set(cases.map((c) => c.file))];
     expect(files.filter((f) => LOOP_DRIVING_FILE.test(f)).map(short).sort()).toEqual([
+      'webhook-respond-branch-order.test.ts',
       'workflow-execute-node-error-reporting.test.ts',
       'workflow-execute-process-process-run-execution-data.test.ts',
       'workflow-execute-run-node.test.ts',
       'workflow-execute.test.ts',
     ]);
-    expect(LOOP_DRIVING_FILE.test('src/execution-engine/__tests__/webhook-respond-branch-order.test.ts')).toBe(false);
     expect(LOOP_DRIVING_FILE.test('workflow-execute.test.ts')).toBe(true);
+    expect(LOOP_DRIVING_FILE.test('src/execution-engine/__tests__/webhook-context.test.ts')).toBe(false);
+    expect(LOOP_DRIVING_FILE.test('src/execution-engine/__tests__/webhook-respond-branch-order-helpers.test.ts')).toBe(false);
   });
 });
 
@@ -38,8 +40,24 @@ describe('LOOP_DRIVING_PATTERNS', () => {
     const counts = Object.fromEntries(
       LOOP_DRIVING_PATTERNS.map((p) => [p.id, loopDriving.filter((c) => classifyCase(c).pattern === p.id).length]),
     );
-    expect(counts).toEqual({ 'execution-order': 19, 'hook-order': 6, 'branch-order': 0, waiting: 9, partial: 2 });
-    expect(loopDriving).toHaveLength(36);
+    expect(counts).toEqual({
+      'execution-order': 19, 'hook-order': 6, 'branch-order': 4, 'respond-layout': 4, waiting: 9, partial: 2,
+    });
+    expect(loopDriving).toHaveLength(44);
+  });
+
+  it('claims all eight webhook-respond-branch-order cases: every one of them calls run()', () => {
+    const file = 'src/execution-engine/__tests__/webhook-respond-branch-order.test.ts';
+    const inFile = cases.filter((c) => c.file === file);
+    expect(inFile).toHaveLength(8);
+    expect(inFile.every((c) => classifyCase(c).loopDriving)).toBe(true);
+    expect(inFile.filter((c) => classifyCase(c).pattern === 'branch-order').map((c) => titleOf(c.name))).toEqual([
+      'runs the Respond node first when it sits above the work node',
+      'runs the work node first when the Respond node sits below it',
+      'skips the Respond node when the work node runs first and fails',
+      'still runs the Respond node when it precedes a failing work node',
+    ]);
+    expect(inFile.filter((c) => classifyCase(c).pattern === 'respond-layout')).toHaveLength(4);
   });
 
   it('finds the 19 execution-order cases: 12 v0 and 7 v1, all in workflow-execute.test.ts', () => {
@@ -114,14 +132,19 @@ describe('LOOP_DRIVING_PATTERNS', () => {
     expect(cases.filter((c) => c.name.includes('runPartialWorkflow2') && classifyCase(c).loopDriving)).toHaveLength(2);
   });
 
-  it('never marks a case outside the workflow-execute files', () => {
+  it('never marks a case outside the loop-driving files', () => {
     const outside = cases.filter((c) => !LOOP_DRIVING_FILE.test(c.file));
-    expect(outside.length).toBe(1657 - 208);
+    expect(outside.length).toBe(1657 - 208 - 8);
     expect(outside.some((c) => classifyCase(c).loopDriving)).toBe(false);
     // The name would match; the file rule is what keeps it out.
-    expect(classifyCase({ file: 'src/execution-engine/__tests__/webhook-respond-branch-order.test.ts', name: 'webhook responseNode branch ordering > x' }))
+    expect(classifyCase({ file: 'src/execution-engine/__tests__/webhook-context.test.ts', name: 'webhook responseNode branch ordering > x' }))
       .toEqual({ loopDriving: false });
     expect(classifyCase({ file: 'src/execution-engine/__tests__/workflow-execute.test.ts', name: 'webhook responseNode branch ordering > x' }))
       .toEqual({ loopDriving: true, pattern: 'branch-order' });
+    // `the reported workflow layout` is a whole-block match, like every other pattern.
+    expect(classifyCase({ file: 'src/execution-engine/__tests__/webhook-respond-branch-order.test.ts', name: 'x > the reported workflow layout > y' }))
+      .toEqual({ loopDriving: true, pattern: 'respond-layout' });
+    expect(classifyCase({ file: 'src/execution-engine/__tests__/webhook-respond-branch-order.test.ts', name: 'the reported workflow layout is documented' }))
+      .toEqual({ loopDriving: false });
   });
 });

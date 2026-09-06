@@ -21,8 +21,11 @@ budget, marking codec) and the design principles live in the root
 - The net decides what runs. No host-side dispatch queue, permit gating or scheduler policy.
 - Never call `executor.run(timeoutMs)`; use `close()` (libpetri's timeout branch leaks the loop).
 - Every n8n behaviour we do not reproduce is recorded in `docs/divergences.md`. No silent skips.
-- Reporting rule: of n8n's ~146 execution-engine cases only ~19 drive the loop. Headline
-  numbers are loop-driving cases passed; pure-helper cases are stated separately.
+- Reporting rule: only a minority of n8n's cases drive the scheduler loop — 44 of the
+  execution-engine suite's 1657 (`src/conformance/classify.ts`), 44 of `packages/core`'s 2124,
+  and none of `packages/workflow`'s or `packages/cli`'s. Headline numbers are loop-driving
+  cases passed; pure-helper cases are stated separately. A scope whose tests never construct a
+  scheduler is a patch-neutrality leg, not an engine result — say which one a number is.
 
 ## Build and test commands
 
@@ -56,7 +59,15 @@ Pinned n8n commit: `441970b` (master; the release tag predates n8n's helper extr
 ### Verification
 
 libpetri shells out to the `z3` executable (`PATH` or `LIBPETRI_Z3`, ≥ 4.8.0). Without it
-verification returns `unknown`, never throws. CI installs z3 and fails if proofs become skips.
+verification returns `unknown`, never throws. CI installs z3 and fails if proofs become skips
+(`tests/z3-gate.test.ts`); the `n8n-libpetri verify` CLI exits **3** when no solver resolved,
+so a run that verified nothing is never mistaken for a clean one.
+
+What the surface proves, what it cannot, and what it costs is measured in
+[`docs/verification.md`](docs/verification.md) (ADR 0007). Two rules when touching it: report
+only the direction the encoding licenses — a *witness* (a reachable node, a violated
+exclusion) is a statement about a priority- and value-blind abstraction (VER-004), never a
+proof — and never widen a check's claim past its query.
 
 ## Source layout (`typescript/src/`)
 

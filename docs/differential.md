@@ -190,32 +190,44 @@ name**. A novel mechanism is not a `fail` verdict — data and happens-before ar
 
 ## Results
 
-21 fixtures — the 16 in `tests/fixtures/workflows.ts`, `parallelBranches` (built to make the
-concurrency visible) and the four **stop-surface** fixtures (`haltInFlight`, `waitTill`,
-`destinationStop`, `runFilter`) — at k = 1, 2 and 4. Nothing fails at any budget;
+**Re-measured in M4** (2026-09-06), after the `_budget` refund moved from `X_route` to
+`X_done` (ADR 0004's M4 amendment). The M3 numbers this section carried are superseded; the
+full before/after of that change, and the n8n case it makes pass, are in
+[`docs/conformance-final.md`](conformance-final.md).
+
+23 fixtures — the 16 in `tests/fixtures/workflows.ts`, `parallelBranches` (built to make the
+concurrency visible), the four **stop-surface** fixtures (`haltInFlight`, `waitTill`,
+`destinationStop`, `runFilter`) and two ported from n8n's own suite (`complicatedMulti`,
+`webhookRespond`) — at k = 1, 2 and 4, i.e. 69 runs. Nothing fails at any budget;
 happens-before holds everywhere, with no absent and no inverted edge; every ordering mechanism
 has a register row.
 
 | k | pass | divergent | fail |
 |---|---|---|---|
-| 1 | 16 | 5 | 0 |
-| 2 | 15 | 6 | 0 |
-| 4 | 15 | 6 | 0 |
+| 1 | 19 | 4 | 0 |
+| 2 | 15 | 8 | 0 |
+| 4 | 15 | 8 | 0 |
+
+`49 pass, 20 divergent, 0 fail` in total, against M3's `46 / 23 / 0`: `multiProducer` stopped
+diverging at every budget (it is `order: equal` now — n8n's own `Trigger, A, C, B, C`), which
+is the whole of divergence #20's fix.
 
 The divergent runs, with the rows that explain them:
 
 | fixture | k | rows | what differs |
 |---|---|---|---|
-| `multiProducer` | 1, 2, 4 | #20 | order only. n8n `Trigger, A, C, B, C`; the net `Trigger, A, B, C, C` — the OR-input arm latency. All data equal |
 | `userCycle` | 1, 2, 4 | #11, #5 | `Exit`'s two runs are swapped (n8n takes the most recent arrival off the stack first), and the surrounding order moves with them |
-| `ifBothOutputs` | 1, 2, 4 | #2, #11, #12 | `C`'s two runs are swapped, and the net strands the second `Merge` arrival (`node 'Merge': stranded token on 'id:Merge/ready_0' input 0`) where n8n's quiescence fallback re-runs `Merge` with `[]`, so `Merge` and `End` run once instead of twice — and the stranded arrival is left in `waitingExecution`, which the resumable-state comparison now sees |
-| `parallelBranches` | 2, 4 | #16 | the point of the milestone: n8n `Trigger, A1, A2, B1, B2`, the net `Trigger, A1, B1, B2, A2`, every moved pair independent, data equal; `lastNodeExecuted` moves with the completion order |
-| `haltInFlight` | 2, 4 | #17 | `A` fails fatally at 1 ms while `B` is 20 ms into its run. n8n `break`s and never runs `B`; the net cannot un-start it, so `B` completes, is recorded and routes, and `D` (not `B`) is what goes back on the stack. Identical at k = 1 |
-| `destinationStop` | 1, 2, 4 | #13, #20 | `multiProducer` with `destinationNode: C`. n8n keeps popping the stack after the destination and runs `C` a second time; the net deposits `_pause` and quiesces, leaving that arrival in `waitingExecution` |
+| `ifBothOutputs` | 1, 2, 4 | #2, #5, #11 | `C`'s two runs are swapped, and the net strands the second `Merge` arrival (`node 'Merge': stranded token on 'id:Merge/ready_0' input 0`) where n8n's quiescence fallback re-runs `Merge` with `[]`, so `Merge` and `End` run once instead of twice — and the stranded arrival is left in `waitingExecution`, which the resumable-state comparison sees. Since M4 the net's last activation is `C#1` rather than `End#0`, so `resultData.lastNodeExecuted` differs too (n8n `End`, the net `C`): the sets of activations differ, so "the last one" differs with them (#5; `docs/divergences.md` row #16 records the k = 1 case). Row #12's ordering half is gone |
+| `destinationStop` | 1, 2, 4 | #13 | `multiProducer` with `destinationNode: C`. n8n runs `Trigger, A, C, B, C`; the net is depth-first again since M4, so `C` runs before `B`, `_pause` lands first and `B` never runs at all — `runData.B` is absent and `C` runs once. Row #13's own rule, reaching one activation further than it did in M3 |
 | `runFilter` | 1, 2, 4 | #1 | `diamond` with `B` excluded by the run filter. n8n drops `B`'s entry at `isNodeFilteredOut` with a `continue`, which skips its R6 block, and the loop exits with `Merge` still in `waitingExecution`; the net's explicit empty token completes the join, so `Merge` and `End` run |
+| `parallelBranches` | 2, 4 | #16 | the point of the milestone: n8n `Trigger, A1, A2, B1, B2`, the net `Trigger, A1, B1, B2, A2`, every moved pair independent, data equal; `lastNodeExecuted` moves with the completion order |
+| `complicatedMulti` | 2, 4 | — (`concurrency`) | n8n's own 9-node fixture: data equal at every budget, 4 activations moved, every moved pair independent — attributed to the concurrency itself (row #21's mechanism), which the differ reports as a mechanism rather than as a register row |
+| `haltInFlight` | 2, 4 | #17 | `A` fails fatally at 1 ms while `B` is 20 ms into its run. n8n `break`s and never runs `B`; the net cannot un-start it, so `B` completes, is recorded and routes, and `D` (not `B`) is what goes back on the stack. Identical at k = 1 |
+| `webhookRespond` | 2, 4 | #17 | the shape n8n's `webhook-respond-branch-order.test.ts` asserts: the work node fails, and at k ≥ 2 the shared Respond node is already in flight where n8n would have left it unanswered |
 
-`waitTill` is identical at every budget: the node that set the field claims the pause, the
-codec writes the same `nodeExecutionStack` back, and the run stops there.
+`waitTill`, `multiProducer` and `loopOverItems` are identical at every budget: `waitTill`'s
+node claims the pause and the codec writes the same `nodeExecutionStack` back; `multiProducer`
+is the fixture divergence #20 was measured on and no longer diverges.
 
 `multiProducer`, `destinationStop`, `ifBothOutputs`, `loopOverItems` and `userCycle` are held at
 effective k = 1 by the compiler's k-safety check (cyclic, or an input index with more than one
@@ -223,11 +235,15 @@ producer), which the sweep asserts.
 
 ### What the sweep is and is not evidence for
 
-Every registered row the differ can reach is now reached by a fixture: #1, #2, #11, #12, #13,
-#16, #17, #20 and the `concurrency` attribution. What it still cannot reach is #7 (expressions),
-#18 (dynamic credentials), #3 (v0) and #6/#14 (the endless-loop guard), for the reasons under
+Every registered row the differ can reach is reached by a fixture: #1, #2, #5, #11, #13, #16,
+#17, #21 and the `concurrency` attribution. Two moved in M4: **#20** is fixed, so no fixture
+diverges by it any more (the attribution stays in the differ so a phase regression is *named*
+rather than reported as an unattributed reordering), and **#12** lost its differ witness when
+the refund moved — it keeps its witness in n8n's own suite (`docs/conformance-final.md`).
+What the harness still cannot reach is #7 (expressions), #18 (dynamic credentials), #3 (v0)
+and #6/#14 (the endless-loop guard), for the reasons under
 [What this harness cannot see](#what-this-harness-cannot-see). "Nothing fails at any budget" is
-a statement about those 21 workflows and this host — not about `WorkflowExecute`, which is what
+a statement about those 23 workflows and this host — not about `WorkflowExecute`, which is what
 `scripts/run-conformance.sh` measures.
 
 ## The benchmark

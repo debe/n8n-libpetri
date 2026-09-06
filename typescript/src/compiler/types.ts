@@ -145,9 +145,11 @@ export interface CompileOptions {
  * Transition roles of the per-node gadget (README "Per-node gadget", ADR 0004):
  * - `start` / `start-unmet`: `X_start` and its per-reference twin that fires when the
  *   referenced node was skipped (the running token then carries the unmet reference);
- * - `run`: the node action; `route`: per-edge routing (one per node, or one per connected
- *   output above {@link SPLIT_ROUTING_ABOVE} outputs, carrying `port`); `done`: the
- *   split-routing `X_done` that refunds the budget once every output is routed;
+ * - `run`: the node action; `route`: per-edge routing (one per connected output, carrying
+ *   `port`; a node with no connected output has a single `X_route` with no `port`);
+ *   `done`: the `X_done` that refunds the budget once every output is routed — present for
+ *   every node with at least one connected output ({@link SPLIT_ROUTING_ABOVE} is 0), which
+ *   is what puts the refund one scheduling cycle after the edge tokens;
  * - `skip`: an empty activation; `arm`: an edge arrival of a join / OR input; `clear`:
  *   the OR-input round closer (a genuine sink, CORE-043 AC4);
  * - `retry` (`X_retry_wait`), `exhausted`, `sink` (`nil` drain), `reap` (`_halt_reap`).
@@ -280,9 +282,9 @@ export interface OutputGadget {
   readonly edges: readonly EdgeSlot[];
   /** `X/nil_o` for a producer inside a cycle; `null` for an acyclic producer. */
   readonly nil: Place<unknown> | null;
-  /** `X/ok_o` under split routing (more than {@link SPLIT_ROUTING_ABOVE} connected outputs); `null` otherwise. */
+  /** `X/ok_o` under per-output routing (named `X/ok` when the node routes one output). */
   readonly ok: Place<unknown> | null;
-  /** `X/routed_o` under split routing; `null` otherwise. */
+  /** `X/routed_o` under per-output routing (named `X/routed` when the node routes one output). */
   readonly routed: Place<unknown> | null;
 }
 
@@ -291,9 +293,9 @@ export interface NodeGadgetTransitions {
   /** One `X_start_unmet_k` per reference that carries a read arc, in reference order. */
   readonly startUnmet: readonly string[];
   readonly run: string;
-  /** The single `X_route`, or one `X_route_o` per connected output under split routing (ascending index). */
+  /** One `X_route_o` per connected output (ascending index); the single `X_route` when the node has none. */
   readonly routes: readonly string[];
-  /** `X_done` under split routing; `null` otherwise. */
+  /** `X_done`; `null` only for a node with no connected output, whose `X_route` refunds the budget itself. */
   readonly done: string | null;
   readonly skip: readonly string[];
   readonly arms: readonly string[];
@@ -334,9 +336,19 @@ export interface NodeGadget {
   readonly inEmpty: Place<unknown> | null;
   readonly running: Place<unknown>;
   readonly idle: Place<unknown>;
-  /** The routed outcome between `X_run` and `X_route` (ADR 0004); `null` under split routing (see `outputs[*].ok`). */
+  /**
+   * The routed outcome between `X_run` and `X_route` (ADR 0004), when there is exactly one
+   * such place: a node with no connected output, or one routing a single output (whose
+   * `X/ok_o` is named `X/ok`). `null` when the node routes several outputs — use
+   * `outputs[*].ok`.
+   */
   readonly ok: Place<unknown> | null;
-  /** True when the node has more than {@link SPLIT_ROUTING_ABOVE} connected outputs and routes per output. */
+  /**
+   * True when the node routes per connected output through `X/ok_o` → `X_route_o` →
+   * `X/routed_o` → `X_done`, i.e. whenever it has at least one connected output
+   * ({@link SPLIT_ROUTING_ABOVE} is 0). False only for a node with no connected output,
+   * whose single `X_route` refunds `_budget` itself.
+   */
   readonly splitRouting: boolean;
   readonly done: Place<unknown>;
   /** Present iff the node has a skip transition or is referenced (the reference twin reads it). */

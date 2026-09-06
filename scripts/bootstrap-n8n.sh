@@ -12,15 +12,29 @@
 #                          n8n-core dependency chain first. packages/core/test/helpers imports
 #                          six node classes and known/nodes.json from nodes-base/dist, so the
 #                          n8n-core chain alone leaves 6 execution-engine files unloadable.
-#   5. baseline            packages/core execution-engine suite with CI=true (junit reporter)
-#                          → conformance-results/baseline.junit.xml (+ .summary.txt)
+#   5. baseline            the scope's suite with CI=true (junit reporter)
+#                          → conformance-results/baseline<suffix>.junit.xml (+ .summary.txt)
+#
+# Scopes (--scope, default execution-engine) — the same table run-conformance.sh uses, so a
+# baseline and the legs compared to it are always the same case set:
+#
+#   execution-engine  n8n-core, path filter src/execution-engine   baseline.junit.xml
+#   core              n8n-core in full (102 test files)            baseline-core.junit.xml
+#   workflow          n8n-workflow in full (85 test files)         baseline-workflow.junit.xml
+#   cli               n8n (packages/cli, 1501 test files)          baseline-cli.junit.xml
+#
+# `cli` needs its own install and its own build: the default install is the workspace closure
+# of n8n-nodes-base, which does not contain packages/cli (`pnpm install --frozen-lockfile
+# --filter 'n8n...'`, or --full-install), and the scope switches BUILD_TARGET to `n8n`,
+# because packages/cli's vitest resolves every workspace package to its built dist and dies in
+# globalSetup without them. With both, its unit suite runs: 1104 files, 20328 cases.
 #
 # Idempotent: every step checks its postcondition (HEAD sha, pnpm version, turbo cache, …) and a
 # re-run is cheap. Long steps print progress; run the whole thing in the background and tail
 # conformance-results/bootstrap.log if your shell has a wall-clock cap.
 #
-# Flags: --skip-install --skip-build --skip-test --full-install --allow-dirty -h|--help
-# Env:   N8N_DIR (default <repo>/.n8n), N8N_TEST_FILTER (default src/execution-engine),
+# Flags: --skip-install --skip-build --skip-test --full-install --allow-dirty --scope=NAME -h|--help
+# Env:   N8N_DIR (default <repo>/.n8n), N8N_TEST_FILTER (overrides the scope's path filter),
 #        COREPACK_VERSION (fallback corepack used through npx when none is on PATH; Node ≥ 25 no
 #        longer ships one), COREPACK_HOME (corepack's own cache, default ~/.cache/node/corepack).
 #
@@ -42,9 +56,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 N8N_DIR="${N8N_DIR:-$ROOT/.n8n}"
 RESULTS="$ROOT/conformance-results"
 TIMINGS="$RESULTS/bootstrap-timings.tsv"
-N8N_TEST_FILTER="${N8N_TEST_FILTER:-src/execution-engine}"
 
-SKIP_INSTALL=0; SKIP_BUILD=0; SKIP_TEST=0; FULL_INSTALL=0; ALLOW_DIRTY=0
+SKIP_INSTALL=0; SKIP_BUILD=0; SKIP_TEST=0; FULL_INSTALL=0; ALLOW_DIRTY=0; SCOPE="${SCOPE:-execution-engine}"
 for arg in "$@"; do
   case "$arg" in
     --skip-install) SKIP_INSTALL=1 ;;
@@ -52,10 +65,26 @@ for arg in "$@"; do
     --skip-test)    SKIP_TEST=1 ;;
     --full-install) FULL_INSTALL=1 ;;
     --allow-dirty)  ALLOW_DIRTY=1 ;;
+    --scope=*)      SCOPE="${arg#--scope=}" ;;
     -h|--help)      sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
+
+# The scope table (see the header). SCOPE_DIR is where vitest drops junit.xml (its cwd is the
+# package root); SCOPE_SUFFIX names the artefacts so scopes never overwrite each other.
+case "$SCOPE" in
+  execution-engine) SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=src/execution-engine; SCOPE_SUFFIX= ;;
+  core)             SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=;                     SCOPE_SUFFIX=-core ;;
+  workflow)         SCOPE_PKG=n8n-workflow; SCOPE_DIR=packages/workflow; SCOPE_FILTER=;                     SCOPE_SUFFIX=-workflow ;;
+  # packages/cli's vitest resolves every @n8n/* and n8n-* workspace package to its built dist
+  # (workspaceDistExternals in vitest.config.base.ts), so its whole chain — not just the
+  # n8n-nodes-base chain — has to be built, or globalSetup dies while vite inlines TypeORM
+  # entity sources. Building n8n covers it.
+  cli)              SCOPE_PKG=n8n;          SCOPE_DIR=packages/cli;      SCOPE_FILTER=;                     SCOPE_SUFFIX=-cli; BUILD_TARGET=n8n ;;
+  *) echo "unknown --scope: $SCOPE (execution-engine, core, workflow, cli)" >&2; exit 2 ;;
+esac
+N8N_TEST_FILTER="${N8N_TEST_FILTER:-$SCOPE_FILTER}"
 
 # --- helpers ---------------------------------------------------------------------------------
 log() { printf '[bootstrap %s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
@@ -208,16 +237,17 @@ build_chain() {
 
 # --- 5. baseline test run --------------------------------------------------------------------
 run_baseline() {
-  local junit="$N8N_DIR/packages/core/junit.xml" rc=0 vitest_v
+  local junit="$N8N_DIR/$SCOPE_DIR/junit.xml" out="$RESULTS/baseline$SCOPE_SUFFIX" rc=0 vitest_v
   rm -f "$junit"
-  vitest_v=$(pnpm --filter n8n-core exec vitest --version 2>/dev/null | tail -1 || true)
+  vitest_v=$(pnpm --filter "$SCOPE_PKG" exec vitest --version 2>/dev/null | tail -1 || true)
   echo "vitest          $vitest_v" >> "$RESULTS/bootstrap-env.txt"
   # CI=true makes @n8n/vitest-config add the junit reporter (outputFile ./junit.xml, relative to
-  # packages/core) and cap the fork pool at 50 % of the cores. Positional arg = path filter.
-  CI=true pnpm --filter n8n-core run test "$N8N_TEST_FILTER" || rc=$?
+  # the package root) and cap the fork pool at 50 % of the cores. Positional arg = path filter;
+  # an empty filter is passed as no argument at all, which is the package's whole suite.
+  CI=true pnpm --filter "$SCOPE_PKG" run test ${N8N_TEST_FILTER:+"$N8N_TEST_FILTER"} || rc=$?
   [ -f "$junit" ] || die "vitest produced no junit.xml (rc=$rc)"
-  mv "$junit" "$RESULTS/baseline.junit.xml"
-  node - "$RESULTS/baseline.junit.xml" "$N8N_TEST_FILTER" > "$RESULTS/baseline.summary.txt" <<'NODE'
+  mv "$junit" "$out.junit.xml"
+  node - "$out.junit.xml" "${N8N_TEST_FILTER:-<whole package>} ($SCOPE_PKG, scope $SCOPE)" > "$out.summary.txt" <<'NODE'
 const fs = require('node:fs');
 const [file, filter] = process.argv.slice(2);
 const xml = fs.readFileSync(file, 'utf8');
@@ -238,9 +268,9 @@ console.log(`workflow-execute files ${we.length}, cases ${we.reduce((a, f) => a 
 console.log('');
 for (const f of files) console.log(`${String(f.tests).padStart(4)} ${f.failures + f.errors ? 'FAIL' : ' ok '} ${f.skipped ? `(${f.skipped} skipped) ` : ''}${f.name}`);
 NODE
-  cat "$RESULTS/baseline.summary.txt"
-  [ $rc -eq 0 ] || die "vitest exited with rc=$rc; junit kept at $RESULTS/baseline.junit.xml"
-  log "baseline ok: $RESULTS/baseline.junit.xml"
+  cat "$out.summary.txt"
+  [ $rc -eq 0 ] || die "vitest exited with rc=$rc; junit kept at $out.junit.xml"
+  log "baseline ok: $out.junit.xml"
 }
 
 # --- main ------------------------------------------------------------------------------------
@@ -248,6 +278,7 @@ mkdir -p "$RESULTS"
 touch "$TIMINGS"
 log "repo $ROOT"
 log "n8n  $N8N_DIR @ $N8N_COMMIT"
+log "scope $SCOPE ($SCOPE_PKG, filter '${N8N_TEST_FILTER:-<whole package>}') → baseline$SCOPE_SUFFIX.junit.xml"
 T_ALL=$(date +%s)
 step checkout checkout
 step corepack setup_pnpm

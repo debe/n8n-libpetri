@@ -117,11 +117,12 @@ describe('the budget semiflow across a halt (README "Retries, halt, cancellation
     }).withActions((info, map) => {
       if (info.role !== 'route' || info.node !== 'T') return null;
       const g = map.node('T');
+      // X_route only deposits the edge tokens and marks routed now; X_done refunds the
+      // budget one scheduling cycle later (SPLIT_ROUTING_ABOVE = 0).
       const route: TransitionAction = async (ctx) => {
         const v = ctx.input(g.ok!);
         for (const out of g.outputs) for (const e of out.edges) ctx.output(e.data, v);
-        ctx.output(map.shared.budget, null);
-        ctx.output(g.done, null);
+        ctx.output(g.outputs[0]!.routed!, null);
       };
       return route;
     });

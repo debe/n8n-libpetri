@@ -21,21 +21,25 @@ function branchesOf(t: Transition): string[][] {
 describe('emission rule: tree edge from an acyclic producer carries data | empty', () => {
   const c = compile(diamond);
 
-  it('X_route offers data or empty per edge, and refunds budget + marks done on every branch', () => {
-    const route = transitionOf(c, 'IF', 'route');
+  it('X_route_o offers data or empty for its own edge and marks routed_o; X_done refunds the budget', () => {
     const toA = edgeSlot(c, 'IF', 0, 'A', 0);
     const toB = edgeSlot(c, 'IF', 1, 'B', 0);
     expect(toA.data.name).toBe('id:A/in');
     expect(toA.empty!.name).toBe('id:A/in_empty');
-    expect(outputNames(route)).toEqual(['_budget', 'id:A/in', 'id:A/in_empty', 'id:B/in', 'id:B/in_empty', 'id:IF/done'].sort());
-    const branches = branchesOf(route);
-    expect(branches).toHaveLength(4); // 2 outputs × (data | empty)
-    for (const b of branches) {
-      expect(b).toContain('_budget');
-      expect(b).toContain('id:IF/done');
-      expect(b.includes(toA.data.name) !== b.includes(toA.empty!.name)).toBe(true);
-      expect(b.includes(toB.data.name) !== b.includes(toB.empty!.name)).toBe(true);
+    for (const [o, slot] of [[0, toA], [1, toB]] as const) {
+      const route = transitionOf(c, 'IF', 'route', o);
+      expect(outputNames(route)).toEqual([slot.data.name, slot.empty!.name, `id:IF/routed_${o}`].sort());
+      const branches = branchesOf(route);
+      expect(branches).toHaveLength(2); // one output × (data | empty)
+      for (const b of branches) {
+        expect(b).toContain(`id:IF/routed_${o}`);
+        expect(b.includes(slot.data.name) !== b.includes(slot.empty!.name)).toBe(true);
+      }
     }
+    // The budget refund and the `done` marker move to X_done, one scheduling cycle later.
+    const done = transitionOf(c, 'IF', 'done');
+    expect(inputNames(done)).toEqual(['id:IF/routed_0', 'id:IF/routed_1']);
+    expect(outputNames(done)).toEqual(['_budget', 'id:IF/done']);
     expect(gadget(c, 'IF').outputs.every((o) => o.nil === null)).toBe(true);
   });
 
@@ -71,7 +75,7 @@ describe('emission rule inside a cycle (Loop Over Items)', () => {
     const loop = gadget(c, 'Loop');
     const exit = edgeSlot(c, 'Loop', 1, 'After', 0);
     expect(exit.empty!.name).toBe('id:After/in_empty'); // the consumer still owns the empty place
-    const route = transitionOf(c, 'Loop', 'route');
+    const route = transitionOf(c, 'Loop', 'route', 1);
     expect(outputNames(route)).toContain('id:After/in');
     expect(outputNames(route)).toContain('id:Loop/nil_1');
     expect(outputNames(route)).not.toContain('id:After/in_empty');
@@ -84,19 +88,18 @@ describe('emission rule inside a cycle (Loop Over Items)', () => {
     const body = edgeSlot(c, 'Loop', 0, 'Body', 0);
     expect(body.empty).toBeNull();
     expect(placeNames(c, (n) => n.startsWith('id:Body/in'))).toEqual(['id:Body/in']);
-    const route = transitionOf(c, 'Loop', 'route');
-    const branches = branchesOf(route);
-    expect(branches).toHaveLength(4);
-    for (const b of branches) {
-      expect(b.includes('id:Body/in') !== b.includes('id:Loop/nil_0')).toBe(true);
-      expect(b.includes('id:After/in') !== b.includes('id:Loop/nil_1')).toBe(true);
+    for (const [o, data, nil] of [[0, 'id:Body/in', 'id:Loop/nil_0'], [1, 'id:After/in', 'id:Loop/nil_1']] as const) {
+      const branches = branchesOf(transitionOf(c, 'Loop', 'route', o));
+      expect(branches).toHaveLength(2);
+      for (const b of branches) expect(b.includes(data) !== b.includes(nil)).toBe(true);
     }
     // Body sits on a cycle edge only: no in_empty, no skip, no skipped marker.
     const bodyGadget = gadget(c, 'Body');
     expect(bodyGadget.inEmpty).toBeNull();
     expect(bodyGadget.skipped).toBeNull();
     expect(bodyGadget.transitions.skip).toEqual([]);
-    expect(outputNames(transitionOf(c, 'Body', 'route'))).toEqual(['_budget', 'id:Body/done', 'id:Body/nil_0', 'id:Loop/in0_e3']);
+    expect(outputNames(transitionOf(c, 'Body', 'route'))).toEqual(['id:Body/nil_0', 'id:Body/routed', 'id:Loop/in0_e3']);
+    expect(outputNames(transitionOf(c, 'Body', 'done'))).toEqual(['_budget', 'id:Body/done']);
   });
 
   it('nil places are consumed by genuine sinks with no Out spec (CORE-043 AC4)', () => {
@@ -126,13 +129,13 @@ describe('a user cycle without a loop node', () => {
 
   it('B (cyclic, no skip) never writes the empty place of its tree edge to Exit; Exit still owns it', () => {
     const route = transitionOf(c, 'B', 'route');
-    expect(outputNames(route)).toEqual(['_budget', 'id:A/in0_e2', 'id:B/done', 'id:B/nil_0', 'id:Exit/in']);
+    expect(outputNames(route)).toEqual(['id:A/in0_e2', 'id:B/nil_0', 'id:B/routed', 'id:Exit/in']);
     expect(gadget(c, 'B').transitions.skip).toEqual([]);
     expect(placeNames(c, (n) => n.startsWith('id:Exit/in'))).toEqual(['id:Exit/in', 'id:Exit/in_empty']);
     const branches = branchesOf(route);
     expect(branches).toHaveLength(2); // one output: and(both data edges) | nil
-    expect(branches).toContainEqual(['_budget', 'id:A/in0_e2', 'id:B/done', 'id:Exit/in']);
-    expect(branches).toContainEqual(['_budget', 'id:B/done', 'id:B/nil_0']);
+    expect(branches).toContainEqual(['id:A/in0_e2', 'id:B/routed', 'id:Exit/in']);
+    expect(branches).toContainEqual(['id:B/nil_0', 'id:B/routed']);
   });
 
   it('A (cyclic entry) is a join with a skip that only touches its tree edges', () => {
@@ -301,7 +304,7 @@ describe('expression references and onError', () => {
     expect(edgeSlot(c, 'A', 1, 'Err', 0).data.name).toBe('id:Err/in');
     // No _halt alternative; the M2 pause outcomes (waiting / stopped, refunding _budget) stay.
     expect(outputNames(transitionOf(c, 'A', 'run'))).toEqual([
-      '_budget', '_pause', 'id:A/idle', 'id:A/ok', 'id:A/stopped', 'id:A/waiting',
+      '_budget', '_pause', 'id:A/idle', 'id:A/ok_0', 'id:A/ok_1', 'id:A/stopped', 'id:A/waiting',
     ]);
     expect(outputNames(transitionOf(c, 'Trigger', 'run'))).toContain('_halt'); // stopWorkflow default keeps it
   });
@@ -309,7 +312,9 @@ describe('expression references and onError', () => {
   it('unconnected outputs get no places', () => {
     const c = compile(ifHalf);
     expect(gadget(c, 'IF').outputs.map((o) => o.index)).toEqual([0]);
-    expect(outputNames(transitionOf(c, 'IF', 'route'))).toEqual(['_budget', 'id:A/in', 'id:A/in_empty', 'id:IF/done']);
+    // One connected output, so the per-output names collapse: X/ok, X_route, X/routed.
+    expect(outputNames(transitionOf(c, 'IF', 'route'))).toEqual(['id:A/in', 'id:A/in_empty', 'id:IF/routed']);
+    expect(outputNames(transitionOf(c, 'IF', 'done'))).toEqual(['_budget', 'id:IF/done']);
   });
 });
 
