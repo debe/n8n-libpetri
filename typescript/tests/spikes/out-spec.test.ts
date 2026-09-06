@@ -8,7 +8,7 @@
  * `transition-failed` event (EVT-008) whose consumed tokens are lost (EXEC-030,
  * EXEC-031) while the run still quiesces (EXEC-040).
  *
- * Also pins the libpetri 4.1.0 behaviour that shapes the node gadget: an inner `xor`
+* Also pins the corrected IO-015 exact-explanation semantics (libpetri main, ec10f79): an inner `xor`
  * with no written child makes `validateOutSpec` THROW rather than report its enclosing
  * branch unsatisfied, so `xor(and(xor(d, e), …), and(retry, …))` cannot take the
  * `retry` branch — unless a place that is unwritten on that branch happens to be
@@ -103,7 +103,7 @@ describe('spike: and-of-xor per-edge output spec', () => {
     expect(failures).toHaveLength(1);
     expect(failures[0]!.transitionName).toBe('if_run');
     expect(failures[0]!.exceptionType).toBe('OutViolationError');
-    expect(failures[0]!.errorMessage).toBe("'if_run': XOR violation - multiple branches produced");
+    expect(failures[0]!.errorMessage).toContain("output does not match the declared spec");
     // EXEC-030 / EXEC-031: nothing deposited, input not restored.
     for (const p of [input, trueData, trueEmpty, falseData, falseEmpty]) {
       expect(r.marking.tokenCount(p)).toBe(0);
@@ -117,12 +117,12 @@ describe('spike: and-of-xor per-edge output spec', () => {
     const r = await run('violate-neither');
     const failures = failed(r.store);
     expect(failures.map((f) => f.exceptionType)).toEqual(['OutViolationError']);
-    expect(failures[0]!.errorMessage).toBe("'if_run': XOR violation - no branch produced (exactly 1 required)");
+    expect(failures[0]!.errorMessage).toContain("output does not match the declared spec");
     expect(r.marking.tokenCount(falseEmpty)).toBe(0);
   });
 });
 
-describe('spike: a xor nested under a xor branch cannot be left unwritten (libpetri 4.1.0)', () => {
+describe('spike: a xor nested under a xor branch may be left unwritten (IO-015 exact explanation)', () => {
   // The README's X_run shape: xor( and(per-edge xor…, budget), and(retry, budget) ).
   const input = place<'ok' | 'retry'>('x/in');
   const data = place<string>('e/data');
@@ -151,18 +151,17 @@ describe('spike: a xor nested under a xor branch cannot be left unwritten (libpe
     expect(r.marking.tokenCount(budget)).toBe(1);
   });
 
-  it('the retry branch is rejected: the unwritten inner xor throws before the outer xor can choose', async () => {
+  it('the retry branch validates: the enclosing xor selects it and the unwritten inner xor is not required', async () => {
     const r = await runNet(net, new Map([[input, [tokenOf('retry' as const)]]]));
     const failures = failed(r.store);
-    expect(failures).toHaveLength(1);
-    expect(failures[0]!.errorMessage).toBe("'x_run': XOR violation - no branch produced (exactly 1 required)");
-    // The budget written by the action is lost with the rest of the firing (EXEC-030).
-    expect(r.marking.tokenCount(budget)).toBe(0);
-    expect(r.marking.tokenCount(retry)).toBe(0);
+    expect(failures).toHaveLength(0);
+    // The branch is selected, so what the action wrote lands in the marking.
+    expect(r.marking.tokenCount(retry)).toBe(1);
+    expect(r.marking.tokenCount(budget)).toBe(1);
   });
 });
 
-describe('spike: the nested-xor rejection depends on child order inside the enclosing and (libpetri 4.1.0)', () => {
+describe('spike: validation is independent of child order inside the enclosing and (IO-015)', () => {
   // The same README shape, but `X/done` — written only on the success branch — is declared
   // BEFORE the inner xor inside the success `and`. `validateOutSpec` walks `and` children
   // in order and returns "unsatisfied" at the first unwritten one, so on the retry branch it
@@ -210,13 +209,12 @@ describe('spike: the nested-xor rejection depends on child order inside the encl
     expect(r.marking.tokenCount(budget)).toBe(1);
   });
 
-  it('inner xor declared first: the identical write set is rejected', async () => {
+  it('inner xor declared first: the identical write set validates, as it does with done first', async () => {
     const net = PetriNet.builder('xor-first').transition(build('y_run', xorFirst)).build();
     const r = await runNet(net, new Map([[input, [tokenOf('retry' as const)]]]));
     const failures = failed(r.store);
-    expect(failures).toHaveLength(1);
-    expect(failures[0]!.errorMessage).toBe("'y_run': XOR violation - no branch produced (exactly 1 required)");
-    expect(r.marking.tokenCount(retry)).toBe(0);
-    expect(r.marking.tokenCount(budget)).toBe(0);
+    expect(failures).toHaveLength(0);
+    expect(r.marking.tokenCount(retry)).toBe(1);
+    expect(r.marking.tokenCount(budget)).toBe(1);
   });
 });

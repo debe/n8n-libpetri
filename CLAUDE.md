@@ -44,7 +44,17 @@ House style mirrors `libpetri/typescript`: ESM-only, strict + `noUncheckedIndexe
 tests under `tests/` (not beside sources), vitest, tsup, no ESLint/Prettier. Doc comments cite
 libpetri requirement IDs (`IO-015`, `EXEC-003`, `MOD-010`, …).
 
-Local iteration against a libpetri checkout: `npm link ../../libpetri/typescript`.
+### libpetri version requirement
+
+This project needs libpetri **newer than the published 4.1.0** — it relies on the bit-31
+sparse-enablement fix, the exact-explanation IO-015 validator (`and` unordered, an inner `xor` no
+longer pre-empting an enclosing one), the strict `DeadlockFree` / `TerminatesAtSink` split, and
+`run(ms, 'close')`. Until that release lands, develop against a local checkout of libpetri's
+`main`: `npm link ../../libpetri/typescript`.
+
+**When the release publishes, bump `libpetri` in `typescript/package.json` to it** and drop the
+link. Until then CI resolves `^4.1.0` from the registry, which is *older, different code* despite
+the matching version string, so CI is not currently testing what we ship.
 
 ### n8n conformance (`scripts/`)
 
