@@ -71,6 +71,30 @@ export const unbalancedJoin: WorkflowDescription = workflow('unbalanced-join', [
 ], 'Trigger');
 
 /**
+ * A cycle **and** a stranding: `loopOverItems`' loop, with {@link unbalancedJoin}'s
+ * arrival-count mismatch hanging off the loop's `done` output.
+ *
+ * Its state space is unbounded, so the state-class graph truncates whatever the cap — and
+ * the stranding is inside the explored prefix, because a quiescent class of that prefix is
+ * quiescent and reachable however the BFS ended. So the verdict must be `violated`, never
+ * the `bounded` a clean cyclic workflow gets: a truncated graph loses the ability to
+ * *prove*, not the ability to *find*.
+ */
+export const cyclicStranding: WorkflowDescription = workflow('cyclic-stranding', [
+  node('Trigger', 'trigger', [0, 0]),
+  node('Loop', 'loop', [200, 0]),
+  node('A', 'set', [400, -200]),
+  node('B', 'set', [400, -100]),
+  node('Body', 'set', [400, 100]),
+  node('M', 'merge', [600, -150]),
+], [
+  conn('Trigger', 0, 'Loop', 0),
+  conn('Loop', 0, 'Body', 0), conn('Body', 0, 'Loop', 0),
+  conn('Loop', 1, 'A', 0), conn('Loop', 1, 'B', 0),
+  conn('A', 0, 'M', 0), conn('B', 0, 'M', 0), conn('Loop', 1, 'M', 1),
+], 'Trigger');
+
+/**
  * Two disconnected components. `Orphan` and `OrphanChild` are not reachable from the start
  * node, so no marking ever puts a token on their `running` place: both are dead nodes.
  */
@@ -115,6 +139,43 @@ const SET: NodeTypeShape = { inputCount: 1, outputCount: 1 };
 const TRIGGER: NodeTypeShape = { inputCount: 0, outputCount: 1 };
 const MERGE: NodeTypeShape = { inputCount: 2, outputCount: 1 };
 const IF: NodeTypeShape = { inputCount: 1, outputCount: 2, outputNames: ['true', 'false'] };
+
+/**
+ * A chain of `n` `set` nodes behind a trigger: `n + 1` nodes, no branching, no join. The
+ * shape that isolates *depth* — the axis M4's SMT route hit a wall on at ~25 nodes.
+ */
+export function generateChain(n: number, name = `chain-${n}`): WorkflowDescription {
+  const nodes: NodeDescription[] = [node('Trigger', 'trigger', [0, 0])];
+  const connections: MainConnection[] = [];
+  const shapes = new Map<string, NodeTypeShape>([['Trigger', TRIGGER]]);
+  let previous = 'Trigger';
+  for (let i = 0; i < n; i++) {
+    const name_i = `N${i}`;
+    nodes.push(node(name_i, 'set', [(i + 1) * 100, 0]));
+    shapes.set(name_i, SET);
+    connections.push({ from: previous, outputIndex: 0, to: name_i, inputIndex: 0 });
+    previous = name_i;
+  }
+  return { name, nodes, connections, startNode: 'Trigger', nodeTypes: (x) => shapes.get(x.name)! };
+}
+
+/**
+ * A trigger fanning out to `n` independent siblings: the shape that isolates *width*, i.e.
+ * the independent-branch parallelism NU-053 names as the state-class graph's blow-up axis
+ * (no partial-order reduction, so `n` independent branches interleave combinatorially).
+ */
+export function generateFanOut(n: number, name = `wide-${n}`): WorkflowDescription {
+  const nodes: NodeDescription[] = [node('Trigger', 'trigger', [0, 0])];
+  const connections: MainConnection[] = [];
+  const shapes = new Map<string, NodeTypeShape>([['Trigger', TRIGGER]]);
+  for (let i = 0; i < n; i++) {
+    const name_i = `W${i}`;
+    nodes.push(node(name_i, 'set', [200, i * 100]));
+    shapes.set(name_i, SET);
+    connections.push({ from: 'Trigger', outputIndex: 0, to: name_i, inputIndex: 0 });
+  }
+  return { name, nodes, connections, startNode: 'Trigger', nodeTypes: (x) => shapes.get(x.name)! };
+}
 
 /**
  * `layers` diamonds in series: every layer is `IF -> {A, B} -> Merge`, so the workflow has

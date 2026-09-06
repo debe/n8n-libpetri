@@ -14,14 +14,17 @@ This README is the single source of architectural truth. Read it before structur
 
 1. **Real concurrency.** n8n completes one branch before starting the next. Two independent
    500 ms HTTP calls take ~1 s. Under a net both transitions are enabled at once.
-2. **Analysability.** Once a workflow *is* a net, libpetri's `SmtVerifier` (Z3/Spacer
-   IC3-PDR) can be asked about it before activation, and hands back counterexamples that are
-   literal node paths through the same semantics production runs. What M4 measured actually
-   closes: the structural family (the budget bound and its P-semiflow, the per-node running
-   mutex, the retry bound, the join-slot discipline) and dead nodes, on workflows up to
-   roughly 25 nodes. The headline proper-completion question does **not** close on a compiled
-   net, and no verdict here is about firing order or about values — the honest surface, with
-   the numbers, is [`docs/verification.md`](docs/verification.md).
+2. **Analysability.** Once a workflow *is* a net, it can be asked about before activation,
+   and the answers come back as counterexamples that are literal node paths through the same
+   semantics production runs. Since M5 the primary engine is libpetri's **state-class graph**
+   (VER-010) — no solver — with the `SmtVerifier` (Z3/Spacer IC3-PDR) as the fallback for a
+   graph that truncates. The headline proper-completion question, *can this workflow strand a
+   branch?*, closes wherever that graph closes: `proven` or `violated` in milliseconds on the
+   fixtures and in ~100 ms on a 41-node chain. What bounds it is the workflow's **shape**
+   (independent branches make the class count combinatorial, cycles make it infinite), not
+   its node count, and a graph that truncates reports the truncation rather than a pass. No
+   verdict here is about firing order or about values — the honest surface, with the numbers,
+   is [`docs/verification.md`](docs/verification.md).
 
 ## Principles
 
@@ -215,11 +218,15 @@ has run, instead of failing or succeeding by canvas order.
   clears, done and exhausted are **not** pause-inhibited, so a paused net drains every
   structural transition and quiesces on its own with every token on an `in` / `ready` /
   `hasdata` / `waiting` place, where the marking codec reads it into n8n's own
-  `nodeExecutionStack` and `waitingExecution`. The M4 verifier declares `_pause` and
-  `_halted` as sink places (VER-002), but `joinedOrDeadLettered` — the per-place quiescence
-  query proper completion is asked with — carries **no sink clause by design** (NU-040 AC4),
-  so the declaration is inert and a violation whose witness holds `_pause` or `_halted` is
-  downgraded to `unknown` instead of being reported ([`docs/verification.md`](docs/verification.md)).
+  `nodeExecutionStack` and `waitingExecution`. The verifier **classifies** such a marking
+  rather than querying it: a quiescent class holding `_pause` / `_halted` / `X/waiting` /
+  `X/stopped` is a designed terminal, and the tokens counted as residue in it are exactly the
+  ones `encodeMarking` accepts in the mode that terminal is encoded with — anything else
+  (an unrouted `X/ok`, an unreaped `_halt`) is still reported. That is what M4's SMT form
+  could not do: `joinedOrDeadLettered` carries **no sink clause by design** (NU-040 AC4), and
+  even `deadlockFree`'s sink clause cannot express it, since a sink set admitting the arrival
+  would also excuse a real stranding on the same place — so a paused witness had to be
+  downgraded to `unknown` ([`docs/verification.md`](docs/verification.md)).
 - Cancellation is `executor.close()`; the workflow timeout stays n8n's own poll plus `close()`.
   A cancellation that arrives while the net is paused encodes in the cancellation mode:
   `close()` is exactly what can leave a completed action's output on `X/ok_o` with no
@@ -379,16 +386,32 @@ npx n8n-libpetri verify my-workflow.json --budget 2 --property dead-nodes
 
 Six property families over `compile(workflow).net` — no verification net — each reported as a
 named check with its own verdict, `unknown` included. Counterexamples come back as node paths.
-Exit 0 clean, 1 on a finding (or on any `unknown` under `--strict`), 2 usage, **3 when no usable
-z3 resolved**, so a run that verified nothing never looks like a clean one.
+Exit 0 clean, 1 on a finding (or on any `unknown` or `bounded` under `--strict`), 2 usage, **3
+when no usable z3 resolved**, so a run that verified nothing never looks like a clean one.
 
-It **proves**, on a workflow up to roughly 25 nodes: the concurrency budget bound and its
-two-phase P-semiflow, one activation per node, the retry bound, the join-slot discipline — and it
-**finds dead nodes** by name in ~90 ms, which is the one reliable finding and a real class of n8n
-bug. It does **not** decide proper completion on a compiled net (`unknown` at 600 s), it cannot
-prove a node *live* (that direction is a witness in a value-blind abstraction, so it is reported
-`unknown`, never `proven`), and it says nothing about firing order, values or timing (VER-004).
-The wall above ~25 nodes is libpetri's invariant pipeline, not z3.
+**Two routes, and the solver is the fallback.** The primary one is libpetri's state-class graph
+(VER-010): one enumeration per report, read by every family. A report whose graph closes decides
+every check off it — the only z3 the default run then starts is the 1 ms invariant-only call the
+budget family's P-semiflow needs. It
+**proves**, on any workflow whose graph closes: proper completion — *can this workflow strand a
+branch?* — the concurrency budget bound and its two-phase P-semiflow, one activation per node,
+the retry bound, the join-slot discipline and the OR-round arrival bound, and it **finds dead
+nodes** by name. Measured: 393 classes and 9 ms for the 6-node diamond, 2048 and ~110 ms for a
+41-node chain, and a stranding on `ifBothOutputs` in 25 ms (divergence #2). libpetri's
+`SmtVerifier` runs only where that graph truncates.
+
+What bounds it is **shape, not node count**: independent branches interleave combinatorially
+(NU-053 — the graph has no partial-order reduction), so a 20-way switch truncates at 200 000
+classes where a 41-node chain closes at 2048, and a cycle's state space is infinite, so a cyclic
+workflow gets the fourth verdict, `bounded` — the property holds for every run within the
+explored prefix, which is sound and is not a proof. A truncated graph never reads as a pass.
+`--max-classes` caps the enumeration (default 200 000, lowered when the heap cannot hold it;
+`0` turns the route off) and `--smt-fallback auto|off|force` controls the solver arm, which
+`auto` refuses to start above a measured net size because libpetri's pre-solver pipeline
+aborts the process on a big branchy net rather than failing.
+It still cannot prove a node *live* (that direction is a witness in a value-blind
+abstraction, so it is reported `unknown`, never `proven`), and it says nothing about firing
+order, values or timing (VER-004).
 
 Every limit above is pinned by a test, so an improvement breaks the suite and forces a
 re-measurement. The measured surface is [`docs/verification.md`](docs/verification.md); the design
@@ -396,6 +419,10 @@ and its limits are [ADR 0007](docs/adr/0007-verification.md).
 
 ## History
 
+M5 (the verification routes inverted) made libpetri's state-class graph (VER-010) the primary
+decision procedure and the `SmtVerifier` the fallback, which is what made proper completion
+close; it added the `bounded` verdict for cyclic workflows and left no model change behind
+([`docs/verification.md`](docs/verification.md), [ADR 0007](docs/adr/0007-verification.md) §9-§12).
 M4 (verification and the final gate) added `src/verify`, the CLI, and the conformance scopes
 above; it also made the one model change of the project — the `_budget` refund moved from
 `X_route` to `X_done`, which restores depth-first order at k = 1 and closes divergence #20

@@ -1,6 +1,8 @@
 /**
- * The measurement behind `docs/verification.md`. Not a vitest file (vitest picks up
- * `*.test.ts` only): run it, paste the tables.
+ * The measurement behind the **SMT** half of `docs/verification.md` — the fallback route,
+ * and the pipeline cost that is the reason it is only a fallback. The solver-free route has
+ * its own harness, `measure-graph.ts`. Not a vitest file (vitest picks up `*.test.ts` only):
+ * run it, paste the tables.
  *
  * ```
  * npx tsx tests/verify/measure.ts                 # 60 s per query, semiflows on and off
@@ -22,13 +24,14 @@
  */
 import { performance } from 'node:perf_hooks';
 import {
-  MarkingState, SmtVerifier, flatten, joinedOrDeadLettered, mutualExclusion, placeBound, unreachable,
+  MarkingState, SmtVerifier, deadlockFree, flatten, mutualExclusion, placeBound, unreachable,
   z3Available, type SmtProperty,
 } from 'libpetri/verification';
 import type { Place, Token } from 'libpetri';
 import { compile } from '../../src/compiler/index.js';
 import type { CompiledWorkflow, WorkflowDescription } from '../../src/compiler/index.js';
 import { diamond, multiProducer } from '../fixtures/workflows.js';
+import { REST_ROLES } from '../../src/verify/index.js';
 import { generateWorkflow, liveSampleNode, orphanBranch } from './support.js';
 
 interface Sample {
@@ -66,7 +69,11 @@ function markingStateOf(marking: ReadonlyMap<Place<unknown>, readonly Token<unkn
 /** One query per family: the cheapest shape and, where they differ, the expensive one too. */
 function samplesFor(compiled: CompiledWorkflow): Sample[] {
   const map = compiled.netMap;
-  const sinks = [map.shared.pause, map.shared.halted];
+  // The fallback's sink declaration: every place where a token at quiescence is legitimate
+  // residue (`state-class.ts` REST_ROLES), which is the VER-002 shape of workflow-net proper
+  // completion. M4 declared only `_pause` and `_halted` and asked `joinedOrDeadLettered`,
+  // which ignores sinks entirely (NU-040 AC4).
+  const sinks = map.places.filter((p) => REST_ROLES.has(p.role)).map((p) => p.place);
   const nodes = map.nodes;
   const first = nodes[0]!;
   const last = nodes[nodes.length - 1]!;
@@ -79,10 +86,6 @@ function samplesFor(compiled: CompiledWorkflow): Sample[] {
   // not one on a workflow whose dead branch sits at the bottom of the canvas (`orphan`).
   const live = liveSampleNode(map) ?? last;
   const joinPlaces = compiled.joinReadyPlaces.flatMap((j) => j.places);
-  const directEdge = compiled.edgeDataPlaces.find((p) => {
-    const info = map.place(p.name);
-    return info !== undefined && info.node !== null && map.node(info.node).form === 'direct';
-  });
   const samples: Sample[] = [
     {
       family: 'budget', what: 'placeBound(_budget, k)', familySize: 1,
@@ -109,21 +112,15 @@ function samplesFor(compiled: CompiledWorkflow): Sample[] {
     },
   ];
   if (deadNode === undefined) samples.splice(2, 1);
-  if (directEdge !== undefined) {
-    samples.push({
-      family: 'proper-completion', what: `joinedOrDeadLettered(${directEdge.name}) [edge]`,
-      familySize: joinPlaces.length + compiled.edgeDataPlaces.length,
-      property: joinedOrDeadLettered(directEdge), sinks,
-    });
-  }
+  // One whole-net query, not one per place: that is the fallback's shape since M5, and the
+  // `familySize: 1` is the point — M4's per-place form cost (places x timeout).
+  samples.push({
+    family: 'proper-completion', what: 'deadlockFree() [whole net, rest set as sinks]',
+    familySize: 1, property: deadlockFree(), sinks,
+  });
   const joinPlace = joinPlaces[0];
   if (joinPlace !== undefined) {
-    samples.push({
-      family: 'proper-completion', what: `joinedOrDeadLettered(${joinPlace.name}) [join input]`,
-      familySize: joinPlaces.length + compiled.edgeDataPlaces.length,
-      property: joinedOrDeadLettered(joinPlace), sinks,
-    });
-    // The second, weaker question on the same place, and the one whose cost differs by form:
+    // The second, weaker question, and the one whose cost differs by form:
     // a join slot has capacity 1 and cannot be violated by construction (ADR 0003), an OR
     // round has capacity n and is the only form where divergence #8 could show up.
     const group = compiled.joinReadyPlaces.find((j) => j.places.includes(joinPlace))!;

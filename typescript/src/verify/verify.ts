@@ -2,77 +2,128 @@
  * `verify(workflow)` — the property table, over the same net the scheduler executes.
  *
  * There is no verification net. {@link verify} calls `compile()` exactly as
- * `PetriScheduler` does and hands `compiled.net` to libpetri's `SmtVerifier`
- * (`spec/07-verification.md`), so every verdict is about the semantics production runs.
- * Counterexamples come back as node paths (`counterexample.ts`), never as place names.
+ * `PetriScheduler` does and asks its questions of `compiled.net`, so every verdict is about
+ * the semantics production runs. Counterexamples come back as node paths
+ * (`counterexample.ts`), never as place names.
  *
- * The six property families and what each one can and cannot say:
+ * ## Two routes, and which one decides
  *
- * 1. **proper completion** — `joinedOrDeadLettered(p)` (NU-040) on every join-input
- *    `ready_i` place and every edge data place, with `_pause` and `_halted` declared as the
- *    **only** sinks (VER-002), plus a `placeBound` on each `ready_i` — a weaker question
- *    (how many arrivals can queue there at once) that, unlike the quiescence query, closes
- *    on a real workflow. `joinedOrDeadLettered` ignores the declared sinks (NU-040 AC4), so
- *    a violation whose witness is a paused or halted marking is downgraded to `unknown`
- *    rather than reported: see {@link PAUSE_WITNESS_REASON}. `joinedOrDeadLettered` encodes
- *    "reachable ∧ quiescent ∧ M(p) ≥ 1" for *any* place — it is not ν-specific.
- *    `deadlockFree` is the wrong question here, for a reason that does not depend on how
- *    libpetri words it. Its error condition today (VER-002, since the `terminatesAtSink`
- *    split) is "quiescent ∧ some marked place is not a declared sink" — stranding-based, and
- *    a *successful* run of a compiled workflow quiesces holding every `X/idle`, every
- *    `X/done` and `X/skipped` marker, the refunded `_budget` units, every unspent `X/tries`
- *    and every spent `empty` token, so the whole-net question is violated by every clean
- *    execution unless most of the net is declared a sink. And even the legitimate sink set
- *    would still fire on a *paused* marking, whose unconsumed arrival on an `in` place is
- *    the marking codec's business (ADR 0005) and not a stranding. The question has to be
- *    asked per place.
- * 2. **dead nodes** — `unreachable({X/running})` per node. Only libpetri's *proven*
- *    direction becomes a verdict: it means the node can never run, which is the finding, so
- *    the check reports `violated` (`types.ts`). libpetri's `violated` — a witness that
- *    reaches the running place — is **not** reported as `proven`: the encoding is untimed,
- *    priority-blind and value-blind (VER-004), every `xor` branch of a router is explored
- *    whatever the data, and VER-004 AC3 licenses the proof direction only. A node the
- *    solver says is reachable is therefore `unknown` (see {@link LIVENESS_REASON}), and so
- *    is a node that is dead only because n8n starts **one trigger per execution** — another
- *    entry point of a multi-trigger workflow, or a node only that entry point feeds
- *    (see {@link alternativeEntryReach}).
- * 3. **no double activation** — `placeBound(X/running, 1)`: the `X/idle` mutex made
+ * Every question here is **reachability-safety**: does any reachable marking do this? There
+ * are two ways to decide such a question over a libpetri net, and M5 inverted which one
+ * leads:
+ *
+ * - the **solver-free route** (`state-class.ts`): libpetri's state-class graph (VER-010),
+ *   enumerated once per report and read by every family. When the graph is **complete** it
+ *   decides exactly — a bound, a co-marking, a reachable place, a stranded token — with no
+ *   solver process and no P-invariant pipeline. When it **truncates** at its class cap it
+ *   still decides every violation it found (a class of the explored prefix is reachable
+ *   however the BFS ended) and, on a *cyclic* workflow, still certifies the largest whole
+ *   number of runs of the workflow's cyclic nodes its prefix closes — the `bounded` verdict;
+ * - the **SMT route** (libpetri's `SmtVerifier`, IC3/PDR through z3, VER-001/VER-013): the
+ *   **fallback**, run per family only where the graph truncated or failed to build — and not
+ *   at all above the measured net size of {@link smtRefusalFor}, where the pipeline libpetri
+ *   runs before z3 aborts the process instead of answering, nor for a question the graph has
+ *   already shown that query cannot decide ({@link provenUnreachableReason}).
+ *
+ * NU-053 prescribes exactly this order — *"the verifier routes a bounded quiescence query to
+ * Route B first; when Route B truncates (`Unknown`), it defers to \[the SMT encoding] rather
+ * than returning `Unknown`"*. M4 had it the other way round and the headline property never
+ * closed. `docs/verification.md` has the measured before/after.
+ *
+ * ## The three things a truncated graph can still say
+ *
+ * A cap is what turns "hangs" into "reports a limit", and the limit is reported three ways,
+ * in decreasing strength. A **violation** found in the explored prefix is a full finding: a
+ * quiescent class of that prefix is quiescent and reachable whatever the BFS did. A
+ * **`bounded`** verdict is the honest middle for a cyclic workflow, whose state space is
+ * unbounded so that `proven` is out of reach at every cap: the prefix closes every run in
+ * which the workflow's cyclic nodes run at most `k` times, exactly, and says so
+ * ({@link boundedReason}; the closure argument is `state-class.ts` `closedCyclicRuns`).
+ * **`unknown`** is what is left — heavy independent parallelism (NU-053: no partial-order
+ * reduction), or a cap simply set too low, where there is nothing to count.
+ *
+ * Nothing folds a `bounded` into `proven`: it has its own {@link CheckVerdict}, its own
+ * count, its own section of the report and it fails `--strict`.
+ *
+ * ## The six property families and what each one can and cannot say
+ *
+ * 1. **proper completion** — *can this workflow strand a branch?* One whole-net check plus
+ *    one per join input and per edge place. A quiescent class of the graph is a run that has
+ *    come to rest; it is a **stranding** when it still holds a token on a place whose
+ *    `PlaceRole` means pending work (`state-class.ts` `REST_ROLES`), and it is a *designed*
+ *    terminal — a paused or halted run whose pending activations the marking codec writes
+ *    back (ADR 0005) — when it holds `_pause` / `_halted` / `X/waiting` / `X/stopped`, where
+ *    the rest set widens to what the codec accepts in the mode that terminal is encoded with
+ *    (`state-class.ts` `PAUSE_REST_ROLES` / `HALT_REST_ROLES`). That filter is what M4 could
+ *    not express: `joinedOrDeadLettered` carries no sink clause (NU-040 AC4), so a paused
+ *    witness had to be downgraded to `unknown`. The SMT fallback is one **whole-net**
+ *    `deadlockFree` query (VER-002 since the `terminatesAtSink` split: *quiescent ∧ some
+ *    marked place is not a declared sink* — literally workflow-net proper completion) with
+ *    the structural rest set declared as the sinks. Measured, it decides nothing the graph
+ *    could not, and on a net whose graph already exhibits a quiescent marking outside that
+ *    sink set it cannot even in principle, so it is not asked there (see
+ *    {@link SMT_FALLBACK_REASON} and `docs/verification.md`).
+ * 2. **dead nodes** — is `X/running` reachable? The graph answers by enumeration; the SMT
+ *    fallback asks `unreachable({X/running})`. Only the *unreachable* direction becomes a
+ *    verdict, and because that is the finding, the check reports `violated` (`types.ts`). A
+ *    node the route *reaches* is `unknown`, never `proven`: both routes explore a
+ *    priority-blind, value-blind abstraction in which every `xor` branch of a router is
+ *    available whatever the data (VER-004 AC2), and VER-004 AC3 licenses the proof direction
+ *    only. So is a node that is dead only because n8n starts **one trigger per execution**
+ *    ({@link alternativeEntryReach}).
+ * 3. **no double activation** — `X/running` never holds two tokens: the `X/idle` mutex made
  *    structural (`X/idle + X/running = 1` is a found P-invariant, ADR 0004).
- * 4. **budget** — `placeBound(_budget, k)` plus the two-phase P-semiflow
+ * 4. **budget** — `_budget` never exceeds `k`, plus the two-phase P-semiflow
  *    `w·_budget + w·Σ(running + ok + retry) = w·k` read off the validated invariants. A net
- *    whose budget were a self-loop (consumed and refunded by one transition) would prove the
- *    bound trivially: the incidence column is zero, so the encoder never sees the place move.
- *    The two-phase gadget is what makes this bound mean something.
- * 5. **retry bound** — `placeBound(X/tries, maxTries − 1)` **plus** a structural check that
- *    no transition of the net produces `X/tries`. The place bound on its own only restates
- *    the seeding; it is the conjunction of the two that bounds the number of *attempts*.
- * 6. **mutual exclusion** — `mutualExclusion(A/running, B/running)` for caller-supplied
- *    pairs, or every pair. At k = 1 every pair is provable, which is a sanity check of the
- *    budget model rather than a workflow property; at k ≥ 2 it is violated for independent
+ *    whose budget were a self-loop would prove the bound trivially: the incidence column is
+ *    zero, so the encoder never sees the place move. The two-phase gadget is what makes the
+ *    bound mean something, and the semiflow is the half that carries the claim.
+ * 5. **retry bound** — `X/tries` never exceeds `maxTries − 1` **plus** a structural check
+ *    that no transition of the net produces `X/tries`. The bound alone only restates the
+ *    seeding; the conjunction is what bounds the number of *attempts*.
+ * 6. **mutual exclusion** — `A/running` and `B/running` never marked together, for
+ *    caller-supplied pairs or every pair. At k = 1 every pair holds, which is a sanity check
+ *    of the budget model rather than a workflow property; at k ≥ 2 it fails for independent
  *    nodes, which is the point of the budget.
  *
- * What no verdict here can say (VER-004): the encoding is **priority-blind** and
- * **value-blind**. Nothing about firing *order* — n8n's depth-first walk, `executionIndex`,
- * the divergence register's ordering rows — is provable from it, and no verdict depends on
- * what a node returns. Timing is ignored too, which only strengthens a proof (timing can
- * restrict behaviour, never add it).
+ * ## What no verdict here can say
  *
- * Without a usable z3 every verdict is `unknown` with a reason naming `PATH` and
- * `LIBPETRI_Z3` (VER-013). Nothing here throws on a solver problem.
+ * **Order** — both routes are priority-blind (the state-class graph expands every
+ * base-enabled transition; the SMT encoding has no priority at all), so nothing about n8n's
+ * depth-first walk or the divergence register's ordering rows is provable here. **Values** —
+ * both are value-blind, so every `xor` branch of a router is explored and no verdict depends
+ * on what a node returns. **Action duration** — both model a firing as atomic, while the
+ * executor consumes at fire time and produces when the action settles; the difference is
+ * confined to transitions whose *inhibitor* place an action can produce (`_halt`, `_pause`)
+ * and is stated as scope in `docs/verification.md`. **Timing** is modelled exactly by the
+ * state-class graph (VER-011 zones) and ignored by the SMT encoding, which only strengthens
+ * an SMT proof.
+ *
+ * Without a usable z3 the solver-free route still decides everything a complete graph
+ * decides; only the fallbacks and the P-invariant summary come back `unknown`, with a reason
+ * naming `PATH` and `LIBPETRI_Z3` (VER-013). Nothing here throws on a solver problem.
  */
 import { performance } from 'node:perf_hooks';
 import { compile } from '../compiler/index.js';
-import type { CompiledWorkflow, NetMapView, NodeGadget, WorkflowDescription } from '../compiler/index.js';
+import type {
+  CompiledWorkflow, NetMapView, NodeGadget, PlaceRole, WorkflowDescription,
+} from '../compiler/index.js';
 import type { Place, Token } from 'libpetri';
 import {
-  MarkingState, SmtVerifier, flatten, formatZ3Version, joinedOrDeadLettered, mutualExclusion,
+  MarkingState, SmtVerifier, deadlockFree, flatten, formatZ3Version, mutualExclusion,
   placeBound, resolveZ3, unreachable,
   type FlatNet, type PInvariant, type SmtProperty, type SmtVerificationResult, type Z3Solver,
 } from 'libpetri/verification';
 import { decodeCounterexample } from './counterexample.js';
+import {
+  DEFAULT_MAX_CLASSES, MAX_WITNESSES, REST_ROLES, StateSpace, TERMINAL_ROLES, loopTransitions,
+  witnessCounterexample,
+} from './state-class.js';
+import type { TruncationShape } from './state-class.js';
 import type {
-  CheckSubject, CheckVerdict, Counterexample, InvariantSummary, MutualExclusionRequest, PropertyCheck,
-  PropertyName, SolverInfo, VerificationReport, VerifyOptions,
+  CheckRoute, CheckSubject, CheckVerdict, Counterexample, InvariantSummary, MarkedPlace,
+  MutualExclusionRequest, PropertyCheck, PropertyName, SmtFallbackMode, SolverInfo,
+  VerificationReport, VerifyOptions,
 } from './types.js';
 import { PROPERTY_NAMES } from './types.js';
 
@@ -194,6 +245,7 @@ function nodeCarriesUnit(g: NodeGadget, terms: ReadonlyMap<string, number>, w: n
   return inFlight.length === 0 || inFlight.some((p) => (terms.get(p.name) ?? 0) > 0);
 }
 
+
 // ==================== the run ====================
 
 interface QueryOutcome {
@@ -204,6 +256,20 @@ interface QueryOutcome {
   readonly elapsedMs: number;
 }
 
+/**
+ * A decided (or undecided) question, whichever route answered it. `verdict` is libpetri's
+ * own polarity — the polarity inversion the dead-nodes family applies happens at the call
+ * site, so {@link PropertyCheck.query} can record what was actually asked.
+ */
+interface Decision {
+  readonly verdict: CheckVerdict;
+  readonly reason: string | null;
+  readonly route: CheckRoute;
+  readonly method: string | null;
+  readonly elapsedMs: number;
+  readonly counterexample: Counterexample | null;
+}
+
 interface Context {
   readonly compiled: CompiledWorkflow;
   readonly map: NetMapView;
@@ -212,6 +278,14 @@ interface Context {
   readonly timeoutMs: number;
   readonly semiflowInvariants: boolean;
   readonly solver: SolverInfo;
+  /** How far the SMT route may go (`VerifyOptions.smtFallback`). */
+  readonly smtFallback: SmtFallbackMode;
+  /** Why no `SmtVerifier` may be constructed for this net; `null` when it may. */
+  readonly smtRefusal: string | null;
+  /** What the workflow's shape is, for the truncation cause. */
+  readonly shape: TruncationShape;
+  /** The solver-free route, explored once and shared by every family (`state-class.ts`). */
+  readonly space: StateSpace;
   /** Node → the alternative entry point that is the only reason it cannot run here. */
   readonly entryReach: ReadonlyMap<string, string>;
   readonly checks: PropertyCheck[];
@@ -223,10 +297,63 @@ interface Context {
 }
 
 /**
- * Runs one property. Never throws: a solver problem, a CORE-043 rejection or any other
- * failure becomes `unknown` with the message as the reason (VER-013).
+ * The net sizes above which the SMT route is refused in mode `'auto'`, measured on this
+ * repository's generated workflows (`docs/verification.md`, "The pipeline before z3").
+ *
+ * The cost driver is **join count**, not node count: a 41-node chain (411 places, no join)
+ * runs the pipeline in 1.8 s at 214 MB, while `layers` diamonds in series cost 0.4 s at 6
+ * join inputs, 2.8 s at 10, 118 s and 2.4 GB at 14, over 7 minutes at 16, and exhaust the
+ * heap at 18 (37 nodes) — where the process **aborts**, because a V8 heap exhaustion is not
+ * an exception any `try` here can catch. So the ceiling is a join-input count, and the
+ * places ceiling is a second, independent guard for a shape whose blow-up is not joins (the
+ * heap died at 452 places on the same family).
+ *
+ * Both are deliberately conservative, and both are a proxy: they cannot bound what the
+ * Farkas enumeration will do on an unmeasured shape. `smtFallback: 'force'` overrides them.
+ */
+export const SMT_MAX_JOIN_INPUTS = 12;
+
+/** @see SMT_MAX_JOIN_INPUTS */
+export const SMT_MAX_FLAT_PLACES = 450;
+
+/**
+ * Why this net gets no `SmtVerifier`, or `null` when it may have one.
+ *
+ * This is checked **before** the builder is constructed rather than around `verify()`,
+ * because the failure being guarded against is not catchable: the pipeline libpetri runs
+ * before z3 (flatten, structural pre-check, P-invariant and semiflow enumeration) exhausts
+ * the V8 heap on a big branchy net, and the process aborts with no report at all — the CLI's
+ * exit-code contract included. An `unknown` naming the ceiling is strictly more useful.
+ */
+export function smtRefusalFor(
+  flat: FlatNet, joinInputs: number, mode: SmtFallbackMode,
+): string | null {
+  if (mode === 'force') return null;
+  if (mode === 'off') {
+    return 'the SMT route is off (smtFallback: \'off\'), so nothing was asked of z3 and the ' +
+      'P-invariant pipeline never ran';
+  }
+  const places = flat.places.length;
+  if (places <= SMT_MAX_FLAT_PLACES && joinInputs <= SMT_MAX_JOIN_INPUTS) return null;
+  const over = places > SMT_MAX_FLAT_PLACES
+    ? `${places} flat places (ceiling ${SMT_MAX_FLAT_PLACES})`
+    : `${joinInputs} join inputs (ceiling ${SMT_MAX_JOIN_INPUTS})`;
+  return `the SMT route was not started: this net has ${over}, above the size where libpetri's ` +
+    'pre-solver pipeline (flatten, structural pre-check, P-invariants, semiflows) was measured to ' +
+    'exhaust the V8 heap — which aborts the process rather than returning a verdict, so it is not ' +
+    'attempted. Verify a smaller slice of the workflow, or pass smtFallback: \'force\' ' +
+    '(--smt-fallback force) to run it anyway';
+}
+
+/**
+ * Runs one SMT query. Never throws: a solver problem, a CORE-043 rejection or any other
+ * failure becomes `unknown` with the message as the reason (VER-013). A net above the
+ * measured size ceiling is refused outright ({@link smtRefusalFor}).
  */
 async function query(ctx: Context, property: SmtProperty, sinks: readonly Place<unknown>[]): Promise<QueryOutcome> {
+  if (ctx.smtRefusal !== null) {
+    return { verdict: 'unknown', reason: ctx.smtRefusal, method: null, result: null, elapsedMs: 0 };
+  }
   if (!ctx.solver.available) {
     return { verdict: 'unknown', reason: ctx.solver.reason, method: null, result: null, elapsedMs: 0 };
   }
@@ -261,6 +388,136 @@ async function query(ctx: Context, property: SmtProperty, sinks: readonly Place<
   }
 }
 
+/** An SMT query as a {@link Decision}. */
+async function smtDecision(
+  ctx: Context, property: SmtProperty, sinks: readonly Place<unknown>[] = [],
+): Promise<Decision> {
+  const outcome = await query(ctx, property, sinks);
+  return {
+    verdict: outcome.verdict,
+    reason: outcome.reason,
+    route: 'smt',
+    method: outcome.method,
+    elapsedMs: outcome.elapsedMs,
+    counterexample: counterexampleFor(outcome, ctx),
+  };
+}
+
+/**
+ * Why the truncated graph cannot answer, and what to do about it — with the cause taken from
+ * {@link StateSpace.truncationCause}, which is evidence rather than a default. Two of its
+ * four values are the shapes NU-053 names (a cycle, and heavy independent parallelism); the
+ * other two are a cap set below what the workflow needs and a route the caller switched off,
+ * and telling those apart is the difference between "raise the cap" and "this workflow cannot
+ * be enumerated".
+ *
+ * The sentence is deliberate about what *was* established: "nothing was stranded among the
+ * `n` classes explored" is a bounded fact and never a proof. Reporting it as `proven` is the
+ * one failure mode this route must not have.
+ */
+function truncationReason(ctx: Context): string {
+  const space = ctx.space;
+  if (!space.usable) {
+    return `the state-class graph could not be built (${space.error ?? 'unknown reason'}), so the ` +
+      'solver-free route decided nothing';
+  }
+  const cause = space.truncationCause(ctx.shape);
+  if (cause === 'off') {
+    return `the solver-free route was turned off (maxClasses = ${space.requestedMaxClasses}), so nothing ` +
+      'was enumerated and every question went to the SMT route';
+  }
+  const lowered = space.maxClasses < space.requestedMaxClasses
+    ? ` (lowered from the requested ${space.requestedMaxClasses} to what this process's heap can hold)`
+    : '';
+  const explored = `the state-class graph truncated at its ${space.maxClasses}-class cap${lowered} ` +
+    `(${space.classes} classes explored in ${(space.elapsedMs / 1000).toFixed(1)}s), so completeness — ` +
+    'and with it any proof — is out of reach.';
+  const advice = cause === 'cycle'
+    ? ' The workflow has a cycle, so its reachable state space is unbounded and no class cap can ' +
+      'close it (NU-053). Nothing was stranded among the classes explored, which is a bounded fact ' +
+      'about a prefix of the runs, not a proof about all of them.'
+    : cause === 'parallelism'
+      ? ' This workflow has branching nodes, and independent parallel branches blow the class count up ' +
+        'combinatorially (NU-053: the graph has no partial-order reduction). Raising maxClasses may ' +
+        'close it; verifying a smaller slice of the workflow certainly will.'
+      : ' No cycle and no branching node explains it, so the cap is simply below what this workflow ' +
+        'needs: raise maxClasses.';
+  return explored + advice;
+}
+
+/**
+ * Why the SMT fallback is asked at all, and — measured — what it can and cannot answer.
+ *
+ * The fallback is one **whole-net** `deadlockFree` query with the structural rest set
+ * declared as sinks — the VER-002 shape that is literally workflow-net proper completion,
+ * and one query per workflow rather than M4's one per place. Measured (30 s per query,
+ * `docs/verification.md`), it decided nothing on any fixture: `unknown` on eight of ten and
+ * `violated` on `fanOut` and `multiProducer` with a witness that is a *paused* run — the
+ * designed terminal the solver-free route classifies and this query cannot, because a
+ * `_pause` marking also holds an `in`-place arrival the codec writes back and the sink set
+ * cannot both admit that arrival and still detect a stranding on it.
+ *
+ * The reason for the nought-for-ten is structural, not a solver budget, and it is worth
+ * being exact about because it decides when the query is worth running at all. VER-002's
+ * error condition is *quiescent ∧ some marked place is not a declared sink*, and the sinks
+ * declared here are exactly {@link REST_ROLES}. So on a net that has **any** reachable
+ * quiescent marking outside that set — a paused run holding an arrival, which is most
+ * workflows with a second branch in flight — the property is false by construction and its
+ * `proven` direction cannot come back however long z3 runs. {@link StateSpace.outsideSinkClasses}
+ * counts exactly those classes, and {@link smtFallbackCompletion} does not spend a timeout on
+ * a question the graph has already answered `no` to.
+ *
+ * Where the count *is* zero the query is a real one and its `proven` would transfer, so it
+ * runs. Its `violated` is passed through as a finding when the witness is not a designed
+ * terminal, and downgraded when it is (see {@link PAUSE_WITNESS_REASON}).
+ *
+ * All of that is a claim about **this** query only. The other families' fallbacks decide
+ * plenty on the same truncated graphs — on `switch20`, z3 proves `placeBound(_budget, 1)`
+ * and all 22 `placeBound(X/running, 1)` at ~2.8 s each — which is why the fallback stays per
+ * family rather than being dropped wholesale.
+ */
+const SMT_FALLBACK_REASON =
+  'the whole-net deadlockFree fallback (VER-002, structural rest set as sinks) did not decide it either';
+
+/**
+ * Why the whole-net `deadlockFree` fallback was not even asked: the graph found a reachable
+ * quiescent marking outside the declared sink set, so the query is false on this net and
+ * `proven` — the only direction it could contribute here — is unreachable.
+ */
+function provenUnreachableReason(ctx: Context): string {
+  const n = ctx.space.outsideSinkClasses;
+  return 'the whole-net deadlockFree fallback (VER-002, structural rest set as sinks) was not asked: ' +
+    `the graph already reached ${n} quiescent marking(s) holding a place outside that sink set ` +
+    '(a designed terminal whose arrival the marking codec writes back), so the query is false on this ' +
+    'net and can never return proven — the only direction it could add. Its violated direction would ' +
+    'name one of those same markings, which is not a defect; the graph classifies them instead';
+}
+
+/**
+ * Why an SMT proper-completion violation whose witness is a designed terminal is downgraded.
+ *
+ * A paused marking (`_pause`, from a Wait node or a destination stop) or a halted one
+ * (`_halted`) holds unconsumed arrivals on purpose: the marking codec writes them back into
+ * n8n's `nodeExecutionStack` (ADR 0005). The sink set cannot exclude the witness — declaring
+ * the `in` / `ready` / `hasdata` places as sinks would also excuse a genuine stranding on
+ * them, which is the whole question — so the query cannot separate the two. It is not a
+ * proof either: Spacer returns one witness and a real stranding may hide behind it.
+ *
+ * The solver-free route has no such problem: it classifies the class instead of asking a
+ * query about it (`state-class.ts`, "The pause filter").
+ */
+const PAUSE_WITNESS_REASON =
+  'the only witness the solver returned is a paused or halted run — a designed terminal marking ' +
+  'whose unconsumed arrivals the marking codec writes back, not a stranding. A sink set that ' +
+  'excused it would also excuse a real stranding on the same places, so the query cannot separate ' +
+  'the two; the solver-free route classifies the marking instead';
+
+/** True when the witness marking holds `_pause`, `_halt` or `_halted`. */
+function witnessIsDesignedTerminal(cex: Counterexample | null): boolean {
+  return cex !== null && cex.stuckMarking.some(
+    (p) => p.role !== null && TERMINAL_ROLES.has(p.role));
+}
+
 function record(
   ctx: Context,
   check: Omit<PropertyCheck, 'counterexample'> & { readonly counterexample?: PropertyCheck['counterexample'] },
@@ -291,50 +548,143 @@ function placeOf(property: SmtProperty): string | null {
   }
 }
 
+/** What was asked and how it was answered. `property` names the question, `route` the answer. */
 function queryRecord(
-  property: SmtProperty, outcome: QueryOutcome, sinks: readonly Place<unknown>[],
+  property: SmtProperty | 'none', decision: Decision, sinks: readonly Place<unknown>[] = [],
 ): PropertyCheck['query'] {
   return {
-    property: property.type,
-    place: placeOf(property),
-    verdict: outcome.verdict,
+    property: property === 'none' ? 'none' : property.type,
+    place: property === 'none' ? null : placeOf(property),
+    verdict: decision.verdict,
     sinks: sinks.map((p) => p.name),
-    method: outcome.method,
+    method: decision.method,
+    route: decision.route,
   };
 }
 
-// ==================== properties ====================
+function counterexampleFor(outcome: QueryOutcome, ctx: Context): Counterexample | null {
+  if (outcome.result === null || outcome.verdict !== 'violated') return null;
+  return decodeCounterexample(outcome.result, ctx.map);
+}
+
+// ==================== the solver-free decisions ====================
+
+/** A verdict read straight off the graph. */
+function graphDecision(
+  verdict: CheckVerdict, counterexample: Counterexample | null = null, reason: string | null = null,
+): Decision {
+  return {
+    verdict,
+    reason,
+    route: 'state-class-graph',
+    method: verdict === 'bounded' ? 'state-class graph (bounded)' : 'state-class graph',
+    elapsedMs: 0,
+    counterexample,
+  };
+}
 
 /**
- * Why a proper-completion violation is downgraded to `unknown` rather than reported.
+ * `placeBound(place, bound)` from the graph. `null` when the graph decided nothing — it
+ * truncated with no violation in the prefix, or failed to build — in which case the caller
+ * runs the SMT fallback and then {@link boundedOrUnknown}.
  *
- * `joinedOrDeadLettered` carries **no sink clause by design** (NU-040 AC4: "a declared sink
- * must not excuse a stranded group"), so `sinkPlaces(_pause, _halted)` does not reach this
- * property's error condition — only `deadlockFree` and `terminatesAtSink` read the declared
- * sinks. The declaration is kept because it is the intent VER-002 would need, but it is
- * inert today, and without it every quiescent marking counts — including the two the model
- * *designs*: a paused run (`_pause`, from a Wait node or a destination stop) and a halted
- * one (`_halted`). In a paused marking an unconsumed arrival on an `in` / `ready` place is
- * not stranded at all — it is exactly what the marking codec writes back into n8n's
- * `nodeExecutionStack` (ADR 0005). Since every node's `X_run` offers the waiting and stopped
- * outcomes, that witness exists in every workflow with two sibling branches, and reporting
- * it would make the property fire on every fan-out.
+ * A complete graph decides this **exactly**: the peak token count over every reachable class
+ * either exceeds the bound or does not. There is no abstraction gap on the bound itself; the
+ * gap is the one every verdict here carries (priority-blind, value-blind, atomic firing).
  *
- * So a violation whose witness marking holds `_pause` or `_halted` is not a finding. It is
- * also not a proof: Spacer returns one witness, and a real stranding may exist behind it —
- * hence `unknown`, with the witness kept for inspection.
+ * A peak *above* the bound is a verdict at any completeness: the class holding it was
+ * genuinely reached, so a truncated graph that finds one has found a real violation. Only
+ * the *absence* of one needs the graph to have closed.
  */
-const PAUSE_WITNESS_REASON =
-  'the only witness the solver returned is a paused or halted run — a designed terminal marking ' +
-  'whose unconsumed arrivals the marking codec writes back, not a stranding. joinedOrDeadLettered ' +
-  'carries no sink clause (NU-040 AC4), so declaring _pause and _halted as sinks cannot exclude it, ' +
-  'and the query cannot separate a real stranding from a pause';
-
-/** True when the witness marking holds `_pause`, `_halt` or `_halted`. */
-function witnessIsDesignedTerminal(cex: Counterexample | null): boolean {
-  return cex !== null && cex.stuckMarking.some(
-    (p) => p.node === null && (p.role === 'pause' || p.role === 'halt' || p.role === 'halted'));
+function graphBound(ctx: Context, place: Place<unknown>, bound: number): Decision | null {
+  if (!ctx.space.usable) return null;
+  if (ctx.space.peak(place) > bound) {
+    const witness = ctx.space.peakWitness(place);
+    return graphDecision('violated', witness === null ? null : witnessCounterexample(witness));
+  }
+  return ctx.space.complete ? graphDecision('proven') : null;
 }
+
+/**
+ * `unreachable({place})` from the graph, for the dead-nodes family.
+ *
+ * A class marking `place` is a real witness whether or not the graph closed, so *reachable*
+ * (libpetri's `violated`) is decided from a truncated graph too — which matters, because the
+ * family's fallback is one SMT query per node and a truncated graph is exactly the big
+ * workflow where that is unaffordable. **Unreachable** needs a complete graph and gets no
+ * `bounded` arm: "the node did not run within `k` cyclic-node runs" is not evidence that it
+ * is dead, and reporting it as the family's finding would send a reader after a non-bug.
+ */
+function graphUnreachable(ctx: Context, place: Place<unknown>): Decision | null {
+  if (!ctx.space.usable) return null;
+  if (ctx.space.everMarked(place)) return graphDecision('violated');
+  return ctx.space.complete ? graphDecision('proven') : null;
+}
+
+/**
+ * What a `bounded` verdict quantifies over, spelled out where it is reported.
+ *
+ * It is the honest middle between the two things M5 refuses to do on a cyclic workflow:
+ * claim a proof it cannot have, and say nothing at all. The closure argument is in
+ * `state-class.ts` (`closedCyclicRuns`); this is its statement in workflow terms.
+ */
+function boundedReason(ctx: Context, iterations: number): string {
+  const space = ctx.space;
+  // The unit is a *run of a cyclic node*, not a pass of the loop body: `loopTransitions`
+  // counts the `X_run` of every node on a cycle, so a two-node loop spends two per pass.
+  // What is guaranteed in the author's own unit is therefore floor(k / loopSteps) passes.
+  const passes = space.loopSteps <= 1
+    ? ''
+    : ` (at least ${Math.floor(iterations / space.loopSteps)} complete pass(es) of the ` +
+      `${space.loopSteps} cyclic node(s) on the cycle, and more of a run that visits only some of them)`;
+  return `not a proof: the state-class graph truncated at its ${space.maxClasses}-class cap ` +
+    `(${space.classes} classes, ${space.expandedClasses} of them expanded, in ` +
+    `${(space.elapsedMs / 1000).toFixed(1)}s). What *was* established is bounded and exact — every run ` +
+    `in which this workflow's cyclic nodes run at most ${iterations} time(s) in total${passes} was ` +
+    'enumerated in full, together with every marking such a run can come to rest in, and none of them ' +
+    'breaks this check. A run with more cyclic-node runs than that was not explored. The workflow has ' +
+    'a cycle, so its reachable state space is unbounded (NU-053) and no class cap can close it; raising ' +
+    '--max-classes raises the bound rather than reaching a proof';
+}
+
+/**
+ * The route order for a question the graph examined and found nothing wrong with, over a
+ * graph that then truncated: the SMT fallback first (a `proven` from it would be a real
+ * proof and outranks any bound), and the bounded verdict only if the solver did not decide.
+ *
+ * `bounded` is offered only when {@link StateSpace.boundedCyclicRuns} is non-null, i.e. only
+ * on a workflow with a cycle whose explored prefix closes at least one whole cyclic-node run.
+ * The other truncation shapes — heavy independent parallelism (NU-053), or a cap set too
+ * low — have nothing to count and stay `unknown`, which is the honest answer there.
+ */
+function boundedOrUnknown(ctx: Context, decision: Decision, note: string | null = decision.reason): Decision {
+  if (decision.verdict !== 'unknown') return decision;
+  const iterations = ctx.space.boundedCyclicRuns;
+  if (iterations === null) return decision;
+  // "The SMT route:" and not "the fallback did not close it either": the note may say the
+  // query was never asked, and stacking a false claim on top of that was the shape of the
+  // reason strings this route had to stop producing.
+  const reason = note === null || note === ''
+    ? boundedReason(ctx, iterations)
+    : `${boundedReason(ctx, iterations)}. The SMT route: ${note}`;
+  return { ...graphDecision('bounded', null, reason), elapsedMs: decision.elapsedMs };
+}
+
+/**
+ * The three-way explanation of a check, with the `bounded` arm derived from the `proven`
+ * one: the claim is the same, the quantifier is smaller, and saying so in one place keeps
+ * the two from drifting apart.
+ */
+function explain(verdict: CheckVerdict, text: { proven: string; violated: string; unknown: string }): string {
+  switch (verdict) {
+    case 'proven': return text.proven;
+    case 'violated': return text.violated;
+    case 'bounded': return `Only within the explored cyclic-node-run bound — ${text.proven}`;
+    case 'unknown': return text.unknown;
+  }
+}
+
+// ==================== proper completion ====================
 
 /**
  * The **arrival capacity** of a join / OR input: how many arrivals its gadget can hold at
@@ -342,13 +692,10 @@ function witnessIsDesignedTerminal(cex: Counterexample | null): boolean {
  *
  * A join / choose-branch input has one slot: every `arm` consumes `free_i` and only
  * `X_start` / `X_skip` refund it (ADR 0003), so `free_i + ready_i ≤ 1` holds **by
- * construction** and `placeBound(ready_i, 1)` cannot come back `violated` on a net this
- * compiler produced. The query is still worth its 400 ms — it re-checks the gadget against
- * the net that was actually built, and a compiler change that broke the discipline would
- * show up here — but it is *not* a detector for the arrival-order class of divergence #8.
- * That class lives on the OR form, which aggregates a round of `n` deliveries with no slot
- * token at all (README "OR-inputs"), and where `placeBound(ready_i, n)` is exactly the query
- * `docs/divergences.md` row #8 names.
+ * construction** and a violation would mean the compiler broke the gadget. The OR form
+ * aggregates a round of `n` deliveries with no slot token at all (README "OR-inputs"), and
+ * `placeBound(ready_i, n)` there is the query `docs/divergences.md` row #8 names — the form
+ * where a violation is a real finding, and the one M4's SMT route could not decide.
  */
 function arrivalCapacity(ctx: Context, node: string, inputIndex: number): { capacity: number; round: boolean } {
   const input = ctx.map.node(node).inputs.find((i) => i.index === inputIndex);
@@ -357,81 +704,65 @@ function arrivalCapacity(ctx: Context, node: string, inputIndex: number): { capa
     : { capacity: input.round, round: true };
 }
 
-/** README "Join gadget" / "OR-inputs": the `ready_i` place is where a stranded arrival sits. */
+/**
+ * Does any reachable quiescent marking leave pending work on `place`?
+ *
+ * Complete graph: exact — `violated` with the stuck marking and the firing path, or
+ * `proven`. Truncated graph: a stranding actually found is still a real one (a quiescent
+ * class of the explored prefix is quiescent and reachable), so it is reported; the absence
+ * of one is **not** a proof and returns `null` so the caller falls back.
+ */
+function graphStranding(ctx: Context, place: Place<unknown>): Decision | null {
+  if (!ctx.space.usable) return null;
+  const stranding = ctx.space.strandedAt(place);
+  if (stranding !== null) return graphDecision('violated', witnessCounterexample(stranding));
+  if (!ctx.space.complete) return null;
+  return graphDecision('proven');
+}
+
+/**
+ * The whole-net question — *can this workflow strand a branch anywhere?* — and the family's
+ * per-input, per-edge and arrival-bound rows.
+ *
+ * The whole-net row is the headline and is asked first, because it is the one that covers
+ * places the per-place rows do not: a token left on `X/hasdata`, on `X/ok`, on an unreaped
+ * `_halt`. The per-place rows keep the granularity a finding needs — which input of which
+ * node — and are decided from the same graph at no extra cost.
+ */
 async function runProperCompletion(ctx: Context): Promise<void> {
-  const sinks = [ctx.map.shared.pause, ctx.map.shared.halted];
+  await runWholeNetCompletion(ctx);
+
   for (const group of ctx.compiled.joinReadyPlaces) {
-    // The *bound* on the ready place — how many arrivals can queue — is a different and
-    // much weaker question than "does one strand", and unlike the quiescence query it
-    // closes (docs/verification.md). A violation is the arrival-count class of
-    // divergence #8: more arrivals reached the input than its gadget can pair.
     const { capacity, round } = arrivalCapacity(ctx, group.node, group.inputIndex);
     for (const place of group.places) {
-      const property = placeBound(place, capacity);
-      const outcome = await query(ctx, property, []);
-      const where = `${group.node}'s input ${group.inputIndex}`;
-      record(ctx, {
-        property: 'proper-completion',
-        name: round
-          ? `${group.node} input ${group.inputIndex} queues at most ${capacity} arrival${capacity === 1 ? '' : 's'} per round`
-          : `${group.node} input ${group.inputIndex} keeps its join slot discipline`,
-        subject: { kind: 'join-input', node: group.node, inputIndex: group.inputIndex, place: place.name },
-        verdict: outcome.verdict,
-        explanation: outcome.verdict === 'proven'
-          ? round
-            ? `${where} never holds more than ${capacity} arrival(s), so a round cannot over-fill and the ` +
-              'positional pairing of divergence #8 cannot bite on it. This bounds pile-up; it does not ' +
-              'prove nothing strands (see below).'
-            : `${where} never holds more than one arrival at a time, so the slot discipline of ADR 0003 ` +
-              '(free_i + ready_i <= 1) holds. That bound holds by construction on a join input — every arm ' +
-              'consumes the slot and only X_start / X_skip refund it — so this re-checks the gadget against ' +
-              'the compiled net; it is neither a proof that nothing strands nor the arrival-order query of ' +
-              'divergence #8, which is the OR-round form (see below).'
-          : outcome.verdict === 'violated'
-            ? round
-              ? `More than ${capacity} arrival(s) can pile up on ${where}: arrivals are paired positionally, ` +
-                'so the pairing is decided by arrival order (divergence #8).'
-              : `${where} can hold two arrivals at once: the join slot discipline of ADR 0003 is broken — an ` +
-                'arm armed the input without taking its free token, or something refunded the slot twice.'
-            : `Whether ${where} can hold more than ${capacity} arrival(s) was not decided.`,
-        reason: outcome.reason,
-        elapsedMs: outcome.elapsedMs,
-        query: queryRecord(property, outcome, []),
-        counterexample: counterexampleFor(outcome, ctx),
-      });
+      await recordArrivalBound(ctx, group.node, group.inputIndex, place, capacity, round);
     }
     for (const place of group.places) {
-      const property = joinedOrDeadLettered(place);
-      const outcome = await query(ctx, property, sinks);
-      const { verdict, reason, counterexample } = classifyQuiescence(outcome, ctx);
-      const subject: CheckSubject = {
-        kind: 'join-input', node: group.node, inputIndex: group.inputIndex, place: place.name,
-      };
+      const where = `${group.node}'s input ${group.inputIndex}`;
+      const decision = await decideStranding(ctx, place);
       record(ctx, {
         property: 'proper-completion',
         name: `${group.node} input ${group.inputIndex} always completes`,
-        subject,
-        verdict,
-        explanation: verdict === 'proven'
-          ? `No reachable quiescent marking leaves an arrival waiting on ${group.node}'s input ${group.inputIndex}.`
-          : verdict === 'violated'
-            ? `${group.node} can be left with an arrival stranded on input ${group.inputIndex}: the run quiesces ` +
-              'with that token still waiting, which is what n8n discovers at runtime as a stuck Merge.'
-            : `Whether an arrival can strand on ${group.node}'s input ${group.inputIndex} was not decided.`,
-        reason,
-        elapsedMs: outcome.elapsedMs,
-        query: queryRecord(property, outcome, sinks),
-        counterexample,
+        subject: { kind: 'join-input', node: group.node, inputIndex: group.inputIndex, place: place.name },
+        verdict: decision.verdict,
+        explanation: explain(decision.verdict, {
+          proven: `No reachable quiescent marking leaves an arrival waiting on ${where}.`,
+          violated: `${group.node} can be left with an arrival stranded on input ${group.inputIndex}: the run ` +
+            'quiesces with that token still waiting, which is what n8n discovers at runtime as a stuck Merge.',
+          unknown: `Whether an arrival can strand on ${where} was not decided.`,
+        }),
+        reason: decision.reason,
+        elapsedMs: decision.elapsedMs,
+        query: queryRecord(deadlockFree(), decision, restSinks(ctx)),
+        counterexample: decision.counterexample,
       });
     }
   }
+
   for (const place of ctx.compiled.edgeDataPlaces) {
     const info = ctx.map.place(place.name);
     const consumer = info?.node ?? '(unknown)';
     const edge = info?.edge;
-    const property = joinedOrDeadLettered(place);
-    const outcome = await query(ctx, property, sinks);
-    const { verdict, reason, counterexample } = classifyQuiescence(outcome, ctx);
     const subject: CheckSubject = {
       kind: 'edge',
       node: consumer,
@@ -441,63 +772,252 @@ async function runProperCompletion(ctx: Context): Promise<void> {
     const where = edge === undefined
       ? `${consumer}'s input`
       : `the edge ${edge.from}.${edge.outputIndex} -> ${edge.to}.${edge.inputIndex}`;
+    const decision = await decideStranding(ctx, place);
     record(ctx, {
       property: 'proper-completion',
       name: `${where} is always consumed`,
       subject,
-      verdict,
-      explanation: verdict === 'proven'
-        ? `No reachable quiescent marking leaves a payload on ${where}.`
-        : verdict === 'violated'
-          ? `A payload can be left undelivered on ${where}: ${consumer} never consumes it and the run quiesces.`
-          : `Whether a payload can be left on ${where} was not decided.`,
-      reason,
-      elapsedMs: outcome.elapsedMs,
-      query: queryRecord(property, outcome, sinks),
-      counterexample,
+      verdict: decision.verdict,
+      explanation: explain(decision.verdict, {
+        proven: `No reachable quiescent marking leaves a payload on ${where}.`,
+        violated: `A payload can be left undelivered on ${where}: ${consumer} never consumes it and the run quiesces.`,
+        unknown: `Whether a payload can be left on ${where} was not decided.`,
+      }),
+      reason: decision.reason,
+      elapsedMs: decision.elapsedMs,
+      query: queryRecord(deadlockFree(), decision, restSinks(ctx)),
+      counterexample: decision.counterexample,
     });
   }
 }
 
 /**
- * A quiescence query's outcome, with a violation whose witness is one of the two designed
- * terminal markings downgraded to `unknown` (see {@link PAUSE_WITNESS_REASON}). The witness
- * stays attached either way — it is the evidence for the downgrade.
+ * The structural rest set as `Place` objects: the sink declaration the whole-net
+ * `deadlockFree` fallback is asked with (VER-002). It is exactly `REST_ROLES` read off
+ * `NetMap`, so the SMT question and the graph's classification start from the same set — the
+ * difference between them is the pause filter, which the sink clause cannot express.
  */
-function classifyQuiescence(outcome: QueryOutcome, ctx: Context): {
-  verdict: CheckVerdict; reason: string | null; counterexample: Counterexample | null;
-} {
-  const counterexample = outcome.result === null || outcome.verdict !== 'violated'
-    ? null
-    : decodeCounterexample(outcome.result, ctx.map);
-  if (outcome.verdict === 'violated' && witnessIsDesignedTerminal(counterexample)) {
-    return { verdict: 'unknown', reason: PAUSE_WITNESS_REASON, counterexample };
-  }
-  return { verdict: outcome.verdict, reason: outcome.reason, counterexample };
-}
-
-function counterexampleFor(outcome: QueryOutcome, ctx: Context): PropertyCheck['counterexample'] {
-  if (outcome.result === null || outcome.verdict !== 'violated') return null;
-  return decodeCounterexample(outcome.result, ctx.map);
+function restSinks(ctx: Context): readonly Place<unknown>[] {
+  return ctx.map.places.filter((p) => REST_ROLES.has(p.role)).map((p) => p.place);
 }
 
 /**
- * Why a node the solver says is *reachable* is `unknown` and never `proven`.
+ * Why the SMT fallback did not close it, on its own — the half a bounded reason still wants.
  *
- * `unreachable(P)` is a safety property, so only its `proven` direction transfers: VER-004
- * AC3 says a proof on the untimed net implies the property for all timed executions, and
- * says nothing about a witness. libpetri's `violated` here is a firing sequence in an
- * abstraction that is untimed, **priority-blind** and **value-blind** — every `xor` branch
- * of a routing transition is explored whatever the data (VER-004 AC2) — so "the IF sent
- * items down this branch" is available to the solver on a workflow where no run ever does
- * it. Reporting that as "the node is live" would be a claim the encoding cannot support,
- * and it would be counted among the proofs.
+ * When the query was never asked ({@link smtFallbackCompletion} skipping a question the graph
+ * has already shown to be false), its own reason *is* the note: saying "the fallback did not
+ * decide it either" about a query that never ran would be a second false statement stacked on
+ * the first.
+ */
+function smtFallbackNote(fallback: Decision): string {
+  if (fallback.route === 'none') return fallback.reason ?? SMT_FALLBACK_REASON;
+  return `${SMT_FALLBACK_REASON}${fallback.reason === null ? '' : ` (${fallback.reason})`}`;
+}
+
+/** Both halves of an undecided completion question: why the graph could not, why z3 could not. */
+function completionUnknownReason(ctx: Context, fallback: Decision): string {
+  return `${truncationReason(ctx)} — and ${smtFallbackNote(fallback)}`;
+}
+
+/** Whether the fallback's witness marking holds a token on this very place. */
+function witnessMarks(cex: Counterexample | null, place: Place<unknown>): boolean {
+  return cex !== null && cex.stuckMarking.some((p) => p.place === place.name);
+}
+
+/** The graph first (NU-053); the whole-net `deadlockFree` query only where it truncated. */
+async function decideStranding(ctx: Context, place: Place<unknown>): Promise<Decision> {
+  const fromGraph = graphStranding(ctx, place);
+  if (fromGraph !== null) return fromGraph;
+  const fallback = await smtFallbackCompletion(ctx);
+  if (fallback.verdict === 'proven') return fallback;
+  // A `violated` that reached here is a stranding the solver found and the pause filter did
+  // *not* excuse (`smtFallbackCompletion` downgrades a designed-terminal witness). It is
+  // about the whole net, so it becomes this row's finding only when its own witness marking
+  // holds this place; otherwise the whole-net row carries it and this row stays undecided —
+  // with a reason that says so rather than claiming the fallback decided nothing.
+  if (fallback.verdict === 'violated') {
+    if (witnessMarks(fallback.counterexample, place)) return fallback;
+    return {
+      ...fallback,
+      verdict: 'unknown',
+      reason: `${truncationReason(ctx)} — and the whole-net deadlockFree fallback found a stranding ` +
+        'elsewhere in this net (see the whole-net row), which decides nothing about this place',
+    };
+  }
+  return boundedOrUnknown(ctx, {
+    ...fallback,
+    verdict: 'unknown',
+    reason: completionUnknownReason(ctx, fallback),
+    counterexample: fallback.counterexample,
+  }, smtFallbackNote(fallback));
+}
+
+/**
+ * Memoised per report: the fallback is **one** query per workflow, not one per place — that
+ * was M4's shape and it is what made the family cost (places x timeout). Keyed on the
+ * `Context`, so concurrent `verifyCompiled` calls never share an entry.
+ *
+ * It is also not asked at all when the graph has already shown the query to be false on this
+ * net ({@link provenUnreachableReason}), which is what the whole 30-60 s would otherwise buy.
+ */
+const fallbackCache = new WeakMap<Context, Promise<Decision>>();
+
+async function smtFallbackCompletion(ctx: Context): Promise<Decision> {
+  const cached = fallbackCache.get(ctx);
+  if (cached !== undefined) return cached;
+  const pending = (async (): Promise<Decision> => {
+    if (ctx.space.usable && ctx.space.outsideSinkClasses > 0) {
+      return {
+        verdict: 'unknown', reason: provenUnreachableReason(ctx), route: 'none', method: null,
+        elapsedMs: 0, counterexample: null,
+      };
+    }
+    const decision = await smtDecision(ctx, deadlockFree(), restSinks(ctx));
+    if (decision.verdict === 'violated' && witnessIsDesignedTerminal(decision.counterexample)) {
+      return { ...decision, verdict: 'unknown', reason: PAUSE_WITNESS_REASON };
+    }
+    return decision;
+  })();
+  fallbackCache.set(ctx, pending);
+  return pending;
+}
+
+/** The headline check: no reachable quiescent marking leaves pending work anywhere. */
+async function runWholeNetCompletion(ctx: Context): Promise<void> {
+  const space = ctx.space;
+  const strandings = space.usable ? space.strandings() : [];
+  const decision: Decision = strandings.length > 0
+    ? {
+      ...graphDecision('violated', witnessCounterexample(strandings[0]!)),
+      elapsedMs: space.elapsedMs,
+    }
+    : space.complete
+      ? { ...graphDecision('proven'), elapsedMs: space.elapsedMs }
+      : await (async (): Promise<Decision> => {
+        const fallback = await smtFallbackCompletion(ctx);
+        // `proven` and `violated` are both real verdicts about the whole net here: the
+        // violated one survived the pause filter, so it is a stranding z3 found outside the
+        // explored prefix and it is reported as the finding it is.
+        return fallback.verdict === 'proven' || fallback.verdict === 'violated'
+          ? fallback
+          : boundedOrUnknown(ctx, {
+            ...fallback,
+            verdict: 'unknown',
+            reason: completionUnknownReason(ctx, fallback),
+            elapsedMs: space.elapsedMs + fallback.elapsedMs,
+          }, smtFallbackNote(fallback));
+      })();
+
+  const first = strandings[0];
+  const stranded = first === undefined
+    ? ''
+    : ` It quiesces holding ${first.stranded.map(renderStranded).join(', ')}.`;
+  // The graph found none but the fallback did: the row is still `violated`, and its sentence
+  // has to say where the witness came from rather than quoting a class count of zero.
+  const solverFound = decision.verdict === 'violated' && strandings.length === 0;
+  record(ctx, {
+    property: 'proper-completion',
+    name: 'no branch is ever left stranded',
+    subject: { kind: 'net' },
+    verdict: decision.verdict,
+    explanation: explain(decision.verdict, {
+      proven: `Every one of the ${space.quiescentClasses} reachable quiescent markings of this workflow ` +
+        `(${space.classes} state classes) is either a completed run holding only residue or one of the ` +
+        `${space.terminalClasses} designed terminals — a paused or halted run the marking codec writes ` +
+        'back. Nothing is left pending anywhere in the net.',
+      violated: solverFound
+        ? 'This workflow can come to rest with work still pending: the whole-net deadlockFree query ' +
+          '(VER-002, structural rest set as sinks) returned a quiescent marking outside that set, and it ' +
+          'is not one of the designed terminals the marking codec writes back.'
+        : `This workflow can come to rest with work still pending: ${strandings.length}` +
+          `${strandings.length >= MAX_WITNESSES ? '+' : ''} quiescent marking(s) hold a token on a place ` +
+          `that is not residue.${stranded}`,
+      unknown: `Whether this workflow can strand a branch was not decided: ${space.classes} state classes ` +
+        'explored, none of them a stranding, and the graph is not complete.',
+    }),
+    reason: decision.reason,
+    elapsedMs: decision.elapsedMs,
+    query: queryRecord(deadlockFree(), decision, restSinks(ctx)),
+    counterexample: decision.counterexample,
+  });
+}
+
+/**
+ * Roles whose `PlaceInfo.port` is an **input** index; every other ported role (`ok`,
+ * `routed`, `nil`) carries an output index (`compiler/types.ts`). Getting this wrong would
+ * print "Switch input 3" for a token on the fourth *output*, which is the kind of wrong that
+ * sends a reader to the wrong end of the node.
+ */
+const INPUT_SIDE_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
+  'in-data', 'in-empty', 'edge-data', 'edge-empty', 'ready', 'hasdata', 'ran', 'free',
+]);
+
+/** `Merge input 0 ready (id:Merge/ready_0)` — a stranded place in workflow terms. */
+function renderStranded(p: MarkedPlace): string {
+  if (p.node === null) return `${p.place}${p.tokens === 1 ? '' : ` x${p.tokens}`}`;
+  const port = p.port === null
+    ? ''
+    : p.role !== null && INPUT_SIDE_ROLES.has(p.role) ? ` input ${p.port}` : ` output ${p.port}`;
+  return `${p.node}${port} ${p.role ?? 'place'} (${p.place})${p.tokens === 1 ? '' : ` x${p.tokens}`}`;
+}
+
+/** How many arrivals can queue on one join / OR input at once (README "OR-inputs"). */
+async function recordArrivalBound(
+  ctx: Context, node: string, inputIndex: number, place: Place<unknown>, capacity: number, round: boolean,
+): Promise<void> {
+  const property = placeBound(place, capacity);
+  const decision = graphBound(ctx, place, capacity)
+    ?? boundedOrUnknown(ctx, await smtDecision(ctx, property));
+  const where = `${node}'s input ${inputIndex}`;
+  record(ctx, {
+    property: 'proper-completion',
+    name: round
+      ? `${node} input ${inputIndex} queues at most ${capacity} arrival${capacity === 1 ? '' : 's'} per round`
+      : `${node} input ${inputIndex} keeps its join slot discipline`,
+    subject: { kind: 'join-input', node, inputIndex, place: place.name },
+    verdict: decision.verdict,
+    explanation: explain(decision.verdict, {
+      proven: round
+        ? `${where} never holds more than ${capacity} arrival(s), so a round cannot over-fill and the ` +
+          'positional pairing of divergence #8 cannot bite on it. This bounds pile-up; whether anything ' +
+          'strands is the check below.'
+        : `${where} never holds more than one arrival at a time, so the slot discipline of ADR 0003 ` +
+          '(free_i + ready_i <= 1) holds. That bound holds by construction on a join input — every arm ' +
+          'consumes the slot and only X_start / X_skip refund it — so this re-checks the gadget against ' +
+          'the compiled net rather than detecting anything.',
+      violated: round
+        ? `More than ${capacity} arrival(s) can pile up on ${where}: arrivals are paired positionally, ` +
+          'so the pairing is decided by arrival order (divergence #8).'
+        : `${where} can hold two arrivals at once: the join slot discipline of ADR 0003 is broken — an ` +
+          'arm armed the input without taking its free token, or something refunded the slot twice.',
+      unknown: `Whether ${where} can hold more than ${capacity} arrival(s) was not decided.`,
+    }),
+    reason: decision.route === 'smt' && decision.verdict === 'unknown'
+      ? `${truncationReason(ctx)} — and ${decision.reason ?? 'the SMT fallback did not decide it either'}`
+      : decision.reason,
+    elapsedMs: decision.elapsedMs,
+    query: queryRecord(property, decision),
+    counterexample: decision.counterexample,
+  });
+}
+
+// ==================== dead nodes ====================
+
+/**
+ * Why a node the route says is *reachable* is `unknown` and never `proven`.
+ *
+ * Both routes explore an abstraction that is priority-blind and value-blind: every `xor`
+ * branch of a routing transition is available whatever the data (VER-004 AC2), so "the IF
+ * sent items down this branch" is reachable on a workflow where no real run does it.
+ * VER-004 AC3 licenses the proof direction only, so `unreachable` *proven* — the node is
+ * dead — is a verdict and its negation is not. Calling a reached node "live" would be a
+ * claim neither encoding supports, and it would be counted among the proofs.
  */
 const LIVENESS_REASON =
-  'the running place is reachable only in the untimed, priority-blind and value-blind ' +
-  'over-approximation (VER-004): every xor branch of a router is explored whatever the data, ' +
-  'so this witness does not establish that a real run reaches the node. VER-004 AC3 licenses ' +
-  'the proof direction only — liveness is not provable by this encoding';
+  'the running place is reachable only in the priority-blind and value-blind over-approximation ' +
+  '(VER-004): every xor branch of a router is explored whatever the data, so this witness does not ' +
+  'establish that a real run reaches the node. VER-004 AC3 licenses the proof direction only — ' +
+  'liveness is not provable by this abstraction';
 
 /**
  * Nodes that can never run in **this** compiled execution only because n8n starts one
@@ -534,16 +1054,19 @@ export function alternativeEntryReach(compiled: CompiledWorkflow): Map<string, s
   return found;
 }
 
-/** `unreachable({X/running})`: only the *proven* direction is a verdict (see {@link LIVENESS_REASON}). */
+/**
+ * `unreachable({X/running})`: only the *proven* direction is a verdict (see
+ * {@link LIVENESS_REASON}). The graph decides every node in one pass when it is complete,
+ * which is the family's whole cost; the SMT fallback is one query per node.
+ */
 async function runDeadNodes(ctx: Context): Promise<void> {
   for (const g of ctx.map.nodes) {
     const property = unreachable(new Set([g.running]));
-    const outcome = await query(ctx, property, []);
+    const decision = graphUnreachable(ctx, g.running) ?? await smtDecision(ctx, property);
     const entry = ctx.entryReach.get(g.node);
-    const dead = outcome.verdict === 'proven';
+    const dead = decision.verdict === 'proven';
     const verdict: CheckVerdict = dead && entry === undefined ? 'violated' : 'unknown';
     const structural = g.reachable ? '' : ' The compiler already marks it unreachable from every start node.';
-    const confirmed = outcome.result?.counterexampleConfirmed === true;
     const entryReason = entry === undefined
       ? null
       : `n8n starts one trigger per execution and this net was compiled with '${ctx.compiled.startNode}' ` +
@@ -560,17 +1083,18 @@ async function runDeadNodes(ctx: Context): Promise<void> {
           ? `${g.node} cannot run in an execution started from ${ctx.compiled.startNode}, but it is ` +
             `${entry === g.node ? 'another entry point of this workflow' : `reachable only from '${entry}', another entry point`}` +
             ' — an alternative entry point, not a dead node.'
-          : outcome.verdict === 'violated'
-            ? `${g.node} is reachable in the abstraction${confirmed ? ': the solver replayed a firing sequence to its running place' : ', though the replay did not confirm a firing sequence'}. ` +
-              'That is not a proof that it is live (VER-004).'
+          : decision.verdict === 'violated'
+            ? `${g.node} is reachable in the abstraction. That is not a proof that it is live (VER-004).`
             : `Whether ${g.node} can ever run was not decided.`,
       reason: verdict === 'violated'
-        ? outcome.reason
+        ? decision.reason
         : dead
           ? entryReason
-          : outcome.verdict === 'violated' ? LIVENESS_REASON : outcome.reason,
-      elapsedMs: outcome.elapsedMs,
-      query: queryRecord(property, outcome, []),
+          : decision.verdict === 'violated'
+            ? LIVENESS_REASON
+            : decision.route === 'smt' ? unknownReason(ctx, decision) : decision.reason,
+      elapsedMs: decision.elapsedMs,
+      query: queryRecord(property, decision),
       // The witness of a reachable node is a path that runs it in the abstraction, not a
       // defect; the finding here is the dead node, and a dead node has no trace.
       counterexample: null,
@@ -578,25 +1102,35 @@ async function runDeadNodes(ctx: Context): Promise<void> {
   }
 }
 
+/** An SMT-fallback `unknown`, prefixed with why the solver-free route did not decide it. */
+function unknownReason(ctx: Context, decision: Decision): string | null {
+  if (decision.verdict !== 'unknown') return decision.reason;
+  const smt = decision.reason ?? 'the SMT fallback did not decide it either';
+  return ctx.space.complete ? smt : `${truncationReason(ctx)} — and ${smt}`;
+}
+
+// ==================== the remaining families ====================
+
 /** `placeBound(X/running, 1)`: the `X/idle` mutex, structurally (ADR 0004). */
 async function runNoDoubleActivation(ctx: Context): Promise<void> {
   for (const g of ctx.map.nodes) {
     const property = placeBound(g.running, 1);
-    const outcome = await query(ctx, property, []);
+    const decision = graphBound(ctx, g.running, 1)
+      ?? boundedOrUnknown(ctx, await smtDecision(ctx, property));
     record(ctx, {
       property: 'no-double-activation',
       name: `${g.node} never runs twice at once`,
       subject: { kind: 'node', node: g.node, place: g.running.name },
-      verdict: outcome.verdict,
-      explanation: outcome.verdict === 'proven'
-        ? `Two activations of ${g.node} can never overlap: X/idle + X/running = 1 holds on every reachable marking.`
-        : outcome.verdict === 'violated'
-          ? `${g.node} can be running twice at once — its X/idle mutex does not hold.`
-          : `Whether two activations of ${g.node} can overlap was not decided.`,
-      reason: outcome.reason,
-      elapsedMs: outcome.elapsedMs,
-      query: queryRecord(property, outcome, []),
-      counterexample: counterexampleFor(outcome, ctx),
+      verdict: decision.verdict,
+      explanation: explain(decision.verdict, {
+        proven: `Two activations of ${g.node} can never overlap: X/idle + X/running = 1 holds on every reachable marking.`,
+        violated: `${g.node} can be running twice at once — its X/idle mutex does not hold.`,
+        unknown: `Whether two activations of ${g.node} can overlap was not decided.`,
+      }),
+      reason: unknownReason(ctx, decision),
+      elapsedMs: decision.elapsedMs,
+      query: queryRecord(property, decision),
+      counterexample: decision.counterexample,
     });
   }
 }
@@ -604,48 +1138,51 @@ async function runNoDoubleActivation(ctx: Context): Promise<void> {
 async function runBudget(ctx: Context): Promise<void> {
   const k = ctx.compiled.effectiveBudget;
   const property = placeBound(ctx.map.shared.budget, k);
-  const outcome = await query(ctx, property, []);
+  const decision = graphBound(ctx, ctx.map.shared.budget, k)
+    ?? boundedOrUnknown(ctx, await smtDecision(ctx, property));
   record(ctx, {
     property: 'budget',
     name: `at most ${k} node${k === 1 ? '' : 's'} in flight`,
     subject: { kind: 'place', place: ctx.map.shared.budget.name },
-    verdict: outcome.verdict,
-    explanation: outcome.verdict === 'proven'
-      ? `_budget never exceeds ${k}, so at most ${k} activation${k === 1 ? '' : 's'} can hold a unit at once.`
-      : outcome.verdict === 'violated'
-        ? `_budget can exceed ${k}: a transition refunds a unit it did not take.`
-        : `Whether _budget stays within ${k} was not decided.`,
-    reason: outcome.reason,
-    elapsedMs: outcome.elapsedMs,
-    query: queryRecord(property, outcome, []),
-    counterexample: counterexampleFor(outcome, ctx),
+    verdict: decision.verdict,
+    explanation: explain(decision.verdict, {
+      proven: `_budget never exceeds ${k}, so at most ${k} activation${k === 1 ? '' : 's'} can hold a unit at once.`,
+      violated: `_budget can exceed ${k}: a transition refunds a unit it did not take.`,
+      unknown: `Whether _budget stays within ${k} was not decided.`,
+    }),
+    reason: unknownReason(ctx, decision),
+    elapsedMs: decision.elapsedMs,
+    query: queryRecord(property, decision),
+    counterexample: decision.counterexample,
   });
 
   // The semiflow is read off the invariants the encoder was given, not asked of z3: it is a
   // structural fact, and its absence is not a violation but a gap in what can be proven.
+  // It is the one part of this family the solver-free route cannot supply — a P-invariant is
+  // a statement about the incidence matrix, not about the reachable set.
   const invariants = ctx.invariants ?? (await collectInvariants(ctx));
   const semiflow = invariants === null ? null : budgetSemiflowOf(invariants, ctx.flat, ctx.map, k);
+  const semiflowDecision: Decision = {
+    verdict: semiflow === null ? 'unknown' : 'proven',
+    reason: null, route: 'structural', method: semiflow === null ? null : 'P-invariant',
+    elapsedMs: 0, counterexample: null,
+  };
   record(ctx, {
     property: 'budget',
     name: 'the two-phase budget semiflow holds',
     subject: { kind: 'net' },
-    verdict: semiflow === null ? 'unknown' : 'proven',
+    verdict: semiflowDecision.verdict,
     explanation: semiflow === null
       ? 'No validated conservation law covers _budget together with every X/running: the budget unit ' +
-        'cannot be tracked structurally, so the bound above rests on IC3 alone.'
+        'cannot be tracked structurally, so the bound above rests on the reachable-set enumeration alone.'
       : `_budget + the in-flight places of every node is conserved at ${k}, so a unit is held from ` +
         'X_start to X_route and refunded exactly once (ADR 0004).',
     reason: semiflow === null
-      ? 'the P-invariant computation returned no law giving _budget and every X/running the same positive weight'
+      ? ctx.smtRefusal
+        ?? 'the P-invariant computation returned no law giving _budget and every X/running the same positive weight'
       : null,
     elapsedMs: 0,
-    query: {
-      property: 'none',
-      place: ctx.map.shared.budget.name,
-      verdict: semiflow === null ? 'unknown' : 'proven',
-      sinks: [],
-      method: semiflow === null ? null : 'P-invariant',
-    },
+    query: queryRecord('none', semiflowDecision),
     counterexample: null,
   });
 }
@@ -667,58 +1204,59 @@ export function producersOf(flat: FlatNet, place: Place<unknown>): string[] {
  * forever, and `placeBound(tries, 1)` violated, so the query is live rather than vacuous).
  * What turns the bound into "at most `maxTries` attempts" is the structural fact that
  * **nothing produces `X/tries`**: it is seeded, consumed by `X_retry_wait` and read as an
- * inhibitor by `X_exhausted`. That half needs no solver — it is read off the flattened net
- * the encoder sees — and it is the half a future compiler change would break.
+ * inhibitor by `X_exhausted`. That half needs neither route — it is read off the flattened
+ * net — and it is the half a future compiler change would break.
  */
 async function runRetryBound(ctx: Context): Promise<void> {
   for (const g of ctx.map.nodes) {
     if (g.tries === null || g.maxTries === null) continue;
     const bound = g.maxTries - 1;
     const property = placeBound(g.tries, bound);
-    const outcome = await query(ctx, property, []);
+    const decision = graphBound(ctx, g.tries, bound)
+      ?? boundedOrUnknown(ctx, await smtDecision(ctx, property));
     record(ctx, {
       property: 'retry-bound',
       name: `${g.node}/tries never holds more than ${bound}`,
       subject: { kind: 'node', node: g.node, place: g.tries.name },
-      verdict: outcome.verdict,
-      explanation: outcome.verdict === 'proven'
-        ? `${g.node}/tries never exceeds the ${bound} token(s) it is seeded with. On its own that bounds ` +
-          'the try tokens, not the attempts — the attempt bound is the check below.'
-        : outcome.verdict === 'violated'
-          ? `${g.node}/tries can exceed ${bound}: something puts a try token back.`
-          : `Whether ${g.node}/tries stays within ${bound} was not decided.`,
-      reason: outcome.reason,
-      elapsedMs: outcome.elapsedMs,
-      query: queryRecord(property, outcome, []),
-      counterexample: counterexampleFor(outcome, ctx),
+      verdict: decision.verdict,
+      explanation: explain(decision.verdict, {
+        proven: `${g.node}/tries never exceeds the ${bound} token(s) it is seeded with. On its own that bounds ` +
+          'the try tokens, not the attempts — the attempt bound is the check below.',
+        violated: `${g.node}/tries can exceed ${bound}: something puts a try token back.`,
+        unknown: `Whether ${g.node}/tries stays within ${bound} was not decided.`,
+      }),
+      reason: unknownReason(ctx, decision),
+      elapsedMs: decision.elapsedMs,
+      query: queryRecord(property, decision),
+      counterexample: decision.counterexample,
     });
 
     const producers = producersOf(ctx.flat, g.tries);
+    // The attempt bound is the conjunction, so it is only ever as strong as the weaker half:
+    // a `bounded` place bound makes the attempt bound `bounded` too, never `proven`.
     const attempts: CheckVerdict = producers.length > 0
       ? 'violated'
-      : outcome.verdict === 'proven' ? 'proven' : 'unknown';
+      : decision.verdict === 'proven' || decision.verdict === 'bounded' ? decision.verdict : 'unknown';
+    const structural: Decision = {
+      verdict: producers.length > 0 ? 'violated' : 'proven',
+      reason: null, route: 'structural', method: 'structural', elapsedMs: 0, counterexample: null,
+    };
     record(ctx, {
       property: 'retry-bound',
       name: `${g.node} attempts at most ${g.maxTries} times`,
       subject: { kind: 'node', node: g.node, place: g.tries.name },
       verdict: attempts,
-      explanation: attempts === 'proven'
-        ? `No transition produces ${g.tries.name} and it never exceeds ${bound}, so X_retry_wait can fire at ` +
-          `most ${bound} times and ${g.node} runs at most ${g.maxTries} times before X_exhausted.`
-        : producers.length > 0
-          ? `${producers.length} transition(s) produce ${g.tries.name} (${producers.join(', ')}), so the try ` +
-            'tokens are refunded and the number of attempts is not bounded by the seeding.'
-          : `Nothing produces ${g.tries.name}, but the bound on it was not established, so the attempt count ` +
-            'is not bounded either.',
-      reason: attempts === 'unknown' ? outcome.reason : null,
+      explanation: explain(attempts, {
+        proven: `No transition produces ${g.tries.name} and it never exceeds ${bound}, so X_retry_wait can fire at ` +
+          `most ${bound} times and ${g.node} runs at most ${g.maxTries} times before X_exhausted.`,
+        violated: `${producers.length} transition(s) produce ${g.tries.name} (${producers.join(', ')}), so the try ` +
+          'tokens are refunded and the number of attempts is not bounded by the seeding.',
+        unknown: `Nothing produces ${g.tries.name}, but the bound on it was not established, so the attempt count ` +
+          'is not bounded either.',
+      }),
+      reason: attempts === 'unknown' || attempts === 'bounded' ? unknownReason(ctx, decision) : null,
       elapsedMs: 0,
-      query: {
-        property: 'none',
-        place: g.tries.name,
-        verdict: producers.length > 0 ? 'violated' : 'proven',
-        sinks: [],
-        method: 'structural',
-      },
+      query: { ...queryRecord('none', structural), place: g.tries.name },
       counterexample: null,
     });
   }
@@ -736,7 +1274,12 @@ export function exclusionPairs(map: NetMapView, request: MutualExclusionRequest)
 }
 
 async function runMutualExclusion(ctx: Context, request: MutualExclusionRequest): Promise<void> {
-  for (const [a, b] of exclusionPairs(ctx.map, request)) {
+  const pairs = exclusionPairs(ctx.map, request);
+  // One pass over the classes covers every pair, so `--all-pairs` costs what one pair costs.
+  // It runs on a truncated graph too: a class marking both places is a real witness whatever
+  // the BFS did, so only the *absence* of one needs the graph to have closed.
+  const co = ctx.space.usable ? ctx.space.coMarkings(ctx.map.nodes.map((g) => g.running)) : null;
+  for (const [a, b] of pairs) {
     const subject: CheckSubject = { kind: 'node-pair', nodes: [a, b] };
     let ga: NodeGadget;
     let gb: NodeGadget;
@@ -749,45 +1292,68 @@ async function runMutualExclusion(ctx: Context, request: MutualExclusionRequest)
         name: `${a} and ${b} never run at once`,
         subject,
         verdict: 'unknown',
-        explanation: `The pair could not be resolved to two nodes of this workflow.`,
+        explanation: 'The pair could not be resolved to two nodes of this workflow.',
         reason: messageOf(e),
         elapsedMs: 0,
-        query: { property: 'mutual-exclusion', place: null, verdict: 'unknown', sinks: [], method: null },
+        query: { property: 'mutual-exclusion', place: null, verdict: 'unknown', sinks: [], method: null, route: 'none' },
       });
       continue;
     }
     const property = mutualExclusion(ga.running, gb.running);
-    const outcome = await query(ctx, property, []);
+    const witness = co === null ? null : co.witness(ga.running, gb.running);
+    const decision: Decision = witness !== null
+      ? graphDecision('violated', witnessCounterexample(witness))
+      : co !== null && ctx.space.complete
+        ? graphDecision('proven')
+        : boundedOrUnknown(ctx, await smtDecision(ctx, property));
     record(ctx, {
       property: 'mutual-exclusion',
       name: `${a} and ${b} never run at once`,
       subject,
-      verdict: outcome.verdict,
-      explanation: outcome.verdict === 'proven'
-        ? `${a} and ${b} can never be running at the same time.`
-        : outcome.verdict === 'violated'
-          ? `${a} and ${b} can be running at the same time.`
-          : `Whether ${a} and ${b} can overlap was not decided.`,
-      reason: outcome.reason,
-      elapsedMs: outcome.elapsedMs,
-      query: queryRecord(property, outcome, []),
-      counterexample: counterexampleFor(outcome, ctx),
+      verdict: decision.verdict,
+      explanation: explain(decision.verdict, {
+        proven: `${a} and ${b} can never be running at the same time.`,
+        violated: `${a} and ${b} can be running at the same time.`,
+        unknown: `Whether ${a} and ${b} can overlap was not decided.`,
+      }),
+      reason: unknownReason(ctx, decision),
+      elapsedMs: decision.elapsedMs,
+      query: queryRecord(property, decision),
+      counterexample: decision.counterexample,
     });
   }
 }
 
 /**
- * One invariant-only pipeline run, for a report that ran no query that produced invariants
- * (no solver, or no property selected). `verify()` computes phases 1–3 before it resolves
- * z3, so this costs no solver process when there is none.
+ * The solver budget for the invariant-only run. **One millisecond, on purpose**: the
+ * invariants come out of phases 1-3 of the pipeline, not out of z3 — `no-z3.test.ts` pins
+ * that they are computed with no solver at all — so this run wants the pipeline and nothing
+ * else. Its verdict is discarded; the budget bound itself was already decided (by the graph,
+ * or by the family's own query).
+ */
+const INVARIANT_SOLVER_TIMEOUT_MS = 1;
+
+/**
+ * One invariant-only pipeline run, for a report that ran no query that produced invariants.
+ *
+ * This is the expensive half of the SMT route — flatten, structural pre-check, P-invariant
+ * and semiflow enumeration — and since M5 it is the *only* reason a report whose graph
+ * closed pays it: it is run once, lazily, and only for the budget family's semiflow check,
+ * which is the one claim the solver-free route cannot make. A report that does not select
+ * `budget` never touches it, and neither does one whose net is above
+ * {@link SMT_MAX_JOIN_INPUTS} / {@link SMT_MAX_FLAT_PLACES} — where running it would abort
+ * the process.
  */
 async function collectInvariants(ctx: Context): Promise<readonly PInvariant[] | null> {
   if (ctx.invariants !== null) return ctx.invariants;
+  // Same guard as {@link query}: this *is* the pipeline, so on a net above the ceiling it is
+  // the call that would abort the process.
+  if (ctx.smtRefusal !== null) return null;
   try {
     const result = await SmtVerifier.forNet(ctx.compiled.net)
       .initialMarking(ctx.state)
       .semiflowInvariants(ctx.semiflowInvariants)
-      .timeout(ctx.timeoutMs)
+      .timeout(INVARIANT_SOLVER_TIMEOUT_MS)
       .property(placeBound(ctx.map.shared.budget, ctx.compiled.effectiveBudget))
       .verify();
     ctx.invariants = result.invariants;
@@ -799,6 +1365,26 @@ async function collectInvariants(ctx: Context): Promise<readonly PInvariant[] | 
 }
 
 // ==================== entry points ====================
+
+/**
+ * The workflow shape behind a truncation cause, from the compiler's own analysis: whether it
+ * has a cycle, and whether any node has two or more distinct successors.
+ *
+ * The second is *evidence* for the "independent parallel branches" reading of a blow-up
+ * (NU-053), and its absence is evidence against it: a chain that truncates truncated because
+ * the cap was too small, and saying "independent parallel branches" there sends the reader
+ * looking for a fan-out that is not in the workflow.
+ */
+export function truncationShapeOf(compiled: CompiledWorkflow): TruncationShape {
+  let branching = false;
+  for (const [, edges] of compiled.analysis.outgoing) {
+    if (new Set(edges.map((e) => e.to)).size > 1) {
+      branching = true;
+      break;
+    }
+  }
+  return { hasCycle: compiled.analysis.hasCycle, independentBranches: branching };
+}
 
 /** Which property families to run: the caller's list, or the default plus any requested pairs. */
 export function selectProperties(options: VerifyOptions): readonly PropertyName[] {
@@ -824,14 +1410,25 @@ export async function verifyCompiled(
 ): Promise<VerificationReport> {
   const started = performance.now();
   const properties = selectProperties(options);
+  const state = markingStateOf(compiled.initialMarking(options.triggerItems ?? null));
+  const maxClasses = options.maxClasses ?? DEFAULT_MAX_CLASSES;
+  const flat = flatten(compiled.net);
+  const smtFallback = options.smtFallback ?? 'auto';
   const ctx: Context = {
     compiled,
     map: compiled.netMap,
-    state: markingStateOf(compiled.initialMarking(options.triggerItems ?? null)),
-    flat: flatten(compiled.net),
+    state,
+    flat,
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     semiflowInvariants: options.semiflowInvariants ?? true,
     solver: resolveSolver(),
+    smtFallback,
+    smtRefusal: smtRefusalFor(flat, compiled.joinReadyPlaces.length, smtFallback),
+    shape: truncationShapeOf(compiled),
+    // NU-053: the solver-free route runs first, once, for every family. `maxClasses: 0`
+    // turns it off — the graph truncates at the initial class — and every family falls back
+    // to the SMT route, which is the M4 surface.
+    space: StateSpace.explore(compiled.net, state, compiled.netMap, maxClasses, loopTransitions(compiled)),
     entryReach: alternativeEntryReach(compiled),
     checks: [],
     onCheck: options.onCheck,
@@ -839,9 +1436,7 @@ export async function verifyCompiled(
     invariantReport: null,
   };
 
-  // Cheapest first, so a streamed run says something useful before the expensive family:
-  // proper completion is quiescence-based and is the one that can fail to close (see
-  // docs/verification.md).
+  // Cheapest first, so a streamed run says something useful before the expensive family.
   if (properties.includes('budget')) await runBudget(ctx);
   if (properties.includes('no-double-activation')) await runNoDoubleActivation(ctx);
   if (properties.includes('retry-bound')) await runRetryBound(ctx);
@@ -851,7 +1446,9 @@ export async function verifyCompiled(
   if (properties.includes('dead-nodes')) await runDeadNodes(ctx);
   if (properties.includes('proper-completion')) await runProperCompletion(ctx);
 
-  const invariants = await collectInvariants(ctx);
+  // The P-invariant pipeline is the expensive half of the SMT route and nothing but the
+  // budget semiflow needs it, so a report that did not select that family never runs it.
+  const invariants = ctx.invariants;
   const report = ctx.invariantReport;
   const summary: InvariantSummary = {
     basis: report === null ? 0 : countFrom(report, FOUND_LINE) ?? 0,
@@ -865,7 +1462,7 @@ export async function verifyCompiled(
       })(),
   };
 
-  const counts = { proven: 0, violated: 0, unknown: 0 };
+  const counts = { proven: 0, violated: 0, bounded: 0, unknown: 0 };
   for (const c of ctx.checks) counts[c.verdict]++;
 
   return {
@@ -879,6 +1476,21 @@ export async function verifyCompiled(
       places: compiled.net.places.size,
       transitions: compiled.net.transitions.size,
       flatTransitions: ctx.flat.transitions.length,
+    },
+    stateSpace: {
+      classes: ctx.space.classes,
+      complete: ctx.space.complete,
+      maxClasses: ctx.space.maxClasses,
+      requestedMaxClasses: ctx.space.requestedMaxClasses,
+      elapsedMs: ctx.space.elapsedMs,
+      quiescent: ctx.space.quiescentClasses,
+      terminal: ctx.space.terminalClasses,
+      strandedPlaces: ctx.space.strandedPlaces().length,
+      truncation: ctx.space.truncationCause(ctx.shape),
+      expanded: ctx.space.expandedClasses,
+      boundedCyclicRuns: ctx.space.boundedCyclicRuns,
+      loopSteps: ctx.space.loopSteps,
+      error: ctx.space.error,
     },
     invariants: summary,
     timeoutMs: ctx.timeoutMs,

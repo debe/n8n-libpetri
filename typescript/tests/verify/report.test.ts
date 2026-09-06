@@ -16,14 +16,14 @@ function check(partial: Partial<PropertyCheck>): PropertyCheck {
     reason: null,
     counterexample: null,
     elapsedMs: 120,
-    query: { property: 'place-bound', place: '_budget', verdict: 'proven', sinks: [], method: 'IC3/PDR' },
+    query: { property: 'place-bound', place: '_budget', verdict: 'proven', sinks: [], method: 'IC3/PDR', route: 'smt' },
     ...partial,
   };
 }
 
 function report(partial: Partial<VerificationReport> = {}): VerificationReport {
   const checks = partial.checks ?? [check({})];
-  const counts = { proven: 0, violated: 0, unknown: 0 };
+  const counts = { proven: 0, violated: 0, bounded: 0, unknown: 0 };
   for (const c of checks) counts[c.verdict]++;
   return {
     workflow: 'demo',
@@ -33,6 +33,11 @@ function report(partial: Partial<VerificationReport> = {}): VerificationReport {
     budgetRestriction: null,
     solver: { available: true, program: '/usr/bin/z3', version: '4.13.0', reason: null },
     net: { places: 63, transitions: 28, flatTransitions: 53 },
+    stateSpace: {
+      classes: 393, complete: true, maxClasses: 200_000, requestedMaxClasses: 200_000, elapsedMs: 9,
+      quiescent: 60, terminal: 49, strandedPlaces: 0, truncation: null, expanded: 393,
+      boundedCyclicRuns: null, loopSteps: 0, error: null,
+    },
     invariants: { basis: 8, semiflowsEncoded: 1, encoded: 9, budgetSemiflow: '_budget + A/running = 1' },
     timeoutMs: 60_000,
     properties: ['budget'],
@@ -62,6 +67,24 @@ describe('verify report rendering', () => {
     expect(lines).toContain('z3 4.13.0');
     expect(lines).toContain('8 basis + 1 semiflow(s) encoded = 9');
     expect(lines).toContain('_budget + A/running = 1');
+  });
+
+  it('the header states which route ran and whether the state-class graph closed', () => {
+    const complete = renderHeader(report()).join('\n');
+    expect(complete).toContain('state space');
+    expect(complete).toContain('393 classes');
+    expect(complete).toContain('complete (VER-010)');
+    // A truncated graph must be visible in the header: it is the difference between a proof
+    // and a bounded observation, and the table below it would not say so on its own.
+    const truncated = renderHeader(report({
+      stateSpace: {
+        classes: 200_001, complete: false, maxClasses: 200_000, requestedMaxClasses: 200_000,
+        elapsedMs: 3946, quiescent: 10_816, terminal: 10_400, strandedPlaces: 0, truncation: 'cycle',
+        expanded: 194_725, boundedCyclicRuns: 21, loopSteps: 2, error: null,
+      },
+    })).join('\n');
+    expect(truncated).toContain('TRUNCATED at the 200000-class cap');
+    expect(truncated).toContain('unbounded');
   });
 
   it('the header states what the verdicts are about: the fresh initial marking, not a resumed one', () => {
@@ -94,7 +117,7 @@ describe('verify report rendering', () => {
 
   it('the table has one row per check plus a header row, named by the check', () => {
     const rows = renderTable([check({ name: 'a check' }), check({ name: 'another', verdict: 'unknown' })]);
-    expect(rows[0]).toMatch(/^PROPERTY\s+CHECK\s+VERDICT\s+TIME$/);
+    expect(rows[0]).toMatch(/^PROPERTY\s+CHECK\s+VERDICT\s+ROUTE\s+TIME$/);
     expect(rows).toHaveLength(3);
     expect(rows[1]).toContain('a check');
     expect(rows[1]).toContain('PROVEN');
@@ -145,7 +168,39 @@ describe('verify report rendering', () => {
     expect(text).toContain('Orphan can never run');
     expect(text).toContain('Unproven (1)');
     expect(text).toContain('a check: Z3 answered unknown');
-    expect(text).toContain('1 proven, 1 violated, 1 unknown');
+    expect(text).toContain('1 proven, 1 violated, 0 bounded, 1 unknown');
+  });
+
+  it('a `bounded` verdict gets its own section and is never counted among the proofs', () => {
+    // The one rendering rule the bounded verdict exists for: it is sound within the graph's
+    // closed iteration prefix and is not a proof, so folding it into `proven` — or into the
+    // findings — would misreport it in the two opposite directions.
+    const text = renderReport(report({
+      checks: [
+        check({}),
+        check({
+          property: 'proper-completion', verdict: 'bounded', name: 'no branch is ever left stranded',
+          reason: 'not a proof: the graph truncated', subject: { kind: 'net' },
+        }),
+      ],
+      stateSpace: {
+        classes: 200_001, complete: false, maxClasses: 200_000, requestedMaxClasses: 200_000,
+        elapsedMs: 3946, quiescent: 10_816, terminal: 10_400, strandedPlaces: 0, truncation: 'cycle',
+        expanded: 194_725, boundedCyclicRuns: 21, loopSteps: 2, error: null,
+      },
+    }));
+    expect(text).toContain('BOUNDED');
+    expect(text).toContain('Bounded (1)');
+    // The quantity is runs of the cyclic nodes, not passes of the loop body: with 2 cyclic
+    // nodes, 21 of them is 10 complete passes and calling it "21 iterations" doubles the claim.
+    expect(text).toContain('at most 21 cyclic-node run(s)');
+    expect(text).toContain('at least 10 complete pass(es) of the 2 cyclic node(s)');
+    expect(text).not.toContain('21 loop iteration');
+    expect(text).toContain('is not a proof');
+    expect(text).toContain('1 proven, 0 violated, 1 bounded, 0 unknown');
+    expect(text).not.toContain('Findings');
+    // And the header carries the bound, because the table alone would not say so.
+    expect(text).toContain('closing every run of at most 21 cyclic-node run(s) across 2 cyclic node(s)');
   });
 
   it('says when no check ran', () => {

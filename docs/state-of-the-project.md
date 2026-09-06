@@ -1,6 +1,7 @@
 # State of the project
 
-The four-milestone plan is finished. This document is the one-page answer to "what is this,
+The four-milestone plan is finished, and M5 has since inverted the verifier's routing so the
+headline property actually closes. This document is the one-page answer to "what is this,
 what has it been measured to do, what does it deliberately not do, and what would come next".
 Everything in it is measured; where a number is an upper bound it says so, and every claim
 points at the report that carries the evidence.
@@ -19,7 +20,7 @@ One npm package, `typescript/`, multi-entry ESM, plus a pinned n8n clone and two
 | Compiler | `n8n-libpetri/compiler` | `compile(description)` → one libpetri Coloured Time Petri Net, a cached `PrecompiledNet`, a `NetMap` (transition ↔ node, place ↔ (node, port)), the initial marking, the effective budget and diagnostics. No n8n dependency: it takes a structural description. |
 | Scheduler | `n8n-libpetri` | `PetriScheduler`, a drop-in `WorkflowScheduler` for n8n's execution engine, plus `registerPetriScheduler`. The action runs the node and routes the result; there is no host-side dispatch queue. |
 | Marking codec | `n8n-libpetri` (`codec.ts`) | `decodeExecutionData` / `encodeMarking`: a saved `IRunExecutionData` ↔ a marking, for Wait nodes, destination stops, halts and cancellation. |
-| Verifier | `n8n-libpetri/verify` | `verify(workflow)` and the `n8n-libpetri verify` CLI: six property families over `compile(workflow).net` — the same net the scheduler executes. |
+| Verifier | `n8n-libpetri/verify` | `verify(workflow)` and the `n8n-libpetri verify` CLI: six property families over `compile(workflow).net` — the same net the scheduler executes. Primary route is libpetri's solver-free state-class graph (VER-010), one per report; the `SmtVerifier` (IC3/PDR through z3) is the fallback where the graph truncates. |
 | Conformance harness | `n8n-libpetri/conformance` | junit reader, loop-driving classifier, matrix/report, the differential harness and a faithful port of n8n's own loop to differ against. |
 | n8n integration | `patches/n8n/`, `scripts/` | `0001-extract-scheduler-loop` (n8n's `executionLoop` moved verbatim behind a `WorkflowScheduler` interface) and `0002-scheduler-registry` (`setWorkflowSchedulerFactory`). Both rebasable and upstream-quality; `scripts/verify-patch.sh` fails on drift. n8n itself is never committed here. |
 
@@ -97,30 +98,81 @@ has a register row. Measured three ways (n8n's suite per budget, the differ, and
 
 ### Verification
 
-`verify(workflow)` runs six property families over the compiled net. What it is measured to do,
-with per-query wall clocks: [`docs/verification.md`](verification.md); the design and its limits:
+`verify(workflow)` runs six property families over the compiled net. Since **M5** the primary
+decision procedure is solver-free: libpetri's state-class graph (VER-010), enumerated once per
+report, with the SMT encoding kept as the fallback for a graph that truncates — the order NU-053
+prescribes, and the inverse of M4's. What it is measured to do:
+[`docs/verification.md`](verification.md); the design and its limits:
 [ADR 0007](adr/0007-verification.md).
 
-**Closes, on a workflow up to roughly 25 nodes:**
+**Closes, on any workflow whose state-class graph closes** — every acyclic fixture, a 41-node
+chain, an 8-wide fan-out, a 21-node five-diamond workflow, at the default budget of 1 (the
+budget is a real cost axis: the same 41-node chain is 31 448 classes at k = 2 and truncates at
+k = 4):
 
-- the **structural family** — the concurrency budget bound and its two-phase P-semiflow, the
-  per-node `X/running` mutex, the retry bound (both halves), the join-slot discipline — 90–300 ms
-  per query at 4–6 nodes, 5–7 s at 21;
-- **dead nodes** — a node no execution can reach is proven unreachable in ~90 ms and reported by
-  name. This is the one *finding* the surface produces reliably, and it is a real class of n8n
-  bug (an all-required Merge with an unwired input, a branch left disconnected on the canvas);
-- **mutual exclusion** at k = 1, and proper completion on a workflow with no join and no XOR
-  router.
+- **proper completion**, the headline question — *can this workflow strand a branch?* —
+  `proven` in 1–111 ms on the fixtures here (4 to 41 nodes) and in 2.2 s on a 21-node
+  five-diamond workflow, or `violated` with the stranded node and input and the firing
+  sequence that reaches the stuck marking. M4 measured this
+  `unknown` at 30 s, 60 s *and* 600 s, on a workflow with a stranding and on one without; that
+  is the one claim of the project that has changed since M4. On `ifBothOutputs` it comes back
+  `violated` in 25 ms and names `Merge/ready_0` — the already-registered divergence #2;
+- **dead nodes** — every node of the workflow decided in the one graph pass; a node no
+  execution can reach is reported by name. A real class of n8n bug (an all-required Merge with
+  an unwired input, a branch left disconnected on the canvas);
+- the **structural family** — the budget bound and its two-phase P-semiflow, the per-node
+  `X/running` mutex, the retry bound (both halves), the join-slot discipline, and the OR-round
+  arrival bound that M4 could not decide (divergence #8's query);
+- **mutual exclusion**, `--all-pairs` included: one pass over the classes covers every pair, so
+  210 pairs at 21 nodes cost what one pair costs.
 
-**Does not close:** the headline proper-completion question on a compiled net (`unknown` at 30 s,
-60 s *and* 600 s, on a workflow with a stranding and on one without); the arrival bound in the
-only form where it could fail; and liveness, which is reported `unknown` by design because the
-witness would be a witness in a priority- and value-blind abstraction (VER-004). The wall is the
-**pipeline, not z3**: libpetri's P-invariant enumeration exhausts a 4 GB V8 heap at 49 nodes.
+**Does not close — and says exactly how far it got.** Two shapes truncate the graph, and they
+get different answers because different things are true of them:
 
-Every one of those limits is pinned by a test, so an improvement in libpetri or z3 breaks the
-suite and forces the document to be re-measured. The CLI exits **3** when no usable z3 resolved,
-so a run that verified nothing never looks like a clean one.
+- a workflow with a **cycle** has an unbounded state space, so no class cap can complete the
+  graph and `proven` is out of reach at every cap. What the explored prefix *does* close is a
+  whole number of **runs of the workflow's cyclic nodes**, exactly, and that is the fourth
+  verdict: **`bounded`** — *no branch strands in any run where this workflow's cyclic nodes run
+  at most `k` times*. Measured, `k = 21` on `loopOverItems` (a two-node loop, so at least ten
+  complete passes of the body) and `k = 135` on a plain user cycle at the default 200 000-class
+  cap; raising the cap raises `k`. It is sound, it is not a proof, it is counted apart from the
+  proofs and `--strict` fails on it. A stranding found inside the prefix is still a full
+  finding — truncation costs the proof, not the detection;
+- **heavy independent parallelism** blows the class count up combinatorially (the graph has no
+  partial-order reduction, NU-053). There is nothing to count, so the answer is `unknown` with
+  the cap, the classes explored and the cause. Nothing borrows the cyclic case's bound. The
+  cause is reported from evidence: a cap set below what an unbranched workflow needs is
+  reported as a cap, not as parallelism it does not have.
+
+Nor does **liveness** close, and it is reported `unknown` by design because a reached node is
+reached in a priority- and value-blind abstraction (VER-004) — the route now finds that witness
+instantly, and the verdict is the same, because the reason was never the solver.
+
+The **SMT fallback** was measured rather than assumed, and it splits: the *proper-completion*
+fallback (one whole-net `deadlockFree` with the structural rest set as sinks) decides nothing —
+nought for ten at 30 s — while the *bound* fallbacks decide plenty, proving 23 of `switch20`'s
+24 checks where the graph truncated. The document says both, rather than keeping a decorative
+query or dropping a working one. The proper-completion query is now not even *asked* where the
+graph has already refuted it: VER-002's condition is *quiescent ∧ some marked place is not a
+declared sink*, so one reachable paused marking holding an arrival makes it false on that net
+and its `proven` unreachable.
+
+The size wall moved and changed character. M4's was libpetri's P-invariant enumeration, which
+exhausted a 4 GB heap at 49 nodes and was re-paid per query; M5 pays it once, lazily, and only
+for the budget semiflow, so a 41-node workflow verifies end to end. Because a heap exhaustion
+**aborts the process** rather than returning an `unknown`, the SMT route is also refused
+outright above a measured size (12 join inputs or 450 flat places, `--smt-fallback force` to
+override): those rows come back `unknown` naming the ceiling, and everything the graph decides
+is unaffected. The new limit is the class count, and it is about **shape**, at k = 1: depth is
+nearly free (2048 classes at 41 nodes), independent width is not (6151 at 9 nodes), a cycle is
+unbounded — and the budget is a third axis (the same 41-node chain is 31 448 classes at k = 2
+and truncates at k = 4).
+
+Every one of those limits is pinned by a test — including, at three caps on both truncating
+fixtures, that a **false `proven` is impossible** — so an improvement in libpetri breaks the
+suite and forces the document to be re-measured. The CLI exits **3** when no usable z3 resolved
+and the solver-backed part of the run was skipped; a finding outranks it, because the
+solver-free route decides without z3 and a missing tool must never mask a defect.
 
 ---
 
@@ -185,12 +237,21 @@ with upstream, not a change in this repository. Until it happens the net's extra
 reachable only by hand-building a description, and the honest framing of the project is "n8n's
 scheduler, made concurrent and analysable", not "n8n, made expressive".
 
-**2. Make the verifier answer the question it exists for.** Proper completion is the property a
-workflow author would actually want, and it does not close. The ordered asks, all upstream in
-libpetri: a per-place quiescence property that honours declared sinks (one query per workflow
-instead of one per place); a sparse incidence pipeline, which is the single change that would take
-the verifier from small workflows to real ones; boundedness for the marker places; and a bounded
-model checker for the SAT direction, so liveness and overlap questions stop being `unknown`.
+**2. Widen what the verifier can enumerate.** Proper completion now closes (M5), so the ask has
+moved: it is the *shape* ceiling, not the property. In order of value, and all upstream in
+libpetri: **partial-order reduction** in the state-class graph, which NU-053 names as its missing
+piece, which is what independent workflow branches need, and which is the only one of these the
+`bounded` verdict does not already soften; a **coverability route** for cycles (Karp-Miller
+style, or a cutoff argument showing the loop's residue repeats), which would turn today's
+`bounded` into a `proven` — note that a compiler-side loop cap is *not* the answer, since it
+would change the executing net and prove a property of the capped net rather than of the
+workflow; **interning the marking key**, since a 200 000-class exploration spends much of its
+time building strings and about 12 kB of heap per class — which is what raises `k` and what
+forces the class cap to be lowered on a small heap; and a **sparse incidence pipeline**, which
+now blocks only the budget semiflow and the per-node fallbacks rather than the whole report. On
+that last one, a pipeline that returned an error instead of exhausting the heap and aborting
+the process would be worth having even without the sparsity: the abort is the reason the SMT
+route has a size ceiling at all.
 
 **3. Close the k > 1 residuals that a user can see.** The `waitTill` claim residual (#15) needs a
 write barrier plus `AsyncLocalStorage` around `runNode` — designed in ADR 0006, not built. Divergence

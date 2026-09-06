@@ -1,27 +1,26 @@
 /**
  * The six property families against the nets `compile()` actually produces.
  *
- * Each family gets a fixture where the desirable property holds and, where the encoding can
- * express it, one where it does not. Two of the specified violation cases cannot be
- * produced on a compiled net and are pinned here as limits rather than dropped:
+ * Each family gets a fixture where the desirable property holds and one where it does not.
+ * Since M5 the primary route is the solver-free state-class graph (`state-class.test.ts`
+ * pins that route on its own, with no solver at all); this file is about the families as
+ * `verify()` reports them, the polarity rules that survive whichever route answered, and the
+ * SMT **fallback** — which is only reached where the graph truncates.
  *
- * - **proper completion on a join input.** `joinedOrDeadLettered` is a *quiescence*
- *   property, and on a compiled net z3 answers `unknown` for every join-input `ready_i`
- *   place — for the balanced diamond, which has no stranding, and for the unbalanced join,
- *   which has one. Measured to 600 s in `docs/verification.md`; the same shape hand-written
- *   as a bare join closes in under a second (`tests/spikes/verification.test.ts`), so it is
- *   the size and the marker places of the full gadget, not the property, that defeat it.
- * - **liveness of a node behind a join.** `unreachable({X/running})` is cheap when the
- *   answer is "dead" (~120 ms) and expensive when it is "live" (14 s on a 4-node workflow,
- *   `unknown` at 60 s on the diamond), because a live answer is a SAT witness Spacer has to
- *   search for.
+ * The limit that stays a limit, and is asserted so it cannot go stale:
  *
- * Both limits are asserted, so an improvement in libpetri or z3 breaks this file and forces
- * `docs/verification.md` to be re-measured rather than silently going stale.
+ * - **liveness is not provable by either route.** `unreachable({X/running})` *proven* is a
+ *   verdict — the node is dead — and its negation is not: both routes explore a
+ *   priority-blind, value-blind abstraction in which every `xor` branch of a router is
+ *   available whatever the data (VER-004 AC2/AC3). The graph now answers the reachability
+ *   question in milliseconds where z3 used to time out, and the answer is *still* `unknown`,
+ *   which is the point: the limit is the encoding's, not the solver's.
  */
 import { flatten } from 'libpetri/verification';
 import { compile } from '../../src/compiler/index.js';
-import { conn, diamond, fanOut, linear, multiProducer, node, twoTriggers, workflow } from '../fixtures/workflows.js';
+import {
+  conn, diamond, fanOut, linear, loopOverItems, multiProducer, node, switch20, twoTriggers, workflow,
+} from '../fixtures/workflows.js';
 import { alternativeEntryReach, producersOf, verify, verifyCompiled } from '../../src/verify/index.js';
 import type { PropertyCheck } from '../../src/verify/index.js';
 import {
@@ -169,30 +168,30 @@ describeZ3('verify: properties', () => {
       expect(report.ok).toBe(false);
     });
 
-    it('a reachable node is `unknown`, never `proven`: the SAT direction is not a liveness proof (VER-004)', { timeout: CASE_TIMEOUT_MS }, async () => {
-      // 20 s, not the file's 5: the witness search for a live node one hop from the trigger
-      // is ~650 ms measured, and this case has to *see* a `violated` from libpetri to be
-      // about anything. Everything asserted below is about what verify() does with it.
-      const report = await verify(orphanBranch, { ...base, timeoutMs: 20_000, properties: ['dead-nodes'] });
+    it('a reachable node is `unknown`, never `proven`: reachability is not a liveness proof (VER-004)', { timeout: CASE_TIMEOUT_MS }, async () => {
+      const report = await verify(orphanBranch, { ...base, properties: ['dead-nodes'] });
       const checks = checksOf(report, 'dead-nodes');
       expect(checks.some((c) => c.verdict === 'proven'), `no dead-nodes check may be 'proven'\n${digest(report)}`)
         .toBe(false);
       const live = checks.filter((c) => c.query.verdict === 'violated');
-      expect(live.length, `libpetri found no reachable node at all; this case would be vacuous\n${digest(report)}`)
+      expect(live.length, `the route found no reachable node at all; this case would be vacuous\n${digest(report)}`)
         .toBeGreaterThan(0);
       for (const check of live) {
         expect(check.verdict, check.name).toBe('unknown');
         expect(check.reason).toMatch(/VER-004/);
         expect(check.explanation).toContain('not a proof');
       }
-      // The measured limit (docs/verification.md): on the diamond the join makes every live
-      // node's witness search exceed the timeout, so libpetri itself answers `unknown`.
+      // M4's measured limit was that this question did not *close* behind a join: `Merge` on
+      // the diamond was `unknown` at 30 s because Spacer could not find the witness. The
+      // graph finds it immediately — and the verdict is `unknown` all the same, because the
+      // reason it is `unknown` was never the solver. If this ever becomes `proven`, the
+      // polarity rule of ADR 0007 §5 has been broken.
       const deep = await verify(diamond, { ...base, properties: ['dead-nodes'] });
       const merge = nodeCheck(checksOf(deep, 'dead-nodes'), 'Merge');
-      expect(merge.verdict, `if this is now 'proven', re-measure docs/verification.md\n${digest(deep)}`)
-        .toBe('unknown');
-      expect(merge.query.verdict).toBe('unknown');
-      expect(merge.reason).toBeTruthy();
+      expect(merge.verdict, `a reached node must never be 'proven' live\n${digest(deep)}`).toBe('unknown');
+      expect(merge.query.verdict).toBe('violated');
+      expect(merge.query.route).toBe('state-class-graph');
+      expect(merge.reason).toMatch(/VER-004/);
     });
 
     it('a second trigger is an alternative entry point, not a finding — the workflow stays clean', { timeout: CASE_TIMEOUT_MS }, async () => {
@@ -239,87 +238,122 @@ describeZ3('verify: properties', () => {
       const report = await verifyCompiled(compiled, { ...base, properties: ['proper-completion'] });
       const checks = checksOf(report, 'proper-completion');
       const readyPlaces = compiled.joinReadyPlaces.flatMap((j) => j.places).length;
-      // Two per join-input ready place (the bound and the quiescence query) plus one per edge.
-      expect(checks.length).toBe(2 * readyPlaces + compiled.edgeDataPlaces.length);
+      // One whole-net row, two per join-input ready place (the bound and the quiescence
+      // question) and one per edge.
+      expect(checks.length).toBe(1 + 2 * readyPlaces + compiled.edgeDataPlaces.length);
       expect(checks.some((c) => c.verdict === 'violated'), digest(report)).toBe(false);
+      expect(checks.every((c) => c.verdict === 'proven'), digest(report)).toBe(true);
 
-      // The arrival bound is the half of the family that closes; the quiescence half is
-      // measured in docs/verification.md and is `unknown` on this net at any timeout.
       const bounds = checks.filter((c) => c.query.property === 'place-bound');
       expect(bounds).toHaveLength(readyPlaces);
-      expect(bounds.every((c) => c.verdict === 'proven'), digest(report)).toBe(true);
       // A join slot is not the arrival-count query of divergence #8: every arm consumes the
       // slot and only X_start / X_skip refund it, so the bound holds by construction and the
       // check says which of the two questions it is.
       expect(bounds[0]!.name).toContain('keeps its join slot discipline');
       expect(bounds[0]!.explanation).toContain('by construction');
-      expect(bounds[0]!.explanation).toContain('neither a proof that nothing strands nor the arrival-order query of divergence #8');
 
-      // Declared sinks are the two designed terminal markings, and nothing else (VER-002).
-      const quiescence = checks.filter((c) => c.query.property === 'joined-or-dead-lettered');
-      expect(quiescence.length).toBe(readyPlaces + compiled.edgeDataPlaces.length);
-      expect([...quiescence[0]!.query.sinks].sort()).toEqual(['_halted', '_pause']);
+      // The question is the VER-002 one — quiescent and something outside the declared
+      // terminals is still marked — and the sinks it records are the structural rest set,
+      // not M4's two-place declaration.
+      const quiescence = checks.filter((c) => c.query.property === 'deadlock-free');
+      expect(quiescence.length).toBe(1 + readyPlaces + compiled.edgeDataPlaces.length);
+      const sinks = quiescence[0]!.query.sinks;
+      expect(sinks).toContain('_pause');
+      expect(sinks).toContain('_halted');
+      expect(sinks.some((p) => p.endsWith('/idle'))).toBe(true);
+      expect(sinks.some((p) => p.endsWith('/done'))).toBe(true);
+      expect(sinks.some((p) => p.endsWith('/ready_0'))).toBe(false);
     });
 
-    it('the OR-round bound is the only arrival query that *could* fail — and it does not close', { timeout: CASE_TIMEOUT_MS }, async () => {
+    it('the OR-round bound is the arrival query that *could* fail — and the graph decides it', { timeout: CASE_TIMEOUT_MS }, async () => {
       // `multiProducer`: two producers into one input of a direct-form consumer, so `C`
       // aggregates a round of 2 with no slot token at all (README "OR-inputs"). This is the
       // form `docs/divergences.md` row #8 is about, and the only one where `placeBound` has
       // a reachable violation — the join slot's is unfalsifiable by construction (above).
+      //
+      // M4 measured this `unknown` at 30 s on the smallest OR shape there is, so the family
+      // had no working detector for the arrival-count class. The graph decides it exactly.
       const compiled = compile(multiProducer);
       expect(compiled.netMap.node('C').form).toBe('or');
       const report = await verifyCompiled(compiled, { ...base, properties: ['proper-completion'] });
       const bound = checksOf(report, 'proper-completion').find((c) => c.query.property === 'place-bound')!;
       expect(bound.name).toBe('C input 0 queues at most 2 arrivals per round');
-      // The measured limit (docs/verification.md): `unknown` at 5 s here and still `unknown`
-      // at 30 s, on the smallest OR shape a compiled workflow can have. So the arrival-bound
-      // half of proper completion closes exactly where it cannot fail. If this ever becomes
-      // `proven` or `violated`, re-measure the doc and move the pin.
-      expect(
-        bound.verdict,
-        `the OR-round arrival bound now answers something; re-measure docs/verification.md\n${digest(report)}`,
-      ).toBe('unknown');
+      expect(bound.verdict, digest(report)).toBe('proven');
+      expect(bound.query.route).toBe('state-class-graph');
     });
 
-    it('the join-input query does not close — the measured limit, on a net with a stranding and on one without', { timeout: CASE_TIMEOUT_MS }, async () => {
-      for (const workflow of [diamond, unbalancedJoin]) {
-        const report = await verifyCompiled(compile(workflow), { ...base, properties: ['proper-completion'] });
-        const joins = checksOf(report, 'proper-completion')
-          .filter((c) => c.query.property === 'joined-or-dead-lettered' && c.subject.kind === 'join-input');
-        expect(joins.length).toBeGreaterThan(0);
-        for (const check of joins) {
-          expect(
-            check.verdict,
-            'the join-input quiescence query answered something other than `unknown`; re-measure ' +
-            `docs/verification.md and move this pin\n${digest(report)}`,
-          ).toBe('unknown');
-        }
-      }
+    it('the join-input question closes both ways — proven on the balanced net, violated on the stranding', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // The headline reversal. M4 measured this `unknown` at 30 s, 60 s and 600 s on *both*
+      // fixtures — on the one that strands and on the one that does not — which is what made
+      // the project's most valuable claim undeliverable.
+      const clean = await verifyCompiled(compile(diamond), { ...base, properties: ['proper-completion'] });
+      const cleanJoins = checksOf(clean, 'proper-completion')
+        .filter((c) => c.subject.kind === 'join-input' && c.name.includes('always completes'));
+      expect(cleanJoins.length).toBeGreaterThan(0);
+      for (const check of cleanJoins) expect(check.verdict, digest(clean)).toBe('proven');
+
+      const broken = await verifyCompiled(compile(unbalancedJoin), { ...base, properties: ['proper-completion'] });
+      const brokenJoins = checksOf(broken, 'proper-completion')
+        .filter((c) => c.subject.kind === 'join-input' && c.name.includes('always completes'));
+      expect(brokenJoins.some((c) => c.verdict === 'violated'), digest(broken)).toBe(true);
+      expect(broken.ok).toBe(false);
+      const finding = brokenJoins.find((c) => c.verdict === 'violated')!;
+      expect(finding.counterexample!.stuckMarking.some((p) => p.node === 'M' && p.role === 'ready')).toBe(true);
     });
 
-    it('a violation whose witness is a paused run is not a finding, and carries a node path', { timeout: CASE_TIMEOUT_MS }, async () => {
+    it('a paused run is classified, not reported: a fan-out is clean', { timeout: CASE_TIMEOUT_MS }, async () => {
       // Every node's X_run offers the waiting / stopped outcomes, so on any fan-out there is
       // a quiescent marking holding `_pause` and an unconsumed sibling arrival. That is the
-      // designed pause the marking codec writes back (ADR 0005), not a stranding — and
-      // `joinedOrDeadLettered` ignores the declared sinks (NU-040 AC4), so it cannot be
-      // excluded by declaring them. `verify()` downgrades such a violation to `unknown`.
-      const report = await verify(fanOut, { ...base, timeoutMs: 20_000, properties: ['proper-completion'] });
-      const witnessed = checksOf(report, 'proper-completion').filter((c) => c.counterexample !== null);
-      expect(witnessed.length, digest(report)).toBeGreaterThan(0);
-      const names = new Set(compile(fanOut).netMap.nodes.map((g) => g.node));
-      for (const check of witnessed) {
-        expect(check.verdict, check.name).toBe('unknown');
-        expect(check.reason).toMatch(/NU-040 AC4/);
-        const cex = check.counterexample!;
-        expect(cex.stuckMarking.some((p) => p.role === 'pause')).toBe(true);
-        // The witness is a node path, and every step names a node of this workflow.
-        expect(cex.nodePath.length).toBeGreaterThan(0);
-        for (const n of cex.nodePath) expect(names, `'${n}' is not a node`).toContain(n);
-        expect(cex.ordered, 'the abstract replay confirmed a firing sequence').toBe(true);
-      }
-      // A downgraded witness is not a finding: the run stays clean.
+      // designed pause the marking codec writes back (ADR 0005), not a stranding. M4 got
+      // three `violated` witnesses here and had to downgrade each to `unknown`, because
+      // `joinedOrDeadLettered` ignores declared sinks (NU-040 AC4). The graph classifies the
+      // class instead, so the same workflow is simply `proven`.
+      const report = await verify(fanOut, { ...base, properties: ['proper-completion'] });
+      const checks = checksOf(report, 'proper-completion');
+      expect(checks.every((c) => c.verdict === 'proven'), digest(report)).toBe(true);
+      expect(checks.every((c) => c.counterexample === null)).toBe(true);
+      expect(report.stateSpace.terminal, 'the paused markings are there — they are just not findings')
+        .toBeGreaterThan(0);
       expect(report.ok).toBe(true);
-      expect(report.counts.violated).toBe(0);
+      expect(report.counts.unknown).toBe(0);
+    });
+
+    it('a truncated cyclic graph answers with its own bound, and does not spend a timeout on a refuted query', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // The fallback for this family is one whole-net `deadlockFree` with the structural rest
+      // set as sinks — and on this net the graph has already exhibited a quiescent marking
+      // outside that sink set, so the query is false here and its `proven` (the only
+      // direction it could add) cannot come back. It is therefore not asked, and the row
+      // lands on the graph's own `bounded` prefix with a reason carrying both halves.
+      const report = await verify(loopOverItems, {
+        ...base, timeoutMs: 4_000, maxClasses: 500, properties: ['proper-completion'],
+      });
+      const whole = checksOf(report, 'proper-completion').find((c) => c.subject.kind === 'net')!;
+      expect(whole.verdict, digest(report)).toBe('bounded');
+      expect(whole.query.property).toBe('deadlock-free');
+      expect(whole.query.route).not.toBe('smt');
+      expect(whole.reason).toMatch(/500-class cap/);
+      expect(whole.reason).toMatch(/deadlockFree fallback \(VER-002, structural rest set as sinks\) was not asked/);
+      expect(whole.reason).toMatch(/can never return proven/);
+      expect(whole.reason).toMatch(/not a proof/);
+      expect(checksOf(report, 'proper-completion').some((c) => c.verdict === 'proven'), digest(report)).toBe(false);
+    });
+
+    it('an acyclic workflow whose graph truncates has nothing to bound, and stays unknown — with the query really asked', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // The other truncation shape (NU-053: independent parallelism, no partial-order
+      // reduction). There is nothing to count, so no bounded verdict is available and the
+      // honest answer is `unknown` — the row must never borrow the cyclic case's bound. It is
+      // also the one fixture where the fallback is a real question: every quiescent class the
+      // graph found is inside the rest set, so `deadlockFree` is not refuted and z3 is asked.
+      const report = await verify(switch20, {
+        ...base, timeoutMs: 2_000, maxClasses: 500, properties: ['proper-completion'],
+      });
+      expect(report.stateSpace.truncation).toBe('parallelism');
+      expect(report.stateSpace.boundedCyclicRuns).toBeNull();
+      expect(report.stateSpace.loopSteps).toBe(0);
+      const whole = checksOf(report, 'proper-completion').find((c) => c.subject.kind === 'net')!;
+      expect(whole.verdict, digest(report)).toBe('unknown');
+      expect(whole.query.route).toBe('smt');
+      expect(report.counts.bounded).toBe(0);
     });
 
     it('the stranding the unbalanced join has is real, and is what the query would have to find', () => {
@@ -357,7 +391,8 @@ describeZ3('verify: properties', () => {
       expect(report.net.flatTransitions).toBeGreaterThanOrEqual(report.net.transitions);
       expect(report.solver.available).toBe(true);
       expect(report.solver.version).toMatch(/^\d+\.\d+\.\d+$/);
-      expect(report.counts.proven + report.counts.violated + report.counts.unknown).toBe(report.checks.length);
+      const { proven, violated, bounded, unknown } = report.counts;
+      expect(proven + violated + bounded + unknown).toBe(report.checks.length);
       expect(report.properties).toEqual(['budget']);
       expect(report.timeoutMs).toBe(TEST_TIMEOUT_MS);
     });
@@ -374,8 +409,21 @@ describeZ3('verify: properties', () => {
       const report = await verify(linear, { ...base, properties: [] });
       expect(report.checks).toEqual([]);
       expect(report.ok).toBe(true);
-      // The invariant summary is still filled: it comes from the pipeline, not from z3.
-      expect(report.invariants.encoded).toBeGreaterThan(0);
+      // And it does not pay the P-invariant pipeline either: since M5 that runs only for the
+      // budget family's semiflow, which is the one claim the graph cannot make. That is what
+      // keeps a 41-node workflow verifiable at all — the pipeline is the wall, not z3.
+      expect(report.invariants.encoded).toBe(0);
+      const budget = await verify(linear, { ...base, properties: ['budget'] });
+      expect(budget.invariants.encoded).toBeGreaterThan(0);
+    });
+
+    it('carries the solver-free route\'s own numbers, so a truncation is visible in the JSON', { timeout: CASE_TIMEOUT_MS }, async () => {
+      const report = await verify(diamond, { ...base, properties: ['proper-completion'] });
+      expect(report.stateSpace.classes).toBe(393);
+      expect(report.stateSpace.complete).toBe(true);
+      expect(report.stateSpace.maxClasses).toBe(200_000);
+      expect(report.stateSpace.strandedPlaces).toBe(0);
+      expect(report.stateSpace.error).toBeNull();
     });
   });
 });

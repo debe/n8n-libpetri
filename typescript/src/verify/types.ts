@@ -10,6 +10,7 @@
  * and what libpetri answered, so the inversion is never hidden.
  */
 import type { BudgetRestriction, PlaceRole, TransitionRole, Variant } from '../compiler/index.js';
+import type { TruncationCause } from './state-class.js';
 
 /** The property families {@link verify} can ask about. CLI `--property` takes these names. */
 export type PropertyName =
@@ -24,8 +25,21 @@ export const PROPERTY_NAMES: readonly PropertyName[] = [
   'proper-completion', 'dead-nodes', 'no-double-activation', 'budget', 'retry-bound', 'mutual-exclusion',
 ];
 
-/** `proven`: the desirable property holds. `violated`: it does not. `unknown`: undecided. */
-export type CheckVerdict = 'proven' | 'violated' | 'unknown';
+/**
+ * - `proven` — the desirable property holds on every reachable marking.
+ * - `violated` — it does not, and the check carries the witness.
+ * - `bounded` — it holds on every run in which the workflow's cyclic nodes run at most
+ *   {@link StateSpaceSummary.boundedCyclicRuns} times **in total**, and the state space
+ *   beyond that was not explored. That is runs of cyclic nodes, not passes of the loop body:
+ *   divide by {@link StateSpaceSummary.loopSteps} for the guaranteed number of complete
+ *   passes. **Sound, and deliberately not a proof**: the graph truncated, and this is the
+ *   largest prefix it closed (`state-class.ts`, `closedCyclicRuns`). It exists because a
+ *   cyclic workflow's state space is unbounded, so `proven` is unreachable there and
+ *   `unknown` says less than is known. Nothing counts it among the proofs, and `--strict`
+ *   fails on it.
+ * - `unknown` — undecided, with the reason.
+ */
+export type CheckVerdict = 'proven' | 'violated' | 'bounded' | 'unknown';
 
 /** What a check is about, in workflow terms rather than place names. */
 export type CheckSubject =
@@ -90,23 +104,43 @@ export interface Counterexample {
   readonly ordered: boolean;
 }
 
-/** What libpetri was actually asked, and what it answered. */
+/**
+ * How a check reached its verdict.
+ *
+ * - `state-class-graph` — the solver-free route (VER-010), the primary one: the reachable
+ *   `(marking, zone)` classes were enumerated and the answer read off them. A `proven` here
+ *   requires the graph to have **closed**; a `violated` does not (a class of the explored
+ *   prefix is reachable whatever the BFS did next), and neither does a `bounded`, which is
+ *   the route reporting exactly how far the prefix reaches.
+ * - `smt` — libpetri's IC3/PDR encoding through z3, the fallback for a truncated graph. Not
+ *   every question reaches it: a net above `verify.ts`'s measured size ceiling gets none, and
+ *   neither does a question the graph has already shown the query cannot decide.
+ * - `structural` — read off the flattened net or the P-invariants, with no reachability
+ *   question at all (the retry producer check, the budget semiflow).
+ * - `none` — nothing ran (including the case where the SMT query was deliberately skipped;
+ *   the check's `reason` says which).
+ */
+export type CheckRoute = 'state-class-graph' | 'smt' | 'structural' | 'none';
+
+/** What was asked, how it was answered, and what came back. */
 export interface QueryRecord {
-  /** libpetri `SmtProperty.type`, or `'none'` for a structural check that runs no query. */
+  /** libpetri `SmtProperty.type` naming the question, or `'none'` for a structural check. */
   readonly property: string;
   /** The place the property names, when it names one. */
   readonly place: string | null;
-  /** libpetri's own verdict, before any polarity inversion this module applies. */
+  /** The route's own verdict, before any polarity inversion this module applies. */
   readonly verdict: CheckVerdict;
   /**
-   * Sink places declared on the query (VER-002); empty for every property but proper
-   * completion. Note that `joined-or-dead-lettered` **ignores** them by design (NU-040 AC4),
-   * so on that property this records the intent, not an exclusion the encoder applied — see
-   * `verify.ts` and `docs/verification.md` for the pause-witness downgrade that stands in.
+   * Sink places the whole-net `deadlockFree` question is scoped by (VER-002): the structural
+   * rest set, where a token at quiescence is legitimate residue. Recorded on the proper
+   * completion family whichever route answered, because it is the *question*'s definition —
+   * the solver-free route applies the same set plus the pause filter it can express and the
+   * sink clause cannot (`state-class.ts`).
    */
   readonly sinks: readonly string[];
-  /** `'IC3/PDR'`, `'structural'`, `null` when no query ran. */
+  /** `'state-class graph'`, `'IC3/PDR'`, `'P-invariant'`, `'structural'`; `null` when nothing ran. */
   readonly method: string | null;
+  readonly route: CheckRoute;
 }
 
 export interface PropertyCheck {
@@ -117,7 +151,7 @@ export interface PropertyCheck {
   readonly verdict: CheckVerdict;
   /** What the verdict means for the workflow, in one sentence. */
   readonly explanation: string;
-  /** Why the verdict is `unknown`; `null` otherwise. */
+  /** Why the verdict is `unknown`, or what bounds a `bounded` one; `null` otherwise. */
   readonly reason: string | null;
   readonly counterexample: Counterexample | null;
   readonly elapsedMs: number;
@@ -143,6 +177,62 @@ export interface NetSize {
    * `SPLIT_ROUTING_ABOVE` connected outputs.
    */
   readonly flatTransitions: number;
+}
+
+/**
+ * The solver-free route's own numbers (VER-010, `state-class.ts`).
+ *
+ * `complete` is the load-bearing field: only a complete graph can carry a `proven`. A
+ * truncated one is reported as such — `truncation` says which of NU-053's two shapes caused
+ * it — and never as a pass.
+ */
+export interface StateSpaceSummary {
+  /** State classes explored. */
+  readonly classes: number;
+  /** The BFS closed: every reachable class was enumerated. */
+  readonly complete: boolean;
+  /**
+   * The cap the exploration actually ran with. Equal to `VerifyOptions.maxClasses` unless
+   * the V8 heap could not hold that many classes, in which case it is lower and
+   * {@link requestedMaxClasses} says what was asked for (`state-class.ts`
+   * `effectiveMaxClasses`).
+   */
+  readonly maxClasses: number;
+  /** What the caller asked for, before the heap-limit check. */
+  readonly requestedMaxClasses: number;
+  readonly elapsedMs: number;
+  /** Classes nothing can fire from: the markings a run can come to rest in. */
+  readonly quiescent: number;
+  /** Of those, the designed terminals: a paused (`_pause`) or halted (`_halted`) run. */
+  readonly terminal: number;
+  /** Places some quiescent class leaves pending work on. Non-zero means a stranding. */
+  readonly strandedPlaces: number;
+  /** Why the graph did not close; `null` when it did. */
+  readonly truncation: TruncationCause | null;
+  /**
+   * Classes the BFS expanded — the prefix a `bounded` verdict is certified over. Equal to
+   * {@link classes} on a complete graph.
+   */
+  readonly expanded: number;
+  /**
+   * The largest `k >= 1` for which every run firing at most `k` **cyclic-node runs** was
+   * enumerated, so a safety property that holds across the explored prefix holds for all of
+   * them. `null` when the graph closed (nothing to bound), when the workflow is acyclic
+   * (there is nothing to count), or when not even one whole cyclic-node run is closed.
+   *
+   * This is what a `bounded` {@link CheckVerdict} quantifies over. It is a count of node
+   * runs, not of loop iterations: divide by {@link loopSteps} for complete passes.
+   */
+  readonly boundedCyclicRuns: number | null;
+  /**
+   * How many transitions {@link boundedCyclicRuns} counts: the `run` of every node on a
+   * cycle. A bound of `k` over `loopSteps` cyclic nodes guarantees `floor(k / loopSteps)`
+   * complete passes of the loop body, so `k` itself must never be reported as an iteration
+   * count.
+   */
+  readonly loopSteps: number;
+  /** Why the graph could not be built at all; `null` when it was. */
+  readonly error: string | null;
 }
 
 /**
@@ -178,13 +268,18 @@ export interface VerificationReport {
   readonly budgetRestriction: BudgetRestriction | null;
   readonly solver: SolverInfo;
   readonly net: NetSize;
+  /** What the solver-free route explored, and whether it closed. */
+  readonly stateSpace: StateSpaceSummary;
   readonly invariants: InvariantSummary;
   /** Per-query timeout in milliseconds. */
   readonly timeoutMs: number;
   readonly properties: readonly PropertyName[];
   readonly checks: readonly PropertyCheck[];
   readonly counts: Readonly<Record<CheckVerdict, number>>;
-  /** No check came back `violated`. `unknown` checks do not make a workflow unsound; they make it unproven. */
+  /**
+   * No check came back `violated`. `unknown` and `bounded` checks do not make a workflow
+   * unsound; they make it unproven, which is what `--strict` fails on rather than this flag.
+   */
   readonly ok: boolean;
   /** The compiler's own non-fatal findings, carried through. */
   readonly diagnostics: readonly string[];
@@ -199,6 +294,9 @@ export interface VerificationReport {
   readonly elapsedMs: number;
 }
 
+/** How far the SMT route may go: see {@link VerifyOptions.smtFallback}. */
+export type SmtFallbackMode = 'auto' | 'off' | 'force';
+
 /** A pair of node names for {@link PropertyName} `'mutual-exclusion'`, or every pair. */
 export type MutualExclusionRequest = readonly (readonly [string, string])[] | 'all-pairs';
 
@@ -207,10 +305,36 @@ export interface VerifyOptions {
   readonly budget?: number;
   /** Which property families to run. Default: everything except `'mutual-exclusion'`. */
   readonly properties?: readonly PropertyName[];
-  /** Per-query timeout handed to z3 (VER-013). Default 60 000 ms. */
+  /** Per-query timeout handed to the SMT **fallback** (VER-013). Default 60 000 ms. */
   readonly timeoutMs?: number;
+  /**
+   * Class cap for the solver-free route (VER-010). Default
+   * {@link DEFAULT_MAX_CLASSES} (200 000). The graph must never run unbounded: a cyclic
+   * workflow's state space is infinite and a heavily parallel one's is combinatorial
+   * (NU-053), so this is what turns a hang into a reported truncation — which is an
+   * `unknown`, never a pass.
+   *
+   * `0` turns the route off entirely: the graph truncates at the initial class and every
+   * family falls back to the SMT route, which is M4's surface.
+   */
+  readonly maxClasses?: number;
   /** VER-007. Default `true`: without it the reset-arc chains lose their conservation laws. */
   readonly semiflowInvariants?: boolean;
+  /**
+   * Whether the SMT route may run at all, and on how big a net (VER-001/VER-013).
+   *
+   * - `'auto'` (default) — run it, but only below the measured size ceiling
+   *   (`verify.ts` `SMT_MAX_FLAT_PLACES` / `SMT_MAX_JOIN_INPUTS`). Above it the pipeline
+   *   libpetri runs before z3 (flatten, structural pre-check, P-invariants, semiflows)
+   *   exhausts the V8 heap, and a heap exhaustion **aborts the process** — there is no
+   *   exception to catch, so the only safe handling is not to start it. Refusing yields
+   *   `unknown` with a reason naming the ceiling, which is a verdict; an abort is not.
+   * - `'off'` — never run it. Every family answers off the state-class graph or comes back
+   *   `unknown`; nothing spawns z3 and the P-invariant pipeline never runs.
+   * - `'force'` — run it whatever the size. The escape hatch for a big net you want the
+   *   budget semiflow or a fallback proof on, at the risk of the abort above.
+   */
+  readonly smtFallback?: SmtFallbackMode;
   /**
    * Node pairs for `'mutual-exclusion'`, or `'all-pairs'`. Supplying any of these turns the
    * property on even when `properties` was not given.

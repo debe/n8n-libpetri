@@ -174,15 +174,47 @@ All notable changes to this project are documented here. The format follows
   `--strict`), 2 on a usage error, 3 when no usable z3 resolved — a run that verified nothing
   never looks like a clean one. `--json` carries the whole report, including every node shape
   the CLI had to guess from a workflow export.
-- **What the verifier actually proves, measured** (`docs/verification.md`, ADR 0007). It
-  proves the structural family — the concurrency budget and its P-semiflow, one activation per
-  node, the retry bound, the join-slot discipline — and it finds dead nodes, on workflows up to
-  roughly 25 nodes. It does **not** decide the headline proper-completion question on a
-  compiled workflow (`unknown` at 600 s), it cannot prove a node *live* (that direction is a
-  SAT witness in a value-blind abstraction, so it is reported `unknown`, never `proven`), and
-  it says nothing about firing order or about values (VER-004). Every one of those limits is
-  pinned by a test, so an improvement in libpetri or z3 breaks the suite and forces the
-  document to be re-measured.
+- **"Can this workflow strand a branch?" now answers.** The verifier asks libpetri's
+  state-class graph (VER-010) first and keeps z3 as the fallback, which is the order NU-053
+  prescribes and the inverse of the first cut. The headline proper-completion question — which
+  used to come back `unknown` at 30 s, 60 s *and* 600 s — is decided by enumeration instead:
+
+  ```bash
+  npx n8n-libpetri verify if-both-outputs.json --property proper-completion
+  #   state space        889 classes in 25ms, 80 quiescent (71 paused or halted), complete (VER-010)
+  #   proper-completion  no branch is ever left stranded  VIOLATED  graph  25ms
+  #
+  #   Findings (1)
+  #     1. [proper-completion] This workflow can come to rest with work still pending: it
+  #        quiesces holding Merge input 0 ready (id:Merge/ready_0), Merge hasdata (id:Merge/hasdata).
+  #        node path: Trigger -> IF -> C -> Merge
+  ```
+
+  A paused or halted run is *classified* rather than reported, so a Wait node is not a
+  finding; anything else at rest is. On the fixtures that is 1–110 ms, and a 41-node chain
+  closes in ~110 ms where the old route never closed at all.
+- **A fourth verdict, `bounded`, for workflows with a cycle.** A loop's state space is
+  infinite, so `proven` is unreachable at any cap — but the part that *was* enumerated is
+  exact, and that is what the verdict says: *no branch strands in any run where this
+  workflow's cyclic nodes run at most `k` times* (`k = 21` on Loop Over Items, ten complete
+  passes of its body). It is counted apart from the proofs, printed in its own section, and
+  `--strict` fails on it. A stranding found inside that prefix is still a full finding.
+- **New options:** `--max-classes` (the state-class cap; `0` turns the solver-free route off)
+  and `--smt-fallback auto|off|force`. The default `auto` refuses to start the SMT route on a
+  net above a measured size, because libpetri's pre-solver pipeline exhausts the V8 heap on a
+  big branchy workflow and a heap exhaustion **aborts the process** — `unknown` naming the
+  ceiling is a verdict, an abort is not.
+- **What the verifier actually proves, measured** (`docs/verification.md`, ADR 0007): proper
+  completion, the structural family — the concurrency budget and its P-semiflow, one
+  activation per node, the retry bound, the join-slot discipline, the OR-round arrival bound —
+  and dead nodes, on any workflow whose state-class graph closes. The ceiling is the
+  workflow's *shape* rather than its node count: independent branches interleave
+  combinatorially (a 20-way switch truncates), a cycle is unbounded (`bounded`), and the
+  budget is a third axis. It still cannot prove a node *live* (that direction is a witness in
+  a value-blind abstraction, so it is reported `unknown`, never `proven`), and it says nothing
+  about firing order or about values (VER-004). Every one of those limits is pinned by a test,
+  so an improvement in libpetri or z3 breaks the suite and forces the document to be
+  re-measured.
 - Conformance widened past the execution-engine filter (`docs/conformance-final.md`):
   `scripts/run-conformance.sh --scope=execution-engine|core|workflow|cli|all`, each with its
   own baseline and artefacts. The engine is measured on all of `packages/core`; the

@@ -166,16 +166,24 @@ an upstream ask, or work that was specified and deliberately not built.
 
 ### 3. Verifier
 
-- [ ] **Proper completion does not close on a compiled net.** `joinedOrDeadLettered(ready_i)` is
-      `unknown` at 30 s, 60 s and 600 s, on a workflow with a stranding and on one without; the same
-      shape hand-written closes in under a second. Pinned as a limit in
-      `tests/verify/properties.test.ts`, so an improvement breaks the suite. This is the property a
-      workflow author would actually want
-- [ ] **The arrival bound closes only where it cannot fail.** `placeBound(ready_i, 1)` on a join
-      slot is proven in ~300 ms and is unfalsifiable by construction (ADR 0003); the OR-round form
-      (`placeBound(ready_i, n)`, the query divergence #8 names) is `unknown` at 30 s on the smallest
-      OR shape there is, with semiflows on and off. So the family has no working detector for the
-      arrival-count class today
+- [x] **Proper completion does not close on a compiled net.** *Closed by M5*: the question is
+      routed to libpetri's state-class graph (VER-010) first and the SMT encoding is the fallback,
+      so it is `proven` in 1-110 ms on every acyclic fixture and `violated` in ~25 ms on
+      `ifBothOutputs`. M4's `unknown` at 30 s / 60 s / 600 s was the SMT route's, not the
+      question's. What is left is the graph's *shape* ceiling, below
+- [x] **The arrival bound closes only where it cannot fail.** *Closed by M5*: the OR-round form
+      (`placeBound(ready_i, n)`, the query divergence #8 names) is decided off the graph —
+      `proven` on `multiProducer`, complete at 245 classes, ~4 ms. The join-slot form still cannot
+      fail by construction (ADR 0003), which is a statement about the gadget rather than a gap
+- [ ] **The graph's shape ceiling is the real limit now, and it has three axes**: independent
+      branches (combinatorial, NU-053 — a 20-way switch truncates at 200 000 classes), cycles
+      (unbounded — answered with the `bounded` verdict rather than a proof), and the budget (the
+      41-node chain closes at k = 1 and k = 2 and truncates at k = 4). Partial-order reduction
+      upstream is the one change that would move the first
+- [ ] **The SMT route is refused above a measured net size** (12 join inputs / 450 flat places),
+      because libpetri's pre-solver pipeline exhausts the V8 heap and *aborts the process* on a
+      bigger branchy net. That turns an abort into an `unknown`, but the budget semiflow and the
+      per-node fallbacks are simply unavailable up there; the upstream fix is below
 - [ ] **Liveness is not provable** and is therefore reported `unknown`: libpetri's `violated` on
       `unreachable` is a witness in a priority- and value-blind abstraction (VER-004). Bounded model
       checking (unroll to depth d, one SAT call) is what would answer it. Consequence today: the
@@ -185,9 +193,12 @@ an upstream ask, or work that was specified and deliberately not built.
       from a codec-decoded marking that need not be reachable from it, and nothing checks such a
       marking against the validated P-invariants at resume time. The cheap guard was specified
       (ADR 0007 §6a) and not implemented; today the limitation is documentation only
-- [ ] `verify()` runs one query per place/node, with no parallelism, no early exit and no per-family
-      budget; a 21-node workflow is ~100 queries, each paying the 2.9 s pipeline again. The CLI
-      streams progress but there is no `--max-queries`
+- [ ] `verify()` has no per-report solver budget: on a truncated acyclic graph the dead-nodes
+      family still sends one `unreachable` query per unreached node, and on `switch20` that is 20
+      witness searches paying the full timeout each — minutes to return nothing. `--property`,
+      `--timeout` and `--smt-fallback off` are the workarounds; a `--max-queries` or a
+      per-family budget is the fix. (Since M5 the P-invariant pipeline is paid once rather than
+      per query, so the cost is the queries themselves.)
 - [ ] A **multi-trigger workflow is verified for one execution** — the one started from the chosen
       start node. The other entry points and what only they feed are reported as such rather than as
       dead nodes, but no run verifies the executions they start; `--start` does it by hand
@@ -202,15 +213,25 @@ an upstream ask, or work that was specified and deliberately not built.
 ### 4. Upstream (libpetri)
 
 - [ ] **No per-place quiescence property honours declared sinks.** `joinedOrDeadLettered` is
-      sink-blind by design (NU-040 AC4) and `deadlockFree` is whole-net, which on a compiled
-      workflow is violated by every clean run. That gap is what forces the pause-witness downgrade.
-      A sink-aware variant — or a `deadlockFree` whose sink set could be "every place that may
-      legitimately hold a token at quiescence", which is derivable from `PlaceRole` — would ask the
-      right question in **one** query per workflow
-- [ ] **The P-invariant / P-semiflow enumeration runs on dense `number[][]`** and exhausts a 4 GB V8
-      heap at 49 nodes (599 places) after ~3 minutes. This, not z3, is what caps `verify()` at
-      roughly 25 nodes, and it is the single change that would take the verifier from small
-      workflows to real ones
+      sink-blind by design (NU-040 AC4) and `deadlockFree` is whole-net. Since M5 the whole-net
+      form *is* what the fallback asks, with the structural rest set as sinks — but it is false by
+      construction on any workflow with a reachable paused marking holding an arrival, so its
+      `proven` direction is unreachable there and `verify()` does not ask it. A sink-aware
+      per-place variant would ask the right question; today the graph classifies instead
+- [ ] **Partial-order reduction in the state-class graph** (NU-053 names its absence). Independent
+      branches are what a workflow engine produces, and they are the one truncation shape the
+      `bounded` verdict cannot soften
+- [ ] **A coverability / cutoff route for cyclic workflows**, which would turn today's `bounded`
+      into a `proven` on Loop Over Items without changing the net
+- [ ] **Intern the marking key.** It is ~12 kB of heap per class, which is what makes the default
+      200 000-class cap a ~2.5 GB memory bound and forces the cap to be lowered on a small heap
+- [ ] **The P-invariant / P-semiflow enumeration runs on dense `number[][]`** and exhausts a 4 GB
+      V8 heap on a branchy net: measured on diamonds in series, 2.8 s at 10 join inputs, 15 s at
+      12, 118 s and 2.4 GB at 14, over 7 minutes at 16, heap exhausted at 18 (37 nodes). Since M5
+      it no longer caps the whole verifier — the graph decides the reachability families — but it
+      is why the SMT route has a size ceiling. **Failing with an error instead of aborting the
+      process would already be worth having**: a heap exhaustion is not catchable, so `verify()`
+      can only refuse to start the pipeline rather than handle its failure
 - [ ] Phases 1–3 (flatten, structural pre-check, invariants) are recomputed per query; a cached
       `FlatNet` + invariants per (net, marking) would cut a full run by an order of magnitude
 - [ ] Every compiled net reports `Structurally bounded: NO`: `X/done`, `X/skipped`, `X/ran` and the
