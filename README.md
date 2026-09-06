@@ -178,8 +178,31 @@ has run, instead of failing or succeeding by canvas order.
   transition inhibits on `_halt` and `_halted`, in-flight actions finish, and `_halt_reap`
   clears the edge, `in`, `ready` and `hasdata` places with reset arcs so a halted run
   quiesces cleanly. The reap leaves `X/retry` alone: it holds a budget unit, and clearing it
-  would break `_budget + Σ(running + ok + retry) = k`.
+  would break `_budget + Σ(running + ok + retry) = k`. The marking is captured when the halt
+  branch is written, i.e. before the reap fires, so the activations it clears are encoded
+  back onto `nodeExecutionStack` behind the failed entry the host pushed: n8n's loop `break`s
+  and leaves everything it has not popped there, and that stack is what a "Retry execution"
+  replays.
+- A Wait node (`waitTill`) or a `destinationNode` stop must not `close()` the executor:
+  ENV-013 close stops all scheduling, so routes still pending would be lost and the marking
+  could not be encoded. Instead `X_run` (and `X_exhausted`) carry two more outcome
+  alternatives, `and(X/waiting, _pause, _budget)` (PlaceRole `waiting`: the node put the
+  execution to wait and must re-run on resume, n8n's `pushExecutionStack`; the token carries
+  the node's input `executionData`) and `and(X/stopped, _pause, _budget)` (PlaceRole
+  `stopped`: the destination node ran, its outputs are recorded, its successors must not be
+  enqueued). Neither is routed, and both refund the budget since nothing routes afterwards.
+  `_pause` is the shared **control terminal** for both: only `X_start`, `X_start_unmet` and
+  `X_retry_wait` inhibit on it (in addition to `_halt` / `_halted`); routes, skips, arms,
+  clears, done and exhausted are **not** pause-inhibited, so a paused net drains every
+  structural transition and quiesces on its own with every token on an `in` / `ready` /
+  `hasdata` / `waiting` place, where the marking codec reads it into n8n's own
+  `nodeExecutionStack` and `waitingExecution`. For M4 the verifier declares `_pause` and
+  `_halted` as sink places (VER-002), so paused and halted markings are terminal and the
+  stranded-token queries fire only on genuinely stuck runs.
 - Cancellation is `executor.close()`; the workflow timeout stays n8n's own poll plus `close()`.
+  A cancellation that arrives while the net is paused encodes in the cancellation mode:
+  `close()` is exactly what can leave a completed action's output on `X/ok` with no `X_route`
+  left to drain it, and only that mode routes such a token instead of rejecting the marking.
 
 ### Concurrency budget and its safety condition
 
@@ -210,7 +233,12 @@ spec/         n8n concept → libpetri requirement mapping
 
 ## Status
 
-Milestone M0 (scaffold). See [`tasks/todo.md`](tasks/todo.md) and [`CHANGELOG.md`](CHANGELOG.md).
+Milestone M2 (engine): the `PetriScheduler` runs n8n's execution-engine suite at k = 1 —
+26/36 loop-driving cases and 1619/1621 helper cases (26/30 and 1621/1621 excluding the
+out-of-scope AI-agent tool dispatch), full matrix in
+[`docs/conformance-m2.md`](docs/conformance-m2.md). M0/M1 (scaffold, compiler, patches,
+conformance harness) are done. See [`tasks/todo.md`](tasks/todo.md) and
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

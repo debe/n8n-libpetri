@@ -46,6 +46,44 @@ All notable changes to this project are documented here. The format follows
   same/regression/fixed/new/changed verdicts, Markdown report and CLI;
   `scripts/run-conformance.sh` runs the suite under both engines.
 
+- `PetriScheduler` (`n8n-libpetri`): a drop-in `WorkflowScheduler` for n8n's execution engine.
+  Register it once and n8n's own loop is gone — the net decides what runs next:
+
+  ```ts
+  import { registerPetriScheduler } from 'n8n-libpetri';
+
+  registerPetriScheduler({
+    setWorkflowSchedulerFactory, // from n8n's scheduler registry (patch 0002)
+    nodeHelpers: NodeHelpers,    // from 'n8n-workflow'
+    StackScheduler,              // the legacy loop, for non-v1 workflows
+  });
+  ```
+
+  It runs the node and routes the result, nothing more: no dispatch queue, no policy. Tokens
+  carry the live `INodeExecutionData[]` arrays, so `$json`, `$node`, `pairedItem` and
+  `WorkflowDataProxy` see exactly what they saw before. Workflows on `executionOrder` other
+  than `v1` are handed to the scheduler you pass in.
+- Wait nodes, destination-node stops and cancellation resume through the marking codec:
+  `decodeExecutionData` turns a saved `IRunExecutionData` into a marking, `encodeMarking` turns
+  a paused, cancelled or stranded net back into `nodeExecutionStack` / `waitingExecution` in
+  n8n's own shape — including join slots, OR rounds, retries and in-flight activations.
+  Cancellation is `executor.close()`; a run is never given a timeout.
+- Retries are timed by the net (`delayed(waitBetweenTries)`) rather than by a sleep in the loop,
+  so siblings keep running while a node waits between attempts.
+- A `stopWorkflow` error halts the net and the activations it reaped are written back to
+  `nodeExecutionStack` behind the failed entry n8n pushed, so a retry of the execution resumes
+  from where it stopped instead of losing the queued work.
+- Conformance against n8n's execution-engine suite at k = 1 (`scripts/run-conformance.sh`, full
+  matrix in `docs/conformance-m2.md`): 26/36 loop-driving cases and 1619/1621 helper cases —
+  26/30 and 1621/1621 once the AI-agent tool dispatch this milestone does not implement is
+  excluded. The legacy leg is byte-identical to the unpatched baseline, so the patched seam is
+  still a pure refactor. The remaining four failures are registered divergences (#2, #5, #11,
+  #12), none of them data loss.
+- Nodes that use the AI-agent `EngineRequest` / `EngineResponse` tool protocol fail with an
+  explicit `NodeOperationError` naming the limitation instead of behaving unpredictably.
+- Divergence register extended with #11–#15 and an amendment to #2; ADR 0005 amended with the
+  mapping that landed.
+
 ### Changed
 - README per-node gadget now documents the routed `X_run`/`X_route` shape (libpetri's
   validator rejects the earlier nested-`xor` form on the retry and halt branches, ADR 0004).

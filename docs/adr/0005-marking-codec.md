@@ -1,6 +1,6 @@
 # ADR 0005 — The marking codec and Wait-node resume
 
-Status: accepted (2026-09-04); implementation is M2.
+Status: accepted (2026-09-04); amended 2026-09-06 with the final mapping (M2, track E).
 
 ## Context
 
@@ -80,3 +80,104 @@ from n8n's own shapes; nothing of the net is persisted.
 - `typescript/tests/spikes/emission-cycle.test.ts` — skipped nodes leave `empty` on tree
   edges, which the encoder writes as `[]`, matching R6's substitution at line 2688.
 - The codec's own round-trip tests land in M2 under `typescript/tests/codec/`.
+
+## Amendment (2026-09-06) — the final mapping
+
+Implemented in `typescript/src/codec.ts` (`decodeExecutionData`, `encodeMarking`); tests
+under `typescript/tests/codec/`. What changed against the text above, and what was left
+open there:
+
+- **Pause is `_pause`, not `_paused`**, deposited by the `waiting` / `stopped` outcome
+  alternatives of `X_run` / `X_exhausted` (README "Retries, halt, cancellation"). Only
+  `X_start`, `X_start_unmet` and `X_retry_wait` inhibit on it, so a paused net drains its
+  structural transitions and quiesces with every token on an `in` / `ready` / `hasdata` /
+  `waiting` place (plus `X/retry`: the retry wait is pause-inhibited and holds its budget
+  unit, which decode re-seeds).
+- **Token vocabulary.** A stack entry decodes to an `EntryPayload` (the `IExecuteData`
+  object by reference — `metadata`, `runIndex`, the live `INode` included — which the start
+  action passes through verbatim, as n8n runs an entry unconditionally); a `waitingExecution`
+  slot to an `EdgePayload` (`items` by reference, `source` from `waitingExecutionSource`) or a
+  unit token for `[]`. For a join / choose-branch entry the entry heads the first input's
+  data slot with a unit companion on every other input's data slot (one `X/hasdata` unit on a
+  generic join); `X/free_i` is withheld for every input that received a head, and a decoded
+  head replaces the seeded empty of an unreachable input.
+- **The seeded empty of an unreachable input is a one-off.** This is the choice the first
+  implementation attempt got wrong, and the one the `twoTriggers` round trips pinned down.
+  `sharedMarking()` re-creates exactly one empty on each join input fed only by producers no
+  start node can reach (README "Initial marking and the marking codec"). It is R6's
+  `null → []` substitution *done once*, so the first decoded head of that input **consumes**
+  it — a head, an entry companion or a `[]` from `waitingExecution` alike — and it is never
+  queued behind that head, never written back by encode (a join whose whole content is seeds
+  is dropped: decode re-seeds it), and therefore not part of the round trip's semantic
+  projection. That is literally what `initialMarking` does for the primary start node's own
+  entry (`compile.ts`: it deletes `free_i` and every `ready` place of the join before writing
+  the entry and its companions), and a decoded join stack entry now produces exactly the
+  marking `initialMarking` produces for the same entry — asserted in `tests/codec/decode.test.ts`.
+  The alternative — keeping the seed queued behind the entry so a *later* arrival on another
+  input could pair with `[]` again — is wrong twice over: an n8n stack entry already carries
+  that `[]` in its own `data.main[i]` (n8n's `allDataFound` did the padding when it built the
+  entry), so re-queuing applies the substitution a second time; and the requeued token has no
+  n8n shape, so `encode(decode(x))` invented a `waitingExecution` slot of `{ main: [null, []] }`
+  that `x` never had and the net stranded a token on that input once the entry had run. The
+  price of the one-off rule is the mirror case: a join that is handed both a complete entry
+  *and* a further arrival on another input (n8n-inconsistent for an acyclic workflow — the
+  producer would have to run twice) strands instead of being padded a second time. That is
+  divergence #2, reported by the stranded encoder and provable statically, which is the
+  register entry we already accept for it.
+- **Slots are positional per input.** The queue of input `i` is the token on its `ready`
+  place followed by the tokens on its edge places in canonical edge order; slot `j` pairs
+  the `j`-th token of every input. That is the FIFO pairing the gadget enforces and what
+  n8n's first-fit allocator produces for its own states. Decode reads `waitingExecution`
+  slots per input in ascending run index: the first arrival takes the `ready` place and
+  every later one queues on the input's **first edge place** (the arm forwards the payload
+  when `free_i` returns), which keeps the order exact across a resume regardless of which
+  producer the arrival came from. Encode writes a **complete** slot as a stack entry
+  (`{ node, data: { main: items | [] per input }, source: { main } }`, n8n's `allDataFound`),
+  an **entry-headed** slot as the entry verbatim, and a **partial** slot as
+  `waitingExecution[node][k]` (`items` + source, `[]` + `null`, `null`) with `k = 0…` per node
+  in positional order. Run indexes are renumbered; nothing but the allocator reads them.
+- **OR rounds have a resume shape** (open item of track D). The deliveries of an open
+  round beyond the pending arrivals and the seeds are written as
+  `waitingExecution[C][k] = { main: [[]] }` — n8n's own "arrived empty", which its R6
+  discards without running anything — and read back as `X/ready_i` units. A pending arrival
+  on `X/hasdata_i` is a stack entry; on decode its `source`, if it names a tree edge from a
+  producer the compile can reach, counts as one delivery again (the arm had counted it).
+  `X/ran_i` is not encodable in n8n's shapes; decode rebuilds one marker when the round is
+  open and `runData[C]` is non-empty (for an acyclic OR node there is exactly one round, so
+  "ran at all" is "ran in this round"). Approximations, all in the positional class of
+  divergences #8 / #10: a round that ran only a filtered-out or no-output activation (no
+  `runData`) loses its marker and may skip after the pause; a second round of a node with
+  unreachable producers double-counts the seeds.
+- **Resume seeding of `Y/skipped`.** Beyond the shared marking's seeds (nodes unreachable
+  from every start node), decode seeds `Y/skipped` for every referenced node with no
+  recorded run that no pending activation (stack entry or waiting slot) can reach through
+  the connection graph: `Y` will never run, so `X`'s `$('Y')` must fail with n8n's own error
+  through `X_start_unmet` instead of stranding on the read arc. `X/done` comes from
+  `runData` as before.
+- **Modes and errors.** `pause` (default) and `cancelled` write the stack; `stranded`
+  (natural quiescence with leftovers, divergence #2) writes every pending token —
+  complete slots and entries included — to `waitingExecution` with one diagnostic per
+  token naming node and place, never to the stack. A token on a place the net drains on its
+  own before quiescence (`X/running`, `X/ok(_o)`, `X/routed_o`, `X/in_empty`, an OR input's
+  edge places; `X/retry` in `stranded`) is a `CodecError` naming the place. `cancelled`
+  (`executor.close()`, ENV-013) is the one mode that legitimately sees them: a running token
+  is a pending activation, and a token on `X/ok` is routed by the encoder as `X_route` would
+  have — the successors are where n8n's `addNodeToBeExecuted` had put them before the next
+  iteration's cancellation check. `X/stopped` with `ran: false` (n8n's `shouldStopExecuting`
+  before the pop) is a pending activation; with `ran: true` it is discarded.
+- **Stack order.** The waiting node first, then depth descending, canvas order, token FIFO:
+  the deepest pending node first, where n8n's LIFO `unshift` has it.
+- **Round trips** (`tests/codec/roundtrip.test.ts`, seeded generators, no fast-check —
+  a hand-rolled mulberry32 in `tests/codec/support.ts`, 200 seeds × 16 fixtures per
+  direction): `encode(decode(x)) ≡ x` up to slot renumbering for n8n-consistent state
+  (first-fit slots, canonical stack order), entries by reference, and `decode(y) ≡ decode(x)`
+  token for token; `decode(encode(m)) ≡ m` for quiescent pause markings under the semantic
+  projection (the pending activations per node whichever place holds them, plus the re-seeded
+  control places) — a complete data slot comes back as an entry-headed slot with the same
+  activation, a lone seeded empty is outside the projection (previous bullet), `_budget` is
+  re-seeded to `k`, `_pause` is gone (a resumed net is not paused) and `X/skipped` is rebuilt
+  from reachability. Exact marking equality is not available in either direction and not the
+  right notion: n8n's format has one shape for "every input has arrived" (a stack entry), so
+  the four markings that reach it — heads on the `ready` places, an entry-headed slot, a
+  `stopped` token, a `retry` token — all encode to it and decode back as the entry-headed one.
+  The projection is what survives that, and it is the equivalence the executor observes.
