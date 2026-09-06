@@ -3,8 +3,8 @@
  *
  * Pipeline: structural analysis (`graph.ts`), one `SubnetDef` per node (`gadget.ts`)
  * instantiated at prefix `node.id` (MOD-010), composed in canvas order by port binding
- * (MOD-020) into a flat net (MOD-023) with the shared `_budget` / `_halt` / `_halted`
- * places, the consumer-owned edge places and the `Y/done` reference places bound as ports;
+ * (MOD-020) into a flat net (MOD-023) with the shared `_budget` / `_halt` / `_halted` /
+ * `_pause` places, the consumer-owned edge places and the `Y/done` reference places bound as ports;
  * then the host-level `_halt_reap` (CORE-034 reset arcs), action binding (CORE-042) and the
  * `NetMap`. The `PrecompiledNet` program is compiled lazily once per `CompiledWorkflow`
  * (CONC-020) and enforces CORE-043.
@@ -55,7 +55,7 @@ export function kSafety(analysis: WorkflowAnalysis): BudgetRestriction | null {
  * `initialMarking` never asks for it, since an input seeded empty has only unreachable —
  * hence tree-edge — producers).
  */
-function readySlot(g: NodeGadget, i: InputGadget, variant: Variant): Place<unknown> {
+export function readySlot(g: NodeGadget, i: InputGadget, variant: Variant): Place<unknown> {
   const p = g.form === 'choose-branch' && i.required ? (variant === 'data' ? i.readyData : i.readyEmpty) : i.ready;
   if (p === null) {
     throw new Error(
@@ -79,6 +79,7 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
     budget: place<unknown>('_budget'),
     halt: place<unknown>('_halt'),
     halted: place<unknown>('_halted'),
+    pause: place<unknown>('_pause'),
   };
 
   // Consumer-owned edge places. The direct form names them `X/in` / `X/in_empty` (README);
@@ -174,6 +175,7 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
     { name: shared.budget.name, role: 'budget', node: null, port: null, place: lookup(shared.budget.name) },
     { name: shared.halt.name, role: 'halt', node: null, port: null, place: lookup(shared.halt.name) },
     { name: shared.halted.name, role: 'halted', node: null, port: null, place: lookup(shared.halted.name) },
+    { name: shared.pause.name, role: 'pause', node: null, port: null, place: lookup(shared.pause.name) },
     ...builds.flatMap((b) => b.places.map((p): PlaceInfo => ({ ...p, place: lookup(p.name) }))),
   ];
   const transitionInfos: TransitionInfo[] = [
@@ -212,6 +214,7 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
   readonly analysis: WorkflowAnalysis;
   readonly structuralHash: string;
   readonly startNode: string;
+  readonly startNodes: readonly string[];
   readonly requestedBudget: number;
   readonly effectiveBudget: number;
   readonly budgetRestriction: BudgetRestriction | null;
@@ -236,6 +239,7 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
     this.analysis = analysis;
     this.structuralHash = structuralHash;
     this.startNode = analysis.startNode;
+    this.startNodes = analysis.startNodes;
     this.requestedBudget = requestedBudget;
     this.effectiveBudget = effectiveBudget;
     this.budgetRestriction = budgetRestriction;
@@ -257,7 +261,7 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
     return this.compiledProgram;
   }
 
-  initialMarking(triggerItems: unknown): Map<Place<unknown>, Token<unknown>[]> {
+  sharedMarking(): Map<Place<unknown>, Token<unknown>[]> {
     const marking = new Map<Place<unknown>, Token<unknown>[]>();
     const units = (n: number): Token<unknown>[] => Array.from({ length: n }, () => unitToken() as Token<unknown>);
     const put = (p: Place<unknown>, tokens: Token<unknown>[]): void => {
@@ -270,38 +274,54 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
       if (g.form === 'or') {
         // An OR input has no slots: every unreachable tree producer is one empty delivery of
         // the first round (the start node's producers are all unreachable, so its round is
-        // complete), and the trigger payload is one data arrival.
+        // complete).
         const i = g.inputs[0]!;
         if (g.reachable && i.unreachableEdges > 0) put(i.ready!, units(i.unreachableEdges));
-        if (g.isStart) put(i.hasdata!, [tokenOf<unknown>(triggerItems)]);
       }
-      // Join inputs: a pre-filled slot (unreachable producers, or the start node's own
-      // activation) withholds its free token so free_i + ready_i <= 1 from the outset. A
-      // dead (unwired, required) input keeps its free token and is never written.
+      // Join inputs: a pre-filled slot (unreachable producers) withholds its free token so
+      // free_i + ready_i <= 1 from the outset. A dead (unwired, required) input keeps its
+      // free token and is never written.
       if (g.form === 'join' || g.form === 'choose-branch') {
-        g.inputs.forEach((i, k) => {
-          if (g.isStart && k === 0) {
-            // n8n hands `nodeExecutionStack[0].data.main[0]` to the first input.
-            put(readySlot(g, i, 'data'), [tokenOf<unknown>(triggerItems)]);
-            if (g.hasdata !== null) put(g.hasdata, units(1));
-          } else if (g.isStart) {
-            // The other inputs of the start node are present but carry no items (n8n passes
-            // only main[0]); they take the `data` slot so X_start fires, as n8n runs
-            // nodeExecutionStack[0] unconditionally. The generic join's ready_i is the same
-            // place for both variants; hasdata comes from the first input.
-            put(readySlot(g, i, 'data'), units(1));
-          } else if (i.seedEmpty) {
-            put(readySlot(g, i, 'empty'), units(1));
-          } else {
-            put(i.free!, units(1));
-          }
-        });
+        for (const i of g.inputs) {
+          if (i.seedEmpty) put(readySlot(g, i, 'empty'), units(1));
+          else put(i.free!, units(1));
+        }
       }
-      if (g.isStart && g.form === 'direct') put(g.in!, [tokenOf<unknown>(triggerItems)]);
     }
-    // A referenced node unreachable from the start node is definitionally skipped, so the
+    // A referenced node unreachable from every start node is definitionally skipped, so the
     // referencing node's start_unmet twin fires and its action fails as n8n would.
     for (const y of this.analysis.seededSkipped) put(this.netMap.node(y).skipped!, units(1));
+    return marking;
+  }
+
+  initialMarking(triggerItems: unknown): Map<Place<unknown>, Token<unknown>[]> {
+    const marking = this.sharedMarking();
+    const units = (n: number): Token<unknown>[] => Array.from({ length: n }, () => unitToken() as Token<unknown>);
+    const g = this.netMap.node(this.startNode);
+    if (g.form === 'direct') {
+      marking.set(g.in!, [tokenOf<unknown>(triggerItems)]);
+    } else if (g.form === 'or') {
+      // The trigger payload is one data arrival.
+      marking.set(g.inputs[0]!.hasdata!, [tokenOf<unknown>(triggerItems)]);
+    } else {
+      g.inputs.forEach((i, k) => {
+        // The start node's own activation pre-fills every slot, withholding free_i and
+        // replacing the empty a seeded (unreachable-producer) input would otherwise carry.
+        marking.delete(i.free!);
+        for (const p of [i.ready, i.readyData, i.readyEmpty]) if (p !== null) marking.delete(p);
+        if (k === 0) {
+          // n8n hands `nodeExecutionStack[0].data.main[0]` to the first input.
+          marking.set(readySlot(g, i, 'data'), [tokenOf<unknown>(triggerItems)]);
+          if (g.hasdata !== null) marking.set(g.hasdata, units(1));
+        } else {
+          // The other inputs of the start node are present but carry no items (n8n passes
+          // only main[0]); they take the `data` slot so X_start fires, as n8n runs
+          // nodeExecutionStack[0] unconditionally. The generic join's ready_i is the same
+          // place for both variants; hasdata comes from the first input.
+          marking.set(readySlot(g, i, 'data'), units(1));
+        }
+      });
+    }
     return marking;
   }
 

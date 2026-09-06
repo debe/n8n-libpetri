@@ -12,7 +12,7 @@ import { ALL } from '../fixtures/workflows.js';
 import { declarationOrder } from './support.js';
 
 /**
- * Per-node counts (transitions / owned places):
+ * Per-node counts (transitions / owned places), before the two pause outcomes:
  * - trigger (no producer):            3 (start run route)       / 5 (in idle running ok done)
  * - direct, tree edge in, acyclic:    4 (+ skip)                / 5 (idle running ok done skipped)
  * - direct, cycle edge in, cyclic, o connected outputs: 3 + o sinks / 4 + o nil
@@ -24,38 +24,44 @@ import { declarationOrder } from './support.js';
  * - a `$('Y')` reference with a read arc adds one `start_unmet` twin transition
  * Edge places: 2 per tree edge (data, empty), 1 per cycle edge. Shared: _budget _halt _halted.
  * Host: _halt_reap.
+ *
+ * M2 (README "Retries, halt, cancellation"): every node owns `X/waiting` and `X/stopped`
+ * (the Wait and destination-node outcomes of `X_run` / `X_exhausted`) and the net has one
+ * more shared place, the control terminal `_pause`, so every fixture gains
+ * `pauseOutcomes(nodeCount)` places and no transition.
  */
+const pauseOutcomes = (nodeCount: number): number => 2 * nodeCount + 1;
 const EXPECTED: Record<keyof typeof ALL, { transitions: number; places: number }> = {
-  linear: { transitions: 3 + 3 * 4 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 },
-  fanOut: { transitions: 3 + 3 * 4 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 },
+  linear: { transitions: 3 + 3 * 4 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) },
+  fanOut: { transitions: 3 + 3 * 4 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) },
   // Trigger, IF, A, B, End direct; Merge = join(2 inputs, 2 tree edges): 3 + 1 + 4 arms = 8 / 5 + 4 + 1 = 10.
-  diamond: { transitions: 3 + 4 * 4 + 8 + 1, places: 5 + 4 * 5 + 10 + 6 * 2 + 3 },
+  diamond: { transitions: 3 + 4 * 4 + 8 + 1, places: 5 + 4 * 5 + 10 + 6 * 2 + 3 + pauseOutcomes(6) },
   // Switch routes per output: start run + 20 route_o + done + skip = 24 / idle running done skipped + 20 ok_o + 20 routed_o = 44.
-  switch20: { transitions: 3 + 24 + 20 * 4 + 1, places: 5 + 44 + 20 * 5 + 21 * 2 + 3 },
+  switch20: { transitions: 3 + 24 + 20 * 4 + 1, places: 5 + 44 + 20 * 5 + 21 * 2 + 3 + pauseOutcomes(22) },
   // Merge chooseBranch: start run route + skip_de skip_ed skip_ee + 4 arms = 10 / 5 + 2 free + 4 ready = 11.
-  chooseBranch: { transitions: 3 + 4 + 10 + 4 + 1, places: 5 + 5 + 11 + 5 + 4 * 2 + 3 },
+  chooseBranch: { transitions: 3 + 4 + 10 + 4 + 1, places: 5 + 5 + 11 + 5 + 4 * 2 + 3 + pauseOutcomes(4) },
   // C = OR(1 input, 2 tree edges): start run route skip clear + 4 arms = 9 / 5 + ready_0 hasdata_0 ran_0 = 8.
-  multiProducer: { transitions: 3 + 4 + 4 + 9 + 1, places: 5 + 5 + 5 + 8 + 4 * 2 + 3 },
+  multiProducer: { transitions: 3 + 4 + 4 + 9 + 1, places: 5 + 5 + 5 + 8 + 4 * 2 + 3 + pauseOutcomes(4) },
   // Loop = cyclic join(1 input: tree + cycle edge; 2 connected outputs): 3 + skip + 3 arms + 2 sinks = 9 /
   //   5 + free ready hasdata + 2 nil = 10. Body = cyclic direct on a cycle edge, 1 output: 4 / 5. After direct: 4 / 5.
   //   Edges: 2 tree (Trigger->Loop, Loop->After) + 2 cycle (Loop->Body, Body->Loop) = 6.
-  loopOverItems: { transitions: 3 + 9 + 4 + 4 + 1, places: 5 + 10 + 5 + 5 + 6 + 3 },
+  loopOverItems: { transitions: 3 + 9 + 4 + 4 + 1, places: 5 + 10 + 5 + 5 + 6 + 3 + pauseOutcomes(4) },
   // A = cyclic join(1 input: tree + cycle; 1 output): 3 + skip + 3 arms + 1 sink = 8 / 5 + 3 + 1 nil = 9.
   //   B = cyclic direct on a cycle edge, 1 output (two edges): 4 / 5. Exit direct: 4 / 5. Edges: 2 tree + 2 cycle = 6.
-  userCycle: { transitions: 3 + 8 + 4 + 4 + 1, places: 5 + 9 + 5 + 5 + 6 + 3 },
-  twoTriggers: { transitions: 3 + 3 + 8 + 4 + 1, places: 5 + 5 + 10 + 5 + 3 * 2 + 3 },
+  userCycle: { transitions: 3 + 8 + 4 + 4 + 1, places: 5 + 9 + 5 + 5 + 6 + 3 + pauseOutcomes(4) },
+  twoTriggers: { transitions: 3 + 3 + 8 + 4 + 1, places: 5 + 5 + 10 + 5 + 3 * 2 + 3 + pauseOutcomes(4) },
   // B references A (reachable avoiding B): B gets a start_unmet twin.
-  expressionRef: { transitions: 3 + 4 + 4 + 5 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 },
-  retry: { transitions: 3 + 6 + 4 + 1, places: 5 + 7 + 5 + 2 * 2 + 3 },
-  continueErrorOutput: { transitions: 3 + 3 * 4 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 },
-  ifHalf: { transitions: 3 + 4 + 4 + 1, places: 5 + 5 + 5 + 2 * 2 + 3 },
+  expressionRef: { transitions: 3 + 4 + 4 + 5 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) },
+  retry: { transitions: 3 + 6 + 4 + 1, places: 5 + 7 + 5 + 2 * 2 + 3 + pauseOutcomes(3) },
+  continueErrorOutput: { transitions: 3 + 3 * 4 + 1, places: 5 + 3 * 5 + 3 * 2 + 3 + pauseOutcomes(4) },
+  ifHalf: { transitions: 3 + 4 + 4 + 1, places: 5 + 5 + 5 + 2 * 2 + 3 + pauseOutcomes(3) },
   // C = OR(2 tree edges): 9 / 8; Merge = join(2 inputs, 2 tree edges): 8 / 10; 6 tree edges.
-  ifBothOutputs: { transitions: 3 + 4 + 9 + 8 + 4 + 1, places: 5 + 5 + 8 + 10 + 5 + 6 * 2 + 3 },
+  ifBothOutputs: { transitions: 3 + 4 + 9 + 8 + 4 + 1, places: 5 + 5 + 8 + 10 + 5 + 6 * 2 + 3 + pauseOutcomes(5) },
   // Q splits: start run + 4 route_o + done + skip = 8 / idle running done skipped + 4 ok_o + 4 routed_o = 12.
-  fanOut4: { transitions: 3 + 8 + 4 * 4 + 1, places: 5 + 12 + 4 * 5 + 5 * 2 + 3 },
+  fanOut4: { transitions: 3 + 8 + 4 * 4 + 1, places: 5 + 12 + 4 * 5 + 5 * 2 + 3 + pauseOutcomes(6) },
   // M = choose-branch(3 inputs, required [0, 1]): 3 + skips de ed ee + 6 arms = 12 /
   //   5 + 3 free + ready_0_data ready_0_empty ready_1_data ready_1_empty ready_2 = 13. 7 tree edges.
-  partialRequired: { transitions: 3 + 12 + 4 * 4 + 1, places: 5 + 13 + 4 * 5 + 7 * 2 + 3 },
+  partialRequired: { transitions: 3 + 12 + 4 * 4 + 1, places: 5 + 13 + 4 * 5 + 7 * 2 + 3 + pauseOutcomes(6) },
 };
 
 const DEPTHS: Record<keyof typeof ALL, Record<string, number>> = {
@@ -157,7 +163,8 @@ describe.each(Object.entries(ALL) as [keyof typeof ALL, (typeof ALL)[keyof typeo
     expect(c.netMap.places.map((p) => p.name).sort()).toEqual([...c.net.places].map((p) => p.name).sort());
     for (const p of c.netMap.places) {
       expect(c.net.places.has(p.place), p.name).toBe(true);
-      if (p.node === null) expect(['budget', 'halt', 'halted']).toContain(p.role);
+      // `_pause` joined the shared places in M2 (the Wait / destination-node control terminal).
+      if (p.node === null) expect(['budget', 'halt', 'halted', 'pause']).toContain(p.role);
       else expect(c.netMap.node(p.node)).toBeDefined();
     }
     for (const t of c.netMap.transitions) {
@@ -180,18 +187,29 @@ describe.each(Object.entries(ALL) as [keyof typeof ALL, (typeof ALL)[keyof typeo
     expect(c.joinReadyPlaces).toHaveLength(c.netMap.nodes.reduce((n, g) => n + g.inputs.length, 0));
   });
 
-  it('every start, start_unmet, retry_wait, exhausted, skip and arm inhibits on _halt and _halted; X/idle is consumed and refunded', () => {
+  it('every start, start_unmet, retry_wait, exhausted, skip and arm inhibits on _halt and _halted; only starts and retry_wait on _pause; X/idle is consumed and refunded', () => {
     for (const g of c.netMap.nodes) {
       const guarded = [
         g.transitions.start, ...g.transitions.startUnmet, g.transitions.retryWait, g.transitions.exhausted,
         ...g.transitions.skip, ...g.transitions.arms,
       ];
+      // A paused net (Wait, destination-node stop) must drain its structural transitions and
+      // quiesce with every token on an in / ready / hasdata / waiting place, so exhausted,
+      // skips, arms, clears, routes and done are NOT pause-inhibited (README "Retries, halt,
+      // cancellation"); only the transitions that would start a new run are.
+      const pauseInhibited = new Set([g.transitions.start, ...g.transitions.startUnmet, g.transitions.retryWait]);
       for (const n of guarded) {
         if (n === null) continue;
         const t = c.netMap.transitionObject(n);
         const inh = t.inhibitors.map((a) => a.place.name);
         expect(inh, n).toContain('_halt');
         expect(inh, n).toContain('_halted');
+        if (pauseInhibited.has(n)) expect(inh, `${n} inhibits on _pause`).toContain('_pause');
+        else expect(inh, `${n} is not pause-inhibited`).not.toContain('_pause');
+      }
+      for (const n of [...g.transitions.routes, g.transitions.done, ...g.transitions.clear]) {
+        if (n === null) continue;
+        expect(c.netMap.transitionObject(n).inhibitors.map((a) => a.place.name), `${n} is not pause-inhibited`).not.toContain('_pause');
       }
       for (const n of [g.transitions.start, ...g.transitions.startUnmet, g.transitions.retryWait]) {
         if (n === null) continue;

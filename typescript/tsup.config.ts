@@ -6,6 +6,8 @@ export default defineConfig({
     'compiler/index': 'src/compiler/index.ts',
     'verify/index': 'src/verify/index.ts',
     'conformance/index': 'src/conformance/index.ts',
+    codec: 'src/codec.ts',
+    'n8n-vitest-setup': 'src/n8n-vitest-setup.ts',
   },
   format: ['esm'],
   dts: true,

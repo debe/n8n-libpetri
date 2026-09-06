@@ -162,7 +162,8 @@ describe('join gadget (ADR 0003)', () => {
     expect(inputNames(start)).toEqual(['_budget', 'id:Merge/hasdata', 'id:Merge/idle', 'id:Merge/ready_0', 'id:Merge/ready_1']);
     expect(start.inputSpecs.find((s) => s.place.name === 'id:Merge/hasdata')!.type).toBe('all');
     expect(outputNames(start)).toEqual(['id:Merge/free_0', 'id:Merge/free_1', 'id:Merge/running']);
-    expect(inhibitorNames(start)).toEqual(['_halt', '_halted']);
+    // `_pause` (M2): a start never fires while the execution waits or is stopped.
+    expect(inhibitorNames(start)).toEqual(['_halt', '_halted', '_pause']);
   });
 
   it('X_skip needs every ready_i under inhibitor(hasdata) and the halt inhibitors; emits empties, skipped, free_*', () => {
@@ -228,29 +229,40 @@ describe('Merge chooseBranch: all inputs required, combinations enumerated', () 
 describe('retry gadget', () => {
   const c = compile(retry);
 
-  it('X_run offers ok | retry | halt (stopWorkflow default) and always returns idle', () => {
+  it('X_run offers ok | retry | halt (stopWorkflow default) | waiting | stopped and always returns idle', () => {
     const run = transitionOf(c, 'A', 'run');
-    expect(outputNames(run)).toEqual(['_budget', '_halt', 'id:A/idle', 'id:A/ok', 'id:A/retry']);
+    expect(outputNames(run)).toEqual([
+      '_budget', '_halt', '_pause', 'id:A/idle', 'id:A/ok', 'id:A/retry', 'id:A/stopped', 'id:A/waiting',
+    ]);
+    // M2 adds the two pause outcomes (README "Retries, halt, cancellation"): the node put the
+    // execution to wait, or the destination node ran. Both refund the budget, since nothing
+    // routes afterwards, and deposit the `_pause` control terminal.
     expect(branchesOf(run)).toEqual([
       ['id:A/idle', 'id:A/ok'],
       ['id:A/idle', 'id:A/retry'],
       ['_budget', '_halt', 'id:A/idle'],
+      ['_budget', '_pause', 'id:A/idle', 'id:A/waiting'],
+      ['_budget', '_pause', 'id:A/idle', 'id:A/stopped'],
     ]);
   });
 
-  it('X_retry_wait is delayed(waitBetweenTries), consumes a try and idle, inhibits on halt', () => {
+  it('X_retry_wait is delayed(waitBetweenTries), consumes a try and idle, inhibits on halt and pause', () => {
     const wait = transitionOf(c, 'A', 'retry');
     expect(inputNames(wait)).toEqual(['id:A/idle', 'id:A/retry', 'id:A/tries']);
     expect(wait.timing).toEqual({ type: 'delayed', afterMs: 10 });
-    expect(inhibitorNames(wait)).toEqual(['_halt', '_halted']);
+    // `_pause` (M2): a retry never restarts while the execution waits or is stopped.
+    expect(inhibitorNames(wait)).toEqual(['_halt', '_halted', '_pause']);
     expect(outputNames(wait)).toEqual(['id:A/running']);
   });
 
-  it('X_exhausted fires under inhibitor(tries) and the halt inhibitors with the X_run outcome shape minus retry', () => {
+  it('X_exhausted fires under inhibitor(tries) and the halt inhibitors with the X_run outcome shape minus retry (and no idle)', () => {
     const ex = transitionOf(c, 'A', 'exhausted');
     expect(inputNames(ex)).toEqual(['id:A/retry']);
+    // Not pause-inhibited: an exhausted retry must still resolve after a pause landed.
     expect(inhibitorNames(ex)).toEqual(['_halt', '_halted', 'id:A/tries']);
-    expect(branchesOf(ex)).toEqual([['id:A/ok'], ['_budget', '_halt']]);
+    expect(branchesOf(ex)).toEqual([
+      ['id:A/ok'], ['_budget', '_halt'], ['_budget', '_pause', 'id:A/waiting'], ['_budget', '_pause', 'id:A/stopped'],
+    ]);
     expect(gadget(c, 'A')).toMatchObject({ retryOnFail: true, maxTries: 3, waitBetweenTries: 10 });
   });
 
@@ -259,7 +271,10 @@ describe('retry gadget', () => {
     expect(b.retry).toBeNull();
     expect(b.tries).toBeNull();
     expect(b.transitions.retryWait).toBeNull();
-    expect(outputNames(transitionOf(c, 'B', 'run'))).toEqual(['_budget', '_halt', 'id:B/idle', 'id:B/ok']);
+    // The pause outcomes (M2) exist on every node; only the retry alternative is missing.
+    expect(outputNames(transitionOf(c, 'B', 'run'))).toEqual([
+      '_budget', '_halt', '_pause', 'id:B/idle', 'id:B/ok', 'id:B/stopped', 'id:B/waiting',
+    ]);
   });
 });
 
@@ -284,7 +299,10 @@ describe('expression references and onError', () => {
     expect(a.onError).toBe('continueErrorOutput');
     expect(a.outputs.map((o) => [o.index, o.isErrorOutput, o.name])).toEqual([[0, false, null], [1, true, 'error']]);
     expect(edgeSlot(c, 'A', 1, 'Err', 0).data.name).toBe('id:Err/in');
-    expect(outputNames(transitionOf(c, 'A', 'run'))).toEqual(['id:A/idle', 'id:A/ok']); // no _halt alternative
+    // No _halt alternative; the M2 pause outcomes (waiting / stopped, refunding _budget) stay.
+    expect(outputNames(transitionOf(c, 'A', 'run'))).toEqual([
+      '_budget', '_pause', 'id:A/idle', 'id:A/ok', 'id:A/stopped', 'id:A/waiting',
+    ]);
     expect(outputNames(transitionOf(c, 'Trigger', 'run'))).toContain('_halt'); // stopWorkflow default keeps it
   });
 

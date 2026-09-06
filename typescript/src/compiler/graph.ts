@@ -90,7 +90,10 @@ export interface MultiProducerInput {
 }
 
 export interface WorkflowAnalysis {
+  /** The primary start node (`startNodes[0]`): n8n's `nodeExecutionStack[0]`. */
   readonly startNode: string;
+  /** Every start node: the primary first, then the others in canvas order, no duplicates. */
+  readonly startNodes: readonly string[];
   /** Nodes in canvas order. */
   readonly nodes: readonly AnalysedNode[];
   readonly byName: ReadonlyMap<string, AnalysedNode>;
@@ -103,15 +106,16 @@ export interface WorkflowAnalysis {
   readonly sccs: readonly (readonly string[])[];
   /** Nodes in a non-trivial SCC or carrying a self-loop: producers "in a cycle". */
   readonly cyclic: ReadonlySet<string>;
+  /** Nodes reachable from the union of the start nodes. */
   readonly reachable: ReadonlySet<string>;
-  /** Longest path (tree edges) from the start node's SCC; unreachable nodes get 0. */
+  /** Longest path (tree edges) from any start node's SCC; unreachable nodes get 0. */
   readonly depth: ReadonlyMap<string, number>;
   readonly maxDepth: number;
   readonly hasCycle: boolean;
   readonly multiProducerInputs: readonly MultiProducerInput[];
   /** Nodes referenced with a read arc (`read` or `seeded`): their `skipped` place must exist. */
   readonly referenced: ReadonlySet<string>;
-  /** Referenced nodes unreachable from the start node: `Y/skipped` is seeded. */
+  /** Referenced nodes unreachable from every start node: `Y/skipped` is seeded. */
   readonly seededSkipped: ReadonlySet<string>;
   readonly diagnostics: readonly string[];
 }
@@ -162,12 +166,15 @@ function nonNegativeInt(v: number, what: string): void {
   if (!Number.isInteger(v) || v < 0) throw new Error(`${what} must be a non-negative integer, got ${v}`);
 }
 
-/** Nodes reachable from `start` over `succ`, never entering `avoid`. */
-function reachFrom(start: string, succ: ReadonlyMap<string, readonly string[]>, avoid: string | null): Set<string> {
+/** Nodes reachable from any of `starts` over `succ`, never entering `avoid`. */
+function reachFrom(starts: readonly string[], succ: ReadonlyMap<string, readonly string[]>, avoid: string | null): Set<string> {
   const seen = new Set<string>();
-  if (start === avoid) return seen;
-  seen.add(start);
-  const stack = [start];
+  const stack: string[] = [];
+  for (const start of starts) {
+    if (start === avoid || seen.has(start)) continue;
+    seen.add(start);
+    stack.push(start);
+  }
   while (stack.length > 0) {
     const n = stack.pop()!;
     for (const m of succ.get(n) ?? []) {
@@ -212,10 +219,17 @@ export function analyse(workflow: WorkflowDescription): WorkflowAnalysis {
     if (ids.has(n.id)) throw new Error(`compile: duplicate node id '${n.id}'`);
     ids.add(n.id);
   }
-  if (!names.has(workflow.startNode)) {
-    throw new Error(`compile: start node '${workflow.startNode}' is not in the workflow`);
+  const declaredStarts = workflow.startNodes ?? (workflow.startNode === undefined ? [] : [workflow.startNode]);
+  if (declaredStarts.length === 0) throw new Error('compile: workflow declares no start node');
+  for (const s of declaredStarts) {
+    if (!names.has(s)) throw new Error(`compile: start node '${s}' is not in the workflow`);
   }
   const ordered = [...workflow.nodes].sort(compareCanvas);
+  // Canonical start list: the primary first (it alone is seeded by initialMarking), the
+  // rest in canvas order, so the same set hashes alike whatever order it was listed in.
+  const primaryStart = declaredStarts[0]!;
+  const startSet = new Set(declaredStarts);
+  const startNodes = [primaryStart, ...ordered.map((n) => n.name).filter((n) => n !== primaryStart && startSet.has(n))];
 
   const raws: RawNode[] = [];
   const rawByName = new Map<string, RawNode>();
@@ -302,14 +316,14 @@ export function analyse(workflow: WorkflowDescription): WorkflowAnalysis {
     outgoing.get(e.from)!.push(e);
   }
 
-  // ---- reachability from the start node ----
-  const reachable = reachFrom(workflow.startNode, succ, null);
+  // ---- reachability from the union of the start nodes ----
+  const reachable = reachFrom(startNodes, succ, null);
 
-  // ---- depth: longest path over the condensation, in topological order ----
+  // ---- depth: longest path over the condensation from any start node, in topological order ----
   // Tarjan emits SCCs in reverse topological order, so walking them backwards visits every
   // SCC after all of its predecessors.
   const sccDepth = new Array<number>(sccs.length).fill(-1);
-  sccDepth[sccOf.get(workflow.startNode)!] = 0;
+  for (const s of startNodes) sccDepth[sccOf.get(s)!] = 0;
   for (let s = sccs.length - 1; s >= 0; s--) {
     const d = sccDepth[s]!;
     if (d < 0) continue;
@@ -346,14 +360,14 @@ export function analyse(workflow: WorkflowDescription): WorkflowAnalysis {
       }
       if (!reachable.has(y)) {
         diagnostics.push(
-          `node '${x}' references '${y}', which is unreachable from the start node; ` +
+          `node '${x}' references '${y}', which is unreachable from the start node${startNodes.length > 1 ? 's' : ''}; ` +
           `'${y}/skipped' is seeded and the reference always fails`);
         resolved.push({ node: y, kind: 'seeded' });
         referenced.add(y);
         seededSkipped.add(y);
         continue;
       }
-      avoiding ??= reachFrom(workflow.startNode, succ, x);
+      avoiding ??= reachFrom(startNodes, succ, x);
       if (avoiding.has(y)) {
         resolved.push({ node: y, kind: 'read' });
         referenced.add(y);
@@ -411,7 +425,7 @@ export function analyse(workflow: WorkflowDescription): WorkflowAnalysis {
   const multiProducerInputs = [...producers.values()].filter((p) => p.producers > 1);
 
   return {
-    startNode: workflow.startNode,
+    startNode: primaryStart, startNodes,
     nodes: analysed, byName, edges, incoming, outgoing, sccOf, sccs, cyclic, reachable,
     depth, maxDepth, hasCycle: cyclic.size > 0, multiProducerInputs, referenced, seededSkipped, diagnostics,
   };

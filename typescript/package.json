@@ -33,6 +33,14 @@
     "./conformance": {
       "import": "./dist/conformance/index.js",
       "types": "./dist/conformance/index.d.ts"
+    },
+    "./codec": {
+      "import": "./dist/codec.js",
+      "types": "./dist/codec.d.ts"
+    },
+    "./n8n-vitest-setup": {
+      "import": "./dist/n8n-vitest-setup.js",
+      "types": "./dist/n8n-vitest-setup.d.ts"
     }
   },
   "scripts": {
@@ -46,6 +54,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.0.1",
+    "n8n-workflow": "^2.16.0",
     "tsup": "^8.5.1",
     "tsx": "^4.22.0",
     "typescript": "^6.0.3",

@@ -35,9 +35,12 @@ describe('split routing structure', () => {
       [0, 'id:Q/ok_0', 'id:Q/routed_0'], [1, 'id:Q/ok_1', 'id:Q/routed_1'], [2, 'id:Q/ok_2', 'id:Q/routed_2'], [3, 'id:Q/ok_3', 'id:Q/routed_3'],
     ]);
     const run = transitionOf(c, 'Q', 'run');
+    // Success, halt, plus the two M2 pause outcomes (waiting / stopped).
     expect(enumerateBranches(run.outputSpec!).map((b) => [...b].map((p) => p.name).sort())).toEqual([
       ['id:Q/idle', 'id:Q/ok_0', 'id:Q/ok_1', 'id:Q/ok_2', 'id:Q/ok_3'],
       ['_budget', '_halt', 'id:Q/idle'],
+      ['_budget', '_pause', 'id:Q/idle', 'id:Q/waiting'],
+      ['_budget', '_pause', 'id:Q/idle', 'id:Q/stopped'],
     ]);
     expect(q.transitions.routes).toEqual(['id:Q/route_0', 'id:Q/route_1', 'id:Q/route_2', 'id:Q/route_3']);
     for (const [o, name] of q.transitions.routes.entries()) {
@@ -65,17 +68,19 @@ describe('split routing structure', () => {
     expect(outputNames(transitionOf(c, 'IF', 'route'))).toContain('_budget');
   });
 
-  it('Switch(20): the branch count is linear in the output count (45 for the Switch, not 2^20)', () => {
+  it('Switch(20): the branch count is linear in the output count (47 for the Switch, not 2^20)', () => {
     const c = compile(switch20);
     const sw = gadget(c, 'Switch');
     expect(sw.splitRouting).toBe(true);
     expect(sw.transitions.routes).toHaveLength(20);
     for (const r of sw.transitions.routes) expect(enumerateBranches(c.netMap.transitionObject(r).outputSpec!)).toHaveLength(2);
-    // start 1 + run 2 + 20 routes × 2 + done 1 + skip 1
-    expect(branchTotal(c, 'Switch')).toBe(45);
+    // start 1 + run 4 (ok | halt | waiting | stopped: M2 added the two pause outcomes to
+    // every X_run, +2 per node) + 20 routes × 2 + done 1 + skip 1
+    expect(branchTotal(c, 'Switch')).toBe(47);
     expect(branchTotal(c, 'Switch')).toBeLessThan(100);
-    // Whole net: 20 leaves × 5 + Trigger 5 + Switch 45 + reap 1.
-    expect(branchTotal(c)).toBe(151);
+    // Whole net: 20 leaves × 7 (start 1, run 4, route 1, skip 1) + Trigger 7 (start 1, run 4,
+    // route 2) + Switch 47 + reap 1. Still linear in the output count.
+    expect(branchTotal(c)).toBe(195);
     expect(branchTotal(c)).toBeLessThan(200);
     expect(c.program.transitionCount).toBe(c.net.transitions.size);
   });

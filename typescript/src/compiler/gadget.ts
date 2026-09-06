@@ -4,19 +4,30 @@
  * (ADR 0004: two-phase start/run with the outcome routed through `X/ok`):
  *
  * ```
- * X_start:      one(X/in) one(_budget) one(X/idle) inhibitor(_halt) inhibitor(_halted)
+ * X_start:      one(X/in) one(_budget) one(X/idle) inhibitor(_halt) inhibitor(_halted) inhibitor(_pause)
  *               [read(Y/done) per $('Y')]                     → X/running        priority depth
  * X_start_unmet_k: the same without the reads, read(Y_k/skipped) → X/running (tagged) priority depth − 1
- * X_run:        one(X/running) → and( xor( X/ok, [X/retry], [and(_halt, _budget)] ), X/idle )
- *                                                                                 priority depth + 1
+ * X_run:        one(X/running) → and( xor( X/ok, [X/retry], [and(_halt, _budget)],
+ *                                          and(X/waiting, _pause, _budget), and(X/stopped, _pause, _budget) ),
+ *                                     X/idle )                                    priority depth + 1
  * X_route:      one(X/ok) → and( per connected output o: xor( and(data edges_o), and(empty edges_o) | X/nil_o ),
  *                                _budget, X/done )                                priority depth + 1
  * X_skip:       one(X/in_empty) → and( empty tree edges, X/skipped )              priority depth
- * X_retry_wait: one(X/retry) one(X/tries) one(X/idle) inhibitor(_halt) inhibitor(_halted)
+ * X_retry_wait: one(X/retry) one(X/tries) one(X/idle) inhibitor(_halt) inhibitor(_halted) inhibitor(_pause)
  *               delayed(waitBetweenTries) → X/running                             priority depth
- * X_exhausted:  one(X/retry) inhibitor(X/tries) → xor( X/ok, [and(_halt, _budget)] ) priority depth + 1
+ * X_exhausted:  one(X/retry) inhibitor(X/tries) → xor( X/ok, [and(_halt, _budget)],
+ *                                                      and(X/waiting, _pause, _budget), and(X/stopped, _pause, _budget) )
+ *                                                                                 priority depth + 1
  * sink_o:       one(X/nil_o)  (no Out spec: a genuine sink, CORE-043 AC4)
  * ```
+ *
+ * The `waiting` outcome is n8n's `waitTill` (the node put the execution to wait and must
+ * re-run on resume; the token carries its input `executionData`) and `stopped` is the
+ * destination-node stop (outputs recorded, successors never enqueued). Both deposit the
+ * shared control terminal `_pause`, which every start / start-unmet / retry-wait inhibits
+ * — routes, skips, arms, clears, done and exhausted do not — so a paused net drains its
+ * structural transitions and quiesces with every token on an in / ready / hasdata /
+ * waiting place, where the marking codec reads it (README "Retries, halt, cancellation").
  *
  * **Verifier scaling** (README): the flatteners expand `and` of `k` `xor`s into `2^k`
  * virtual transitions (IO-016), so above {@link SPLIT_ROUTING_ABOVE} connected outputs the
@@ -48,7 +59,7 @@
  * `_halted` (README "Retries, halt, cancellation"), so a halted run quiesces without a
  * post-halt cascade. `X/retry` is never reaped: it holds a budget unit.
  *
- * Everything that crosses a node boundary is a port: `_budget` / `_halt` / `_halted`, the
+ * Everything that crosses a node boundary is a port: `_budget` / `_halt` / `_halted` / `_pause`, the
  * consumer-owned edge places (data and, for tree edges, empty), and `Y/done` / `Y/skipped`
  * for every `$('Y')` reference (read arcs, CORE-032). Places that stay inside the node keep
  * their prefixed names (MOD-012). Actions are bound after composition on the flat net
@@ -217,6 +228,8 @@ export function buildNodeGadget(
   port('halt', halt, host.halt, 'inout');
   const halted = place<unknown>('halted');
   port('halted', halted, host.halted, 'input');
+  const pause = place<unknown>('pause');
+  port('pause', pause, host.pause, 'inout');
 
   // ---- markers ----
   const idle = internal('idle', 'idle', null);
@@ -224,6 +237,8 @@ export function buildNodeGadget(
   const done = internal('done', 'done', null);
   // Exposed (unbound) so referencing nodes can bind their read port to it.
   portDecls.push({ name: 'done', local: done, direction: 'output' });
+  const waiting = internal('waiting', 'waiting', null);
+  const stopped = internal('stopped', 'stopped', null);
 
   // ---- input side ----
   let inLocal: Place<unknown> | null = null;
@@ -391,12 +406,15 @@ export function buildNodeGadget(
   );
   const success: Out = split ? and(...outputs.map((o) => outPlace(o.ok!))) : outPlace(ok!);
   const haltBranch = and(outPlace(halt), outPlace(budget));
+  // The two pause outcomes: the budget is refunded here since nothing routes afterwards.
+  const waitingBranch = and(outPlace(waiting), outPlace(pause), outPlace(budget));
+  const stoppedBranch = and(outPlace(stopped), outPlace(pause), outPlace(budget));
   const freeRefunds = (): Out[] => inputs.map((i) => outPlace(i.free!));
   const readyOf = (i: LocalInput): Place<unknown> => (i.required && form === 'choose-branch' ? i.readyData! : i.ready!);
 
   // ---- X_start and its start_unmet twins ----
   const startBuilder = (local: string, priority: number) => {
-    const b = Transition.builder(local).priority(priority).inhibitors(halt, halted);
+    const b = Transition.builder(local).priority(priority).inhibitors(halt, halted, pause);
     if (form === 'direct') {
       b.inputs(one(inLocal!), one(budget), one(idle)).outputs(outPlace(running));
     } else if (form === 'or') {
@@ -426,6 +444,8 @@ export function buildNodeGadget(
     success,
     ...(retry !== null ? [outPlace(retry)] : []),
     ...(stopWorkflow ? [haltBranch] : []),
+    waitingBranch,
+    stoppedBranch,
   ]);
   body.push(Transition.builder('run')
     .inputs(one(running))
@@ -568,7 +588,7 @@ export function buildNodeGadget(
   if (retry !== null && tries !== null) {
     body.push(Transition.builder('retry_wait')
       .inputs(one(retry), one(tries), one(idle))
-      .inhibitors(halt, halted)
+      .inhibitors(halt, halted, pause)
       .timing(delayed(a.waitBetweenTries!))
       .outputs(outPlace(running))
       .priority(depth).build());
@@ -576,7 +596,7 @@ export function buildNodeGadget(
     body.push(Transition.builder('exhausted')
       .inputs(one(retry))
       .inhibitors(tries, halt, halted)
-      .outputs(xorOf([success, ...(stopWorkflow ? [haltBranch] : [])]))
+      .outputs(xorOf([success, ...(stopWorkflow ? [haltBranch] : []), waitingBranch, stoppedBranch]))
       .priority(depth + 1).build());
     tinfo('exhausted', 'exhausted');
   }
@@ -636,7 +656,7 @@ export function buildNodeGadget(
     return {
       node: name, id, type: a.node.type, typeVersion: a.node.typeVersion,
       disabled: a.node.disabled === true, loopNode: a.shape.loopNode === true,
-      form, depth, cyclic, reachable, isStart: name === analysis.startNode,
+      form, depth, cyclic, reachable, isStart: name === analysis.startNode, isStartNode: analysis.startNodes.includes(name),
       onError: a.onError, retryOnFail: a.retryOnFail, maxTries: a.maxTries, waitBetweenTries: a.waitBetweenTries,
       in: inFinal === null ? null : lookup(inFinal),
       inEmpty: inEmptyFinal === null ? null : lookup(inEmptyFinal),
@@ -646,6 +666,7 @@ export function buildNodeGadget(
       hasdata: opt(hasdata, 'hasdata'),
       retry: opt(retry, 'retry'),
       tries: opt(tries, 'tries'),
+      waiting: lookup(F('waiting')), stopped: lookup(F('stopped')),
       inputs: inputGadgets, outputs: outputGadgets,
       references: referenceNames, unguardedReferences,
       transitions: {

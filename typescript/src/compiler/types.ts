@@ -112,8 +112,18 @@ export interface WorkflowDescription {
   readonly name?: string;
   readonly nodes: readonly NodeDescription[];
   readonly connections: readonly MainConnection[];
-  /** Name of the node the execution starts at (n8n's `startNode`, `nodeExecutionStack[0]`). */
-  readonly startNode: string;
+  /**
+   * Names of the nodes the execution starts from, first the primary one (n8n's
+   * `nodeExecutionStack[0]`, whose `X/in` receives the trigger data in `initialMarking`).
+   * A resumed execution lists every node on `nodeExecutionStack` plus every node with
+   * `runData`, so it is compiled from what already ran: depth is the longest path from any
+   * start node in the SCC condensation, and reachability (unreachable-input seeding,
+   * expression-reference classification) is from the union. Part of the structural hash.
+   * At least one of `startNodes` / `startNode` is required.
+   */
+  readonly startNodes?: readonly string[];
+  /** One-element alias of {@link startNodes}. */
+  readonly startNode?: string;
   readonly nodeTypes: NodeTypeResolver;
   readonly expressionReferences?: ExpressionReferences;
 }
@@ -146,9 +156,21 @@ export type TransitionRole =
   | 'start' | 'start-unmet' | 'run' | 'route' | 'done' | 'skip' | 'arm' | 'clear' | 'retry' | 'exhausted'
   | 'sink' | 'reap';
 
+/**
+ * Place roles. Besides the per-node gadget places (README "Per-node gadget"):
+ * - `waiting`: the node put the execution to wait (n8n `waitTill`) and must re-run on
+ *   resume; the token carries the node's input `executionData` (n8n's `pushExecutionStack`);
+ * - `stopped`: the destination node ran and its successors must not be enqueued (or the
+ *   execution was cancelled before the node ran); never routed;
+ * - `pause`: the shared control terminal `_pause` a `waiting` / `stopped` outcome deposits.
+ *   Every start, start-unmet and retry-wait inhibits on it; routes, skips, arms, clears,
+ *   done and exhausted do not, so a paused net drains its structural transitions and
+ *   quiesces with every token on an in / ready / hasdata / waiting place.
+ */
 export type PlaceRole =
   | 'in-data' | 'in-empty' | 'edge-data' | 'edge-empty' | 'nil' | 'ready' | 'hasdata' | 'ran' | 'free'
-  | 'idle' | 'running' | 'ok' | 'routed' | 'done' | 'skipped' | 'retry' | 'tries' | 'budget' | 'halt' | 'halted';
+  | 'idle' | 'running' | 'ok' | 'routed' | 'done' | 'skipped' | 'retry' | 'tries' | 'waiting' | 'stopped'
+  | 'budget' | 'halt' | 'halted' | 'pause';
 
 /** `tree`: the two ends are in different SCCs; `cycle`: both ends share one SCC. */
 export type EdgeKind = 'tree' | 'cycle';
@@ -188,7 +210,7 @@ export interface TransitionInfo {
 export interface PlaceInfo {
   readonly name: string;
   readonly role: PlaceRole;
-  /** Owning node name; `null` for `_budget`, `_halt`, `_halted`. Edge places belong to their consumer. */
+  /** Owning node name; `null` for `_budget`, `_halt`, `_halted`, `_pause`. Edge places belong to their consumer. */
   readonly node: string | null;
   /** Input index for input-side places, output index for `nil` / `ok_o` / `routed_o`; `null` otherwise. */
   readonly port: number | null;
@@ -294,8 +316,12 @@ export interface NodeGadget {
   /** Longest path from the start node in the SCC condensation; `X_start` priority. */
   readonly depth: number;
   readonly cyclic: boolean;
+  /** Reachable from the union of start nodes. */
   readonly reachable: boolean;
+  /** The primary start node (`startNodes[0]`): `initialMarking` seeds its own input. */
   readonly isStart: boolean;
+  /** One of the start nodes (primary or not). */
+  readonly isStartNode: boolean;
   readonly onError: OnError;
   readonly retryOnFail: boolean;
   /** n8n's clamped `maxTries` (`[2, 5]`) when `retryOnFail`; `null` otherwise. */
@@ -319,6 +345,10 @@ export interface NodeGadget {
   readonly hasdata: Place<unknown> | null;
   readonly retry: Place<unknown> | null;
   readonly tries: Place<unknown> | null;
+  /** `X/waiting`: the node put the execution to wait (PlaceRole `waiting`). */
+  readonly waiting: Place<unknown>;
+  /** `X/stopped`: the destination-node stop, or a cancellation before the run (PlaceRole `stopped`). */
+  readonly stopped: Place<unknown>;
   /** Inputs the gadget models, ascending index: connected ones plus dead required ones. Empty for the direct form. */
   readonly inputs: readonly InputGadget[];
   /** Connected outputs, ascending index. Unconnected outputs get no places. */
@@ -334,6 +364,8 @@ export interface SharedPlaces {
   readonly budget: Place<unknown>;
   readonly halt: Place<unknown>;
   readonly halted: Place<unknown>;
+  /** `_pause`: the control terminal for Wait and destination-node stops (README "Retries, halt, cancellation"). */
+  readonly pause: Place<unknown>;
 }
 
 /**
@@ -411,7 +443,10 @@ export interface CompiledWorkflow {
   readonly netMap: NetMapView;
   /** The graph analysis the net was derived from (SCCs, depths, reachability, edge kinds). */
   readonly analysis: WorkflowAnalysis;
+  /** The primary start node (`startNodes[0]`). */
   readonly startNode: string;
+  /** Every start node, primary first, then the rest in canvas order. */
+  readonly startNodes: readonly string[];
   readonly requestedBudget: number;
   /** `requestedBudget`, or 1 when the k-safety check failed (see `budgetRestriction`). */
   readonly effectiveBudget: number;
@@ -438,6 +473,15 @@ export interface CompiledWorkflow {
    * the first marking on.
    */
   initialMarking(triggerItems: unknown): Map<Place<unknown>, Token<unknown>[]>;
+  /**
+   * The execution-independent part of {@link initialMarking}: `_budget` × k, every
+   * `X/idle`, every `X/free_i` (including the ones a pre-filled slot would withhold), every
+   * `X/tries`, the seeded `empty` tokens of inputs fed only by unreachable producers and
+   * the seeded `Y/skipped` markers. No start node is activated: the marking codec layers
+   * the decoded `nodeExecutionStack` / `waitingExecution` over it and withholds the
+   * `free_i` of every slot it pre-fills.
+   */
+  sharedMarking(): Map<Place<unknown>, Token<unknown>[]>;
   /** The same structure with `binder`'s actions layered over the current ones (CORE-042). */
   withActions(binder: ActionBinder): CompiledWorkflow;
 }

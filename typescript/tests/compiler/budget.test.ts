@@ -61,7 +61,7 @@ describe('structuralHash', () => {
   });
 
   it('ignores the order nodes and connections are listed in', () => {
-    const shuffled = workflow('diamond', [...diamond.nodes].reverse(), [...diamond.connections].reverse(), diamond.startNode);
+    const shuffled = workflow('diamond', [...diamond.nodes].reverse(), [...diamond.connections].reverse(), diamond.startNode!);
     expect(compile(shuffled).structuralHash).toBe(compile(diamond).structuralHash);
   });
 

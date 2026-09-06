@@ -12,7 +12,7 @@
  * halt + reap, expression read arcs, unreachable-input seeding and the k-safety check are
  * specified in README.md ("The model") and ADRs 0002–0004.
  */
-export { compile, kSafety } from './compile.js';
+export { compile, kSafety, readySlot } from './compile.js';
 export {
   analyse, isAllRequired, joinFormOf, requiredInputsOf, retryParamsOf,
   DEFAULT_MAX_TRIES, DEFAULT_WAIT_BETWEEN_TRIES_MS, MIN_MAX_TRIES, MAX_MAX_TRIES, MAX_WAIT_BETWEEN_TRIES_MS,

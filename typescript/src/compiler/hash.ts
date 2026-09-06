@@ -8,14 +8,19 @@ import type { WorkflowAnalysis } from './graph.js';
 /**
  * SHA-256 (hex) over a canonical JSON rendering of everything the compiler reads: nodes in
  * canvas order with their structural fields and resolved type shapes, resolved expression
- * references, deduplicated connections in canonical order and the start node. Two
- * workflows with equal hashes compile to structurally identical nets and programs. The
- * budget is deliberately not part of it: it changes only the initial marking.
+ * references, deduplicated connections in canonical order and the start nodes (the
+ * primary one and the canonical set: they decide depth, reachability and which node
+ * `initialMarking` seeds). Two workflows with equal hashes compile to structurally
+ * identical nets and programs. The budget is deliberately not part of it: it changes only
+ * the initial marking.
  */
 export function structuralHash(analysis: WorkflowAnalysis): string {
   const canonical = {
-    v: 3, // 2: clamped retry params (retryParamsOf); 3: classified references, OR form, split routing
+    // 2: clamped retry params (retryParamsOf); 3: classified references, OR form, split
+    // routing; 4: start-node set, _pause, X/waiting and X/stopped outcomes
+    v: 4,
     start: analysis.startNode,
+    starts: [...analysis.startNodes],
     nodes: analysis.nodes.map((a) => ({
       id: a.node.id,
       name: a.node.name,
