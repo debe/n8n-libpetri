@@ -36,7 +36,7 @@ describe('counterexample decoding', () => {
   it('strips the flattener branch suffix', () => {
     expect(stripBranch('id:A/run_b0')).toBe('id:A/run');
     expect(stripBranch('id:A/run_b12')).toBe('id:A/run');
-    expect(stripBranch('_halt_reap')).toBe('_halt_reap');
+    expect(stripBranch('id:A/skip')).toBe('id:A/skip');
     // Only a trailing `_b<digits>` is a branch; a place-like suffix is left alone.
     expect(stripBranch('id:A/route_b')).toBe('id:A/route_b');
   });
@@ -48,10 +48,6 @@ describe('counterexample decoding', () => {
     expect(run.source).toBe(map.node('IF').transitions.run);
     expect(run.transition.endsWith('_b0')).toBe(true);
 
-    const reap = decodeStep('_halt_reap', map);
-    expect(reap.node).toBeNull();
-    expect(reap.role).toBe('reap');
-
     const unknown = decodeStep('not/a/transition', map);
     expect(unknown.node).toBeNull();
     expect(unknown.role).toBeNull();
@@ -62,12 +58,12 @@ describe('counterexample decoding', () => {
     expect(decodeStep(arm.name, map)).toMatchObject({ node: 'Merge', role: 'arm', variant: 'empty' });
   });
 
-  it('builds a node path in first-occurrence order, skipping the host transition', () => {
+  it('builds a node path in first-occurrence order, skipping what it cannot decode', () => {
     const g = (name: string) => map.node(name).transitions;
     const cex = decodeCounterexample(fakeResult({
       counterexampleTransitions: [
         g('Trigger').run, `${g('Trigger').routes[0]!}_b0`, g('IF').start, `${g('IF').run}_b0`,
-        g('IF').start, '_halt_reap',
+        g('IF').start, 'not/a/transition',
       ],
       counterexampleConfirmed: true,
     }), map)!;

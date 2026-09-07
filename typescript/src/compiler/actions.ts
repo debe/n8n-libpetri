@@ -12,8 +12,9 @@
  *   acyclic workflow end to end; a cycle never terminates under it.
  * - `routingActions(policy)` — the policy decides per output (an IF routing one way).
  *
- * All of them take the success outcome in `X_run` and `X_exhausted`: the placeholders never
- * halt and never retry, so the net's only decisions are the structural ones. The
+ * All of them take the success outcome in `X_run` and `X_exhausted` — which, unless the node
+ * routes per output ({@link SPLIT_ROUTING_ABOVE}), is where the routing itself happens: the
+ * placeholders never halt and never retry, so the net's only decisions are the structural ones. The
  * `start-unmet` twin tags the running token with an {@link UnmetReferencePayload}, as M2's
  * action will.
  *
@@ -75,32 +76,32 @@ function startUnmetAction(g: NodeGadget, info: TransitionInfo): TransitionAction
   };
 }
 
-/** Writes the success outcome: `X/ok`, or every `X/ok_o` under split routing. */
-function succeed(ctx: TransitionContext, g: NodeGadget, value: unknown): void {
-  if (g.splitRouting) for (const out of g.outputs) ctx.output(out.ok!, value);
-  else ctx.output(g.ok!, value);
+/**
+ * Writes the success outcome: the routing of every connected output plus `X/routed`, or —
+ * under per-output routing — one `X/ok_o` per output for `X_route_o` to route.
+ */
+function succeed(ctx: TransitionContext, g: NodeGadget, policy: RoutingPolicy, value: unknown): void {
+  if (g.splitRouting) {
+    for (const out of g.outputs) ctx.output(out.ok!, value);
+    return;
+  }
+  for (const out of g.outputs) routeOutput(ctx, g, out, policy(g, out), value);
+  ctx.output(g.routed!, null);
 }
 
-function runAction(g: NodeGadget): TransitionAction {
+function runAction(g: NodeGadget, policy: RoutingPolicy): TransitionAction {
   return async (ctx) => {
-    succeed(ctx, g, ctx.input(g.running));
+    succeed(ctx, g, policy, ctx.input(g.running));
     ctx.output(g.idle, null);
   };
 }
 
-function routeAction(g: NodeGadget, map: NetMapView, info: TransitionInfo, policy: RoutingPolicy): TransitionAction {
-  if (g.splitRouting) {
-    const out = g.outputs.find((o) => o.index === info.port)!;
-    return async (ctx) => {
-      routeOutput(ctx, g, out, policy(g, out), ctx.input(out.ok!));
-      ctx.output(out.routed!, null);
-    };
-  }
+/** Per-output routing only (`splitRouting`): `X_route_o` drains one `X/ok_o`. */
+function routeAction(g: NodeGadget, info: TransitionInfo, policy: RoutingPolicy): TransitionAction {
+  const out = g.outputs.find((o) => o.index === info.port)!;
   return async (ctx) => {
-    const value = ctx.input(g.ok!);
-    for (const out of g.outputs) routeOutput(ctx, g, out, policy(g, out), value);
-    ctx.output(map.shared.budget, null);
-    ctx.output(g.done, null);
+    routeOutput(ctx, g, out, policy(g, out), ctx.input(out.ok!));
+    ctx.output(out.routed!, null);
   };
 }
 
@@ -111,9 +112,9 @@ function doneAction(g: NodeGadget, map: NetMapView): TransitionAction {
   };
 }
 
-function exhaustedAction(g: NodeGadget): TransitionAction {
+function exhaustedAction(g: NodeGadget, policy: RoutingPolicy): TransitionAction {
   return async (ctx) => {
-    succeed(ctx, g, ctx.input(g.retry!));
+    succeed(ctx, g, policy, ctx.input(g.retry!));
   };
 }
 
@@ -158,16 +159,15 @@ function retryWaitAction(g: NodeGadget): TransitionAction {
 /** Binds a structural action for every role that declares an `Out` spec; sinks and `clear` keep passthrough. */
 export function structuralActions(policy: RoutingPolicy): ActionBinder {
   return (info, map) => {
-    if (info.role === 'reap') return async (ctx) => { ctx.output(map.shared.halted, null); };
     if (info.role === 'sink' || info.role === 'clear') return null;
     const g = map.node(info.node!);
     switch (info.role) {
       case 'start': return startAction(g);
       case 'start-unmet': return startUnmetAction(g, info);
-      case 'run': return runAction(g);
-      case 'route': return routeAction(g, map, info, policy);
+      case 'run': return runAction(g, policy);
+      case 'route': return routeAction(g, info, policy);
       case 'done': return doneAction(g, map);
-      case 'exhausted': return exhaustedAction(g);
+      case 'exhausted': return exhaustedAction(g, policy);
       case 'skip': return skipAction(g);
       case 'arm': return armAction(g, info);
       case 'retry': return retryWaitAction(g);

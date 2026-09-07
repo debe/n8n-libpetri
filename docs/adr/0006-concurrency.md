@@ -16,7 +16,7 @@ must be exactly what k = 1 produced. Order may differ (divergences #5 / #12); da
 Three things could break that, and this ADR settles all three.
 
 1. **Payload aliasing.** A token holds the very `INodeExecutionData[]` array n8n produced,
-   and `X_route` hands the *same* `EdgePayload` to every edge of an output
+   and the routing hands the *same* `EdgePayload` to every edge of an output
    (`scheduler/actions.ts`, `routeOutput`). Two consumers of one output therefore hold the
    same array and the same item objects. If either of them writes through that reference
    while the other is running, k > 1 is a data race.
@@ -141,20 +141,23 @@ The copy is not the thing to optimise; it is what makes the 6.4× safe.
 
 ### 3. The halt snapshot, and the k-safety condition
 
-**The halt snapshot** (`state.haltMarking`) is taken when the halting action writes its
-branch, but `_halt` only reaches the marking when that action *resolves*, so the snapshot is
-a lower bound on what `_halt_reap` destroys. The window is small by construction: `_halt_reap`
-has priority `maxDepth + 2`, the highest in the net, and its reset arcs empty every
-start-input place in the same firing in which it consumes `_halt` (resets are applied at
-firing time, `PrecompiledNetExecutor.fireTransition`), so once `_halt` is harvested no further
-activation can start. Only the ≤ 2 microtask hops between the snapshot and the halting
-action's own completion being enqueued are open, and an `X_start` in that window additionally
-needs another node's route to refund a budget unit in an executor cycle that runs inside it.
-We could not construct a schedule that does it. The guard is added anyway because it is
-almost free: `X_start` increments a per-node counter, the snapshot records those counters, and
-`haltPending` drops as many of the snapshot's oldest tokens per start-input place as that node
-started since (FIFO, so those are exactly the ones a start took). The invariant it protects —
-*a node that ran is never also written back as a pending entry* — is pinned at k = 1, 2 and 4.
+**The halt snapshot is gone (M6).** It existed because `_halt_reap` destroyed the pending
+activations with reset arcs and the scheduler had to put them back, and it was taken when the
+halting action wrote its branch — so it was only ever a *lower bound* on what the reap
+destroyed. M6 removed the reap instead of tightening the bound: `_halt` is never consumed,
+nothing is destroyed, and the quiescent marking still holds every pending activation where it
+was delivered (ADR 0004, "The reap is gone"). `state.haltMarking`, `state.haltStarts`,
+`haltPending`, `REAPED_ROLES` and the start-count drop this section used to describe are all
+deleted, and the invariant they protected — *a node that ran is never also written back as a
+pending entry* — now holds by construction: a token a start consumed is simply not in the
+marking. It is still pinned at k = 1, 2 and 4.
+
+What the reap made *necessary* rather than merely convenient was a different thing, and it is
+worth recording because it is the trap in this area: the executor re-evaluates enablement
+*inside* a firing pass, so between `_halt` leaving the marking and `_halted` entering it one
+phase later, an `X_start` whose input place still held a token would fire. The reset arcs
+closed that window by emptying those places in the same firing. A `_halt` that is never
+consumed closes it without a reap.
 
 **The k-safety condition** stays as it is: `kSafety` forces k = 1 for a cyclic workflow or an
 input index with more than one producer. Its stated reason was wrong, though, and this ADR
@@ -192,7 +195,7 @@ scheduler fix — so it is specified here and deferred. Note also that it buys c
   sibling that finishes first (#15) and dynamically-resolved credentials (#18).
 - `PetriScheduler.maxInFlight` exposes the high-water mark of concurrent runs (`X_run`
   actions), which the suite asserts `<= k` against. It is a *lower bound* on
-  `_budget + Σ(running + ok + retry) = k`, not a reading of it: a retry wait and the
+  `_budget + Σ_X(running + retry + in-flight) = k`, not a reading of it: a retry wait and the
   `X_exhausted` recording each hold their budget unit without running the node.
 - Retries hold their budget unit across the wait (ADR 0004). At k > 1 that costs one slot for
   the duration, not the whole net: `concurrency.test.ts` pins that two siblings complete while
@@ -221,5 +224,5 @@ scheduler fix — so it is specified here and deferred. Note also that it buys c
   this ADR rests on (ADR 0004's evidence, unchanged).
 - Upstream finding: `PrecompiledNetExecutor.getMarking()` caches `this.marking` on its first
   call and never invalidates it, so a *second* mid-run snapshot silently returns the first
-  one's marking. The scheduler takes exactly one (`haltMarking ??=`), so it is correct today —
-  but only by accident, which is why that guard must stay.
+  one's marking. The scheduler no longer takes any mid-run snapshot (M6 deleted the halt
+  snapshot with the reap), so nothing here depends on it; the finding stands upstream.

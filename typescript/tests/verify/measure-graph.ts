@@ -99,7 +99,7 @@ async function smtFallback(
   const last = result.counterexampleTrace[result.counterexampleTrace.length - 1];
   const witness = result.verdict.type !== 'violated' || last === undefined
     ? ''
-    : last.placesWithTokens().some((p) => /^_pause$|^_halted$|\/waiting$|\/stopped$/.test(p.name))
+    : last.placesWithTokens().some((p) => /^_pause$|^_halt$|\/waiting$|\/stopped$/.test(p.name))
       ? 'a paused run (designed terminal)'
       : 'a stranding';
   return { verdict: result.verdict.type, ms: elapsed, witness };

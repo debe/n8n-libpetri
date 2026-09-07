@@ -7,9 +7,12 @@
  * `InMemoryEventStore` attached so firing order is observable through
  * `transition-started` events (EVT-006). It never passes a timeout to `run()`.
  *
- * `nodeGadget()` is the per-node gadget as it actually validates on libpetri 4.1.0 —
- * see the note on `X_route` below for the one deviation from the README shape and the
- * spike (`out-spec.test.ts`) that pins why.
+ * `nodeGadget()` is a **deliberately simplified** per-node gadget: `X_run` picks the
+ * outcome and a separate `X_route` picks per edge, which keeps every `xor` one level deep.
+ * That is a spike convenience, not a libpetri constraint — the nested shape the compiler
+ * actually emits validates, and `collapsed-outcome.test.ts` fires every branch of it over
+ * 58 shapes. Nothing here should be read as the shipped gadget; `src/compiler/gadget.ts`
+ * is that.
  */
 import {
   InMemoryEventStore, PrecompiledNet, PrecompiledNetExecutor, Transition, tokenOf,
@@ -212,24 +215,23 @@ export interface NodeGadget {
  * X_exhausted:  one(X/retry) inhibitor(X/tries) → xor( X/ok, and(_halt, _budget) )
  * ```
  *
- * **Why `X_route` exists (deviation from the README shape).** The README puts the
- * per-edge `xor(data, empty)` specs *inside* the success branch of `X_run`'s outer
- * `xor(success, retry, halt)`. libpetri 4.1.0's `validateOutSpec` throws
- * `OutViolationError("XOR violation - no branch produced")` the moment it walks an
- * inner `xor` none of whose children was written — it does not return "unsatisfied" to
- * the enclosing branch the way `and` does — so the retry and halt branches are rejected
- * unless a branch-exclusive place (`X/done`) is declared before the inner `xor`, which
- * makes the `and` short-circuit first. That is validator evaluation order, not IO-015
- * (both pinned in `out-spec.test.ts`). Routing the success outcome through `X/ok` keeps
- * every `xor` at most one level deep: `X_run` chooses the outcome, `X_route` chooses per
- * edge.
+ * **Why `X_route` exists here.** It is a spike simplification, kept so these nets stay
+ * readable and so the M4 spikes they pin (`priority-depth.test.ts`, `retry.test.ts`) keep
+ * asserting the firing orders they were written against. It is **not** a libpetri
+ * limitation: [IO-015] is an exact-explanation search, an inner `xor` left unwritten on an
+ * unselected branch is never evaluated, and the nested shape the compiler emits validates
+ * on every branch of every fixture (`out-spec.test.ts`, `collapsed-outcome.test.ts`). The
+ * shipped gadget collapses the routing into `X_run` at or below `SPLIT_ROUTING_ABOVE`
+ * connected outputs.
  *
  * **Where the budget is refunded.** `_budget` is held from `X_start` until `X_route`
  * deposits the edges (success), or is refunded on the halt branch by `X_run` /
  * `X_exhausted`, and is held across `X_retry_wait`. Refunding in `X_route` — the same
  * completion that deposits the edge tokens — is what lets a successor's start and a
  * budget-blocked sibling's start re-enable in the same cycle, so priority alone decides
- * (`priority-depth.test.ts`). `budget + Σ(running + ok + retry) = k` is the semiflow.
+ * (`priority-depth.test.ts`). `budget + Σ(running + ok + retry) = k` is this spike's
+ * semiflow; the shipped one is `_budget + Σ_X(X/running + X/retry + in-flight_X) = k`
+ * (README "Per-node gadget").
  */
 export function nodeGadget(spec: NodeSpec, sh: Shared): NodeGadget {
   const n = spec.name;

@@ -11,8 +11,10 @@
  *   token(s) (`addNodeToBeExecuted`'s shape) and move it to `X/running` with `attempt = 0`
  *   and, for the twin, the unmet reference;
  * - `run`: one attempt of the node (lines 49–212), then the after-loop recording (214–268)
- *   unless a retry is possible; ends on `X/ok`, `X/retry`, the halt branch, `X/waiting`
- *   (`waitTill`) or `X/stopped` (destination node, or a cancellation before the run);
+ *   unless a retry is possible; ends on the routed success branch (the edge tokens plus
+ *   `X/routed`, or one `X/ok_o` per output under per-output routing), `X/retry`, the halt
+ *   branch, `X/waiting` (`waitTill`) or `X/stopped` (destination node, or a cancellation
+ *   before the run);
  * - `retry` (`X_retry_wait`): the net's `delayed(waitBetweenTries)` replaces the `sleep`
  *   (lines 108–117 and 146); the token becomes the next attempt's running token, marked
  *   `softRetry` when it came from an error *item* — that attempt is n8n's inner `while`
@@ -24,11 +26,11 @@
  *   `nodeSuccessData[o]` is non-empty (the same array reference for every connection of
  *   that output), `empty` / `nil` otherwise, with the n8n `source`; the budget refund and
  *   `X/done`;
- * - `skip`, `arm`, `clear`, `sink`, `reap`: structural, the compiler's placeholders.
+ * - `skip`, `arm`, `clear`, `sink`: structural, the compiler's placeholders.
  *
- * A halt snapshots the marking (`state.haltMarking`) before `_halt_reap` clears the pending
- * activations, so the scheduler can put them back on `nodeExecutionStack` where n8n's
- * `break` leaves them.
+ * A halt writes `_halt` and stops there: nothing consumes it and nothing clears the pending
+ * activations, so the quiescent marking still holds each of them where it was delivered and
+ * the scheduler puts them back on `nodeExecutionStack`, where n8n's `break` leaves them.
  *
  * `nodeExecuteAfter` for the ok branch runs at the end of the action: n8n runs it after
  * enqueuing the successors and before any of them runs (line 368); `X_route` fires the next
@@ -44,7 +46,7 @@
  * {@link ENV_KEY} (`executionContextProvider`); the compiled workflow and its actions are
  * shared by every execution of the workflow version.
  */
-import type { Marking, TransitionAction, TransitionContext } from 'libpetri';
+import type { TransitionAction, TransitionContext } from 'libpetri';
 import type {
   EngineRequest, EngineResponse, ExecutionBaseError, IExecuteData, INode, INodeExecutionData, IRunExecutionData,
   IRunNodeResponse, ISourceData, ITaskDataConnections, ITaskStartedData, Workflow,
@@ -84,21 +86,6 @@ export interface SchedulerState {
   closeFunction: Promise<void> | undefined;
   /** An error the mirrored loop would have thrown out of `run()`; rethrown after quiescence. */
   fatal: unknown | undefined;
-  /**
-   * The marking as it was when the first halt branch was taken, i.e. before `_halt_reap`'s
-   * reset arcs cleared the pending activations (README "Retries, halt, cancellation").
-   * n8n's loop `break`s and leaves every entry it has not popped on `nodeExecutionStack`
-   * — the entries `ExecutionService.retry()` replays — so the scheduler encodes these back
-   * after the failed entry the host pushed.
-   */
-  haltMarking: Marking | undefined;
-  /**
-   * The start counts as they were when {@link SchedulerState.haltMarking} was taken. The
-   * snapshot is a marking, so it also holds the input tokens of activations that started
-   * between the instant it was taken and the instant `_halt` reached the marking; those
-   * are subtracted by the difference of these counts (`PetriScheduler.haltPending`).
-   */
-  haltStarts: ReadonlyMap<string, number> | undefined;
   /** The node that put the execution to wait; see {@link observeWait}. */
   waitingNode: string | undefined;
   /**
@@ -127,8 +114,6 @@ export interface ExecutionEnv {
   readonly hooks: SchedulerHooks;
   readonly state: SchedulerState;
   readonly diagnostic: (message: string) => void;
-  /** The executor's live marking, for the halt snapshot; `undefined` before it exists. */
-  readonly snapshotMarking: () => Marking | undefined;
 }
 
 function envOf(ctx: TransitionContext): ExecutionEnv {
@@ -515,9 +500,19 @@ async function exhaust(env: ExecutionEnv, payload: RetryPayload): Promise<Outcom
 
 // ==================== writing outcomes ====================
 
+/**
+ * The success outcome. Unless the node routes per output ({@link SPLIT_ROUTING_ABOVE}),
+ * `X_run` carries the routing in its own `Out` spec, so the edge tokens are deposited here
+ * and `X/routed` marks the outcome for `X_done` to refund the budget one cycle later
+ * (ADR 0004). A split node writes one `X/ok_o` per output for its `X_route_o` instead.
+ */
 function succeed(ctx: TransitionContext, g: NodeGadget, value: OkPayload): void {
-  if (g.splitRouting) for (const out of g.outputs) ctx.output(out.ok!, value);
-  else ctx.output(g.ok!, value);
+  if (g.splitRouting) {
+    for (const out of g.outputs) ctx.output(out.ok!, value);
+    return;
+  }
+  for (const out of g.outputs) routeOutput(ctx, g, out, value);
+  ctx.output(g.routed!, null);
 }
 
 /** Writes the outcome's branch; `fallback` handles an outcome the gadget has no branch for. */
@@ -583,15 +578,12 @@ async function guarded(
     env.diagnostic(`node '${g.node}': fatal error outside n8n's node try (run() rejects after quiescence): ${fatal.message}`);
     outcome = g.onError === 'stopWorkflow' ? { kind: 'halt' } : { kind: 'stopped', executionData, ran: true };
   }
-  // The halt token this writes makes `_halt_reap` clear every pending activation on the next
-  // cycle; n8n keeps them on its stack, so the marking is captured here, while they exist.
-  // The start counts go with it: the marking is a *lower bound* on what the reap destroys —
-  // `_halt` only reaches the marking when this action resolves, and above k = 1 another
-  // node's `X_start` can consume one of these tokens in between (ADR 0006).
-  if (outcome.kind === 'halt' && env.state.haltMarking === undefined) {
-    env.state.haltMarking = env.snapshotMarking();
-    env.state.haltStarts = new Map(env.state.starts);
-  }
+  // The halt token this writes is the run's terminal marker: nothing consumes it, nothing
+  // clears the pending activations, and the quiescent marking still holds every one of them
+  // where the codec reads it (`compiler/compile.ts`, ADR 0004). No snapshot is taken here —
+  // one taken at this point could not see what a sibling resolving in the same executor
+  // cycle deposits, since `X_run` routes its own outcome and those arrivals reach the
+  // marking in the same phase-1 batch as `_halt` itself.
   write(ctx, g, map, outcome);
 }
 
@@ -707,25 +699,18 @@ function routeOutput(ctx: TransitionContext, g: NodeGadget, out: NodeGadget['out
   }
 }
 
-function routeAction(g: NodeGadget, map: NetMapView, info: TransitionInfo): TransitionAction {
-  if (g.splitRouting) {
-    const out = g.outputs.find((o) => o.index === info.port)!;
-    return async (ctx) => {
-      routeOutput(ctx, g, out, ctx.input(out.ok!) as OkPayload);
-      ctx.output(out.routed!, null);
-    };
-  }
+/** Per-output routing only (`splitRouting`): `X_route_o` drains one `X/ok_o`. */
+function routeAction(g: NodeGadget, info: TransitionInfo): TransitionAction {
+  const out = g.outputs.find((o) => o.index === info.port)!;
   return async (ctx) => {
-    const value = ctx.input(g.ok!) as OkPayload;
-    for (const out of g.outputs) routeOutput(ctx, g, out, value);
-    ctx.output(map.shared.budget, null);
-    ctx.output(g.done, null);
+    routeOutput(ctx, g, out, ctx.input(out.ok!) as OkPayload);
+    ctx.output(out.routed!, null);
   };
 }
 
 /**
- * The scheduler's binder. Structural roles (`skip`, `arm`, `clear`, `sink`, `reap`, the
- * split-routing `done`) keep the compiler's placeholders (`null`).
+ * The scheduler's binder. Structural roles (`skip`, `arm`, `clear`, `sink`, `done`) keep the
+ * compiler's placeholders (`null`).
  */
 export function schedulerActions(): ActionBinder {
   return (info, map) => {
@@ -735,7 +720,7 @@ export function schedulerActions(): ActionBinder {
       case 'start': return startAction(g, map);
       case 'start-unmet': return startAction(g, map, info.reference!);
       case 'run': return runAction(g, map);
-      case 'route': return routeAction(g, map, info);
+      case 'route': return routeAction(g, info);
       case 'retry': return retryWaitAction(g);
       case 'exhausted': return exhaustedAction(g, map);
       default: return null;

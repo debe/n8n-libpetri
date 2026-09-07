@@ -30,8 +30,9 @@ would need to learn it.
 **n8n stays the system of record.** The `MarkingCodec` converts the quiescent marking to and
 from n8n's own shapes; nothing of the net is persisted.
 
-- **Pausing.** A Wait node's action deposits `_paused` (an `xor` alternative alongside
-  `X/ok`), which every `X_start` / `X_retry_wait` inhibits like `_halt`, but with no reap.
+- **Pausing.** A Wait node's action deposits `_paused` (an `xor` alternative alongside the
+  success branch), which every `X_start` / `X_retry_wait` inhibits like `_halt`. Neither is
+  reaped: since M6 nothing is (ADR 0004, "The reap is gone").
   The executor then quiesces on its own: in-flight actions finish and their outputs are
   routed (EXEC-040). The codec runs on that quiescent marking.
 - **Encoding** (marking → `IRunExecutionData`):
@@ -158,12 +159,15 @@ open there:
   (natural quiescence with leftovers, divergence #2) writes every pending token —
   complete slots and entries included — to `waitingExecution` with one diagnostic per
   token naming node and place, never to the stack. A token on a place the net drains on its
-  own before quiescence (`X/running`, `X/ok(_o)`, `X/routed_o`, `X/in_empty`, an OR input's
-  edge places; `X/retry` in `stranded`) is a `CodecError` naming the place. `cancelled`
-  (`executor.close()`, ENV-013) is the one mode that legitimately sees them: a running token
-  is a pending activation, and a token on `X/ok` is routed by the encoder as `X_route` would
-  have — the successors are where n8n's `addNodeToBeExecuted` had put them before the next
-  iteration's cancellation check. `X/stopped` with `ran: false` (n8n's `shouldStopExecuting`
+  own before quiescence (`X/running`, `X/routed`, `X/ok_o`, `X/routed_o`, `X/in_empty`, an OR
+  input's edge places; `X/retry` in `stranded`) is a `CodecError` naming the place. `cancelled`
+  (`executor.close()`, ENV-013) is the one mode that legitimately sees them: a running token is
+  a pending activation; a node that routes inside `X_run` (at or below `SPLIT_ROUTING_ABOVE`)
+  has already deposited its successors' entries on the edge places, so only its leftover
+  `X/routed` unit is discarded, while a node **above** the threshold can still be caught with
+  its outcome on `X/ok_o`, which the encoder routes as `X_route_o` would have — either way the
+  successors end where n8n's `addNodeToBeExecuted` had put them before the next iteration's
+  cancellation check. `X/stopped` with `ran: false` (n8n's `shouldStopExecuting`
   before the pop) is a pending activation; with `ran: true` it is discarded.
 - **Stack order.** The waiting node first, then depth descending, canvas order, token FIFO:
   the deepest pending node first, where n8n's LIFO `unshift` has it.

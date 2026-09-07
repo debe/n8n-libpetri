@@ -13,10 +13,12 @@ All notable changes to this project are documented here. The format follows
   `PrecompiledNet`, a `NetMap` (transition ↔ node, place ↔ (node, port)) and `dotExport`.
 - Emission rule: every connected output emits data or an explicit empty token; producers on a
   cycle emit `nil` instead, so downstream joins never wait on an edge that may never fire.
-- Per-node gadget with two-phase start/run, an explicit `X/idle` mutex and a routed outcome
-  (`X_run` → `X_route_o` → `X_done`); every node with a connected output is routed per output,
-  so execution and verification stay linear in the number of outputs and the budget refund
-  lands one cycle after the edge tokens (ADR 0004).
+- Per-node gadget with two-phase start/run, an explicit `X/idle` mutex and a routed outcome.
+  `X_run` routes every connected output in its own `Out` spec and marks `X/routed`; `X_done`
+  refunds `_budget` one scheduling cycle later, so the refund lands one cycle after the edge
+  tokens. A node with **more than three** connected outputs keeps the per-output split
+  (`X/ok_o` → `X_route_o` → `X/routed_o`), so execution and verification stay linear in the
+  number of outputs where the flattening would otherwise be exponential (ADR 0004).
 - Join gadget: slot semantics matching n8n's first-free-slot allocator, enumerated
   data/empty combinations for Merge chooseBranch, partial `requiredInputs` arrays, and a
   diagnostic for joins n8n can never run (unwired required input).
@@ -24,15 +26,17 @@ All notable changes to this project are documented here. The format follows
   one skip per all-empty round) instead of emitting one empty per producer.
 - Retry gadget with n8n's own `getRetryParams` clamping (2–5 tries, 0–5000 ms wait), timed by
   the net's `delayed(waitBetweenTries)` transition.
-- Halt and reap: `stopWorkflow` errors raise `_halt`; every start, retry and skip is
-  inhibited and in-flight tokens are reaped into `_halted`.
+- Halt: `stopWorkflow` errors raise `_halt`, which **nothing consumes** — it is the halted
+  run's terminal marker. Every start, retry, skip, arm and clear inhibits on it, so the run
+  quiesces with each pending activation still on the place it was delivered to, and the
+  marking codec encodes them from there (ADR 0004, "The reap is gone").
 - Expression references `$('Y')`: read arcs on `Y/done` make the dependency explicit; a
   reference to a skipped or unreachable node runs the node with a tagged
   `UnmetReferencePayload` so n8n's own error surfaces; self/downstream references are reported.
-- Concurrency budget `_budget` with `_budget + Σ(running + retry) + Σ_o(ok_o + routed_o) = k`
+- Concurrency budget `_budget` with `_budget + Σ_X(running + retry + in-flight) = k`
   as a real P-semiflow, and `joinReadyPlaces` per join input for proper-completion queries.
-- Structural hash (v3) over the compiled shape, stable across cosmetic workflow edits.
-- Spike suite (`tests/spikes`) pinning every derived fact against libpetri 4.1.0, a z3 gate
+- Structural hash (v7) over the compiled shape, stable across cosmetic workflow edits.
+- Spike suite (`tests/spikes`) pinning every derived fact against libpetri, a z3 gate
   test (fails CI when proofs would silently become skips), and ADRs 0002–0005 (emission rule,
   join gadget, two-phase budget and routed outcome, marking codec).
 - `scripts/bootstrap-n8n.sh`: idempotent clone of n8n at the pinned commit `441970b`, pnpm via
@@ -235,6 +239,28 @@ All notable changes to this project are documented here. The format follows
   blocker for surfacing the net's expressiveness in the editor.
 
 ### Changed
+- **M6 — the routed outcome collapsed into `X_run`, and the halt reap is gone.** libpetri
+  5.0.0 made [IO-015] an exact-explanation search, so the nested spec M1 could not use now
+  validates: `X_run` routes every connected output itself and marks one `X/routed`, and
+  `X/ok` / `X_route` disappear at or below three connected outputs (above it the per-output
+  split still wins on flat-branch count, `2^k + 4` against `2k + 5`). Routing inside `X_run`
+  puts a sibling's arrivals in the *same* executor cycle as `_halt`, which the old
+  `_halt_reap` destroyed and the halt snapshot — taken before that cycle's outputs were
+  committed — could not recover, losing a pending activation outright at k ≥ 2. So the reap
+  and `_halted` are gone too: `_halt` is never consumed, nothing is cleared, and the codec
+  reads the pending activations out of the quiescent marking. Net effect, k = 1: `linear`
+  41 places / 19 transitions / 50 classes → 37 / 15 / **43**, `diamond` 393 → **330**,
+  `chain40` 2048 → **1967**, `wide8` 6151 → **5894**; at k = 2 the diamond 1551 → **1094**.
+  Every verification verdict is unchanged (ADR 0004, `docs/verification.md`).
+- **The workflow timeout stays n8n's, deliberately.** libpetri 5.0.0 also added
+  `run(ms, 'close')`, which rejects *and* stops the loop, so the old reason the scheduler
+  avoided a timed run — the losing loop leaked — is gone. The scheduler still does not use it:
+  n8n's deadline is `WorkflowExecute.shouldStopExecuting()`, which is not a pure predicate but
+  sets the `status` / `timedOut` fields the caller reads to persist a timeout as a cancellation
+  rather than a success, and n8n polls it *between* activations, where the scheduler polls it
+  too. A net-side deadline would stop the run mid-activation and change what gets recorded.
+  CLAUDE.md, the README and ADR 0004 now carry that reason instead of the stale one
+  (ADR 0004, "The timeout is n8n's, not the net's").
 - The concurrency budget is live. At k = 1 the engine remains n8n-sequential and byte-identical,
   which is what M2 proved; above it, `executionIndex` records the order nodes *started* rather
   than n8n's depth-first walk, and the execution-global fields n8n's loop owns —
@@ -244,7 +270,9 @@ All notable changes to this project are documented here. The format follows
   dynamically-resolved credentials (#18).
 - README per-node gadget now documents the routed `X_run`/`X_route_o`/`X_done` shape
   (libpetri's validator rejects the earlier nested-`xor` form on the retry and halt branches,
-  ADR 0004).
+  ADR 0004). *Superseded by M6: libpetri 5.0.0's [IO-015] accepts the nested form, so `X_run`
+  routes in its own spec at or below three connected outputs and the split survives only above
+  it — see "M6" below and ADR 0004's M6 amendment.*
 - **The `_budget` refund moved from `X_route` to `X_done`, one scheduling cycle later**, and
   every node with a connected output now routes per output. This is the one model change of
   the project so far, and it is what restores n8n's depth-first order at budget 1: libpetri's
@@ -255,4 +283,6 @@ All notable changes to this project are documented here. The format follows
   top-left one first` fails without the change and passes with it. Divergence #20 is `fixed`;
   the honest costs are a `destinationStop` sibling that no longer runs (#13) and, on one
   fixture, `lastNodeExecuted` at k = 1 (#16). Places and transitions per node go up by one
-  each; the flatteners get cheaper.
+  each; the flatteners get cheaper. *Half superseded by M6*: the refund is still `X_done`
+  and the phase is unchanged, but `SPLIT_ROUTING_ABOVE` is 3 again, so "every node with a
+  connected output routes per output" no longer holds.

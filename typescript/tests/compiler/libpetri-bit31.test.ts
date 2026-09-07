@@ -1,20 +1,21 @@
 /**
- * Minimal reproduction of the upstream defect that blocks the diamond fixture on the
- * production executor: `PrecompiledNet.canEnableSparse` (libpetri 4.1.0, precompiled-net.ts
- * lines 345 and 352) evaluates `(snapshot[w] & m) !== m` where `m` comes from a
- * `Uint32Array` (unsigned) and the AND result is a signed int32, so a mask with bit 31 set
- * never matches. A transition consuming a place whose id is 31 mod 32 is never enabled;
- * the Bitmap reference executor (fixed `containsAll`, be51666) fires it.
+ * Regression guard for the sparse-enablement fix libpetri 5.0.0 shipped. Before it,
+ * `PrecompiledNet.canEnableSparse` evaluated `(snapshot[w] & m) !== m` where `m` comes from
+ * a `Uint32Array` (unsigned) and the AND result is a signed int32, so a mask with bit 31 set
+ * never matched: a transition consuming a place whose id is 31 mod 32 was never enabled on
+ * the production executor while the Bitmap reference fired it, and any compiled workflow
+ * with 32 or more places was affected — the diamond fixture among them.
  *
- * Any compiled workflow with 32 or more places is affected. Expected to pass once libpetri
- * coerces the AND to unsigned (`>>> 0`) on the sparse path as `containsAll` already does.
+ * 5.0.0 coerces the AND to unsigned (`>>> 0`) on the sparse path, as `containsAll` already
+ * did. This file keeps the two executors pinned to each other at that boundary so a
+ * regression in either is caught here rather than in a fixture.
  */
 import {
   BitmapNetExecutor, PetriNet, PrecompiledNet, PrecompiledNetExecutor, Transition, containsAll, one, outPlace, place,
   setBit, tokenOf,
 } from 'libpetri';
 
-describe('libpetri PrecompiledNet.canEnableSparse at bit 31 (upstream)', () => {
+describe('libpetri PrecompiledNet.canEnableSparse at bit 31 (fixed in 5.0.0)', () => {
   // A sink with 31 inputs takes place ids 0..30, so `p31` is place 31 and `out` is 32.
   const fillers = Array.from({ length: 31 }, (_, i) => place<null>(`f${i}`));
   const p31 = place<null>('p31');

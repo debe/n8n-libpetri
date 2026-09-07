@@ -42,14 +42,14 @@
  *
  * - {@link REST_ROLES} — a token here is residue at rest. Nothing is pending.
  * - everything else (`in-data`, `in-empty`, `edge-data`, `edge-empty`, `ready`, `hasdata`,
- *   `ok`, `routed`, `running`, `retry`, `halt`) is **pending work**: an activation that was
+ *   `ok`, `routed`, `running`, `retry`) is **pending work**: an activation that was
  *   delivered and never consumed, or an outcome that was never routed.
  *
  * ## The pause filter
  *
  * Every node's `X_run` offers the `waiting` and `stopped` outcomes (README "Retries, halt,
  * cancellation"), so **every** workflow has reachable quiescent markings holding `_pause` —
- * a Wait node or a destination stop — or `_halted`. Those are designed terminal markings
+ * a Wait node or a destination stop — or `_halt`. Those are designed terminal markings
  * whose pending activations the marking codec writes back into n8n's own
  * `nodeExecutionStack` / `waitingExecution` (ADR 0005). They are not strandings, and M4's
  * SMT route could not say so: `joinedOrDeadLettered` carries no sink clause (NU-040 AC4), so
@@ -65,7 +65,7 @@
  *   `pause`, so the rest set is {@link PAUSE_REST_ROLES}: the `in` / `ready` / `hasdata`
  *   arrivals the codec pushes onto the stack and into `waitingExecution`, plus the `retry`
  *   unit `X_retry_wait` is pause-inhibited on (`gadget.ts`) and the codec pushes back;
- * - a **halted** class (`_halt` / `_halted`) is encoded in mode `cancelled`, the one mode
+ * - a **halted** class (`_halt`) is encoded in mode `cancelled`, the one mode
  *   that legitimately sees a marking the net has not drained, so the rest set is
  *   {@link HALT_REST_ROLES}: the pause set plus `in-empty` (the codec drops it with a
  *   diagnostic — "n8n never enqueues an empty" — which is right for a run that is over) and
@@ -73,17 +73,17 @@
  *   writes them back through `joinQueue`).
  *
  * The split is not decoration. `X_skip` and the `arm` transitions inhibit on `_halt` /
- * `_halted` but **not** on `_pause` (`gadget.ts`), so under a pause those places drain on
+ * `_halt` but **not** on `_pause` (`gadget.ts`), so under a pause those places drain on
  * their own and a token resting on one is pending work — and `encodeMarking` in mode `pause`
  * throws a `CodecError` on exactly `X/in_empty` and an OR input's edge places. Widening them
  * under a pause would classify as residue a marking the codec refuses to encode.
  *
- * A token outside the class's set is still reported: an unrouted `X/ok`, a `_halt` no
- * `_halt_reap` consumed. Measured over every fixture at k = 1 **and** k = 2 (the sweep is
+ * A token outside the class's set is still reported: an unrefunded `X/routed`, an `X/ok_o`
+ * no `X_route_o` drained. Measured over every fixture at k = 1 **and** k = 2 (the sweep is
  * `docs/verification.md`, "What actually rests in a designed terminal"), the non-rest roles
  * that occur are `in-data`, `ready` and `hasdata` under a pause and, at k = 2 where a second
  * branch is in flight when the halt lands, `in-empty`, `edge-data` and `edge-empty` under
- * `_halted` plus `retry` under both. Every one of them is in the set its own terminal widens
+ * `_halt` plus `retry` under both. Every one of them is in the set its own terminal widens
  * to, so the widening changes no verdict on any fixture — it is the *shape* of the argument
  * that matters: each role is admitted by the codec path that terminal actually takes.
  *
@@ -114,18 +114,18 @@ import type { Counterexample, CounterexampleStep, MarkedPlace } from './types.js
  * turns "hangs" into "reports truncation".
  *
  * 200 000 comes from the measurement in `docs/verification.md`: every acyclic fixture
- * without independent parallelism closes three orders of magnitude below it (2048 classes
- * for a 41-node chain, 6151 for an 8-wide fan-out), and the two shapes that do truncate cost
- * 3.9 s (a loop) and 31 s (a 20-way switch) to reach it — the same order as the 60 s the SMT
+ * without independent parallelism closes three orders of magnitude below it (1967 classes
+ * for a 41-node chain, 5894 for an 8-wide fan-out), and the two shapes that do truncate cost
+ * 4.1 s (a loop) and 36 s (a 20-way switch) to reach it — the same order as the 60 s the SMT
  * route spends per *query*, and paid once for the whole report rather than once per place.
  */
 export const DEFAULT_MAX_CLASSES = 200_000;
 
 /**
  * The worst **per class** cost measured, in bytes of peak RSS: `switch20` reaches its
- * 200 006 classes at 2.48 GB. The other two shapes measured are cheaper per class rather
- * than proportional to the net — `loopOverItems` (48 places) costs 4.4 kB a class and the
- * 49-node generated workflow (599 places) 12.1 kB — so the class count, not the net size, is
+ * 200 003 classes at 2.48 GB. The other two shapes measured are cheaper per class rather
+ * than proportional to the net — `loopOverItems` (42 places) costs 4.4 kB a class and the
+ * 49-node generated workflow (526 flat places) 12.1 kB — so the class count, not the net size, is
  * what bounds the enumeration's memory. `docs/verification.md` has the table.
  */
 const BYTES_PER_CLASS = 12_500;
@@ -162,15 +162,16 @@ export const MAX_WITNESSES = 8;
  *
  * `idle` / `free` / `tries` / `budget` are the gadget's own resources handed back;
  * `done` / `skipped` / `ran` are markers nothing consumes; `nil` is drained by a genuine
- * sink (CORE-043 AC4); `halted` / `pause` / `waiting` / `stopped` are the designed terminals.
+ * sink (CORE-043 AC4); `halt` / `pause` / `waiting` / `stopped` are the designed terminals —
+ * `_halt` is never consumed, it *is* the halted run's terminal marker (`compiler/compile.ts`).
  */
 export const REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
-  'idle', 'done', 'skipped', 'free', 'tries', 'budget', 'halted', 'pause', 'waiting', 'stopped', 'ran', 'nil',
+  'idle', 'done', 'skipped', 'free', 'tries', 'budget', 'halt', 'pause', 'waiting', 'stopped', 'ran', 'nil',
 ]);
 
 /** A marking holding one of these is a *designed* terminal: a paused or halted run. */
 export const TERMINAL_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
-  'pause', 'halt', 'halted', 'waiting', 'stopped',
+  'pause', 'halt', 'waiting', 'stopped',
 ]);
 
 /** Which designed terminal a quiescent class holds — and so which codec mode encodes it. */
@@ -188,23 +189,22 @@ export type TerminalKind = 'none' | 'pause' | 'halt';
  * *not* pause-inhibited, so those places drain on their own under a pause and a token at
  * rest on one is real pending work — and `encodeMarking` in mode `pause` throws a
  * `CodecError` on `X/in_empty` and on an OR input's edge places rather than writing them
- * back. `halt` is absent too: a quiescent marking still holding `_halt` means `_halt_reap`
- * never fired, which is a defect and not a designed terminal.
+ * `halt` is absent too, and for a different reason: `_halt` at rest is the *halted*
+ * terminal, so a marking holding it is classified against {@link HALT_REST_ROLES} instead.
  */
 export const PAUSE_REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
   ...REST_ROLES, 'in-data', 'ready', 'hasdata', 'retry',
 ]);
 
 /**
- * The rest set inside a **halted** class (`_halt` / `_halted`): {@link PAUSE_REST_ROLES}
- * plus the places a halt stops draining and the codec handles in mode `cancelled` — the one
- * mode that legitimately sees an undrained marking (`codec.ts`; the scheduler encodes a
- * halted run with it, `petri-scheduler.ts`). `X_skip` and the arms inhibit on `_halt` /
- * `_halted`, so `X/in_empty` and the `edge` places come to rest; `cancelled` mode drops the
- * empty with a diagnostic ("n8n never enqueues an empty", which is right for a run that is
- * over) and writes the edge arrivals back through `joinQueue`.
- *
- * `halt` itself stays out for the same reason as above: an unreaped `_halt` is reported.
+ * The rest set inside a **halted** class (`_halt`): {@link PAUSE_REST_ROLES} plus the places
+ * a halt stops draining and the codec handles in mode `cancelled` — the one mode that
+ * legitimately sees an undrained marking (`codec.ts`; the scheduler encodes a halted run
+ * with it, `petri-scheduler.ts`). `X_skip` and the arms inhibit on `_halt`, so `X/in_empty`
+ * and the `edge` places come to rest; `cancelled` mode drops the empty with a diagnostic
+ * ("n8n never enqueues an empty", which is right for a run that is over) and writes the edge
+ * arrivals back through `joinQueue`. Every one of these is where a pending activation was
+ * *delivered*: since there is no reap, that is exactly where the halted run leaves it.
  */
 export const HALT_REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
   ...PAUSE_REST_ROLES, 'in-empty', 'edge-data', 'edge-empty',
@@ -221,13 +221,13 @@ export function restRolesFor(kind: TerminalKind): ReadonlySet<PlaceRole> {
 
 /**
  * Which terminal a marking is: `'halt'` wins over `'pause'`, because a marking holding both
- * is encoded on the halt path (`petri-scheduler.ts` checks `_halt` / `_halted` first).
+ * is encoded on the halt path (`petri-scheduler.ts` checks `_halt` first).
  */
 export function terminalKindOf(roles: Iterable<PlaceRole | null>): TerminalKind {
   let kind: TerminalKind = 'none';
   for (const role of roles) {
     if (role === null) continue;
-    if (role === 'halt' || role === 'halted') return 'halt';
+    if (role === 'halt') return 'halt';
     if (TERMINAL_ROLES.has(role)) kind = 'pause';
   }
   return kind;

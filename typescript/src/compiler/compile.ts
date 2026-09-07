@@ -3,17 +3,17 @@
  *
  * Pipeline: structural analysis (`graph.ts`), one `SubnetDef` per node (`gadget.ts`)
  * instantiated at prefix `node.id` (MOD-010), composed in canvas order by port binding
- * (MOD-020) into a flat net (MOD-023) with the shared `_budget` / `_halt` / `_halted` /
+ * (MOD-020) into a flat net (MOD-023) with the shared `_budget` / `_halt` /
  * `_pause` places, the consumer-owned edge places and the `Y/done` reference places bound as ports;
- * then the host-level `_halt_reap` (CORE-034 reset arcs), action binding (CORE-042) and the
- * `NetMap`. The `PrecompiledNet` program is compiled lazily once per `CompiledWorkflow`
+ * then action binding (CORE-042) and the `NetMap`. Every transition of the flat net belongs
+ * to a node: there is no host-level transition (see the halt note below). The `PrecompiledNet` program is compiled lazily once per `CompiledWorkflow`
  * (CONC-020) and enforces CORE-043.
  *
  * Declaration order is canvas order: nodes are composed sorted by `(y, x)` ascending and
  * each gadget declares its transitions in a fixed order, so libpetri's declaration-order
  * tiebreak (EXEC-002 AC3) reproduces n8n's sibling order.
  */
-import { PetriNet, PrecompiledNet, Transition, place, one, outPlace, tokenOf, unitToken } from 'libpetri';
+import { PetriNet, PrecompiledNet, place, tokenOf, unitToken } from 'libpetri';
 import type { Instance, Place, Token } from 'libpetri';
 import { placeholderActions } from './actions.js';
 import { buildNodeGadget, type GadgetBuild, type HostEdgeSlot } from './gadget.js';
@@ -78,7 +78,6 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   const shared: SharedPlaces = {
     budget: place<unknown>('_budget'),
     halt: place<unknown>('_halt'),
-    halted: place<unknown>('_halted'),
     pause: place<unknown>('_pause'),
   };
 
@@ -132,19 +131,18 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
     builder.compose(instances[i]!, ports);
   });
 
-  // _halt_reap: one(_halt) reset(every edge / in / ready / hasdata place) -> _halted (README
-  // "Retries, halt, cancellation", ADR 0004). Highest priority so a halted run clears before
-  // anything structural moves tokens on. X/retry is not reset: it holds a budget unit
-  // (README semiflow), and X_retry_wait / X_exhausted inhibit on _halt / _halted, so a
-  // pending retry strands and quiesces. X/ran_i is a marker and stays.
-  const resetNames: string[] = [];
-  for (const s of edgeSlots.values()) {
-    resetNames.push(s.data.name);
-    if (s.empty !== null) resetNames.push(s.empty.name);
-  }
-  for (const p of syntheticIn.values()) resetNames.push(p.name);
-  for (const b of builds) resetNames.push(...b.reapPlaceNames);
-
+  // There is no reap: `_halt` is the halted run's terminal marker and nothing consumes it
+  // (README "Retries, halt, cancellation", ADR 0004). Every transition that could move a
+  // pending activation on - start, start_unmet, retry_wait, exhausted, skip, arm, clear -
+  // inhibits on it, so the run quiesces with each arrival still on the `in` / edge /
+  // `ready` / `hasdata` place it was delivered to, which is where `encodeMarking` in mode
+  // `cancelled` reads it and `HALT_REST_ROLES` counts it as a designed terminal's residue
+  // (`verify/state-class.ts`). Destroying them with reset arcs and reconstructing them from
+  // a marking snapshot, as this did through M5, could not survive `X_run` routing its own
+  // outcome: a sibling that resolves in the same executor cycle as the halting node deposits
+  // its arrivals in the same phase-1 batch that carries `_halt`, later than any snapshot the
+  // halting action could take and earlier than the reap that destroyed them.
+  //
   // Canonical place objects are the flat net's own (CORE-002: TS Place identity is by name,
   // so the composition may have funnelled several objects of one name into one).
   const canonical = new Map<string, Place<unknown>>();
@@ -155,18 +153,11 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
       canonical.set(p.name, p);
     }
   };
-  collect(builder.build());
   const lookup = (name: string): Place<unknown> => {
     const p = canonical.get(name);
     if (p === undefined) throw new Error(`internal: no canonical place '${name}'`);
     return p;
   };
-  const reap = Transition.builder('_halt_reap')
-    .inputs(one(shared.halt))
-    .outputs(outPlace(shared.halted))
-    .priority(analysis.maxDepth + 2);
-  if (resetNames.length > 0) reap.resets(...resetNames.map(lookup));
-  builder.transition(reap.build());
   const structural = builder.build();
   collect(structural);
 
@@ -174,14 +165,10 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   const placeInfos: PlaceInfo[] = [
     { name: shared.budget.name, role: 'budget', node: null, port: null, place: lookup(shared.budget.name) },
     { name: shared.halt.name, role: 'halt', node: null, port: null, place: lookup(shared.halt.name) },
-    { name: shared.halted.name, role: 'halted', node: null, port: null, place: lookup(shared.halted.name) },
     { name: shared.pause.name, role: 'pause', node: null, port: null, place: lookup(shared.pause.name) },
     ...builds.flatMap((b) => b.places.map((p): PlaceInfo => ({ ...p, place: lookup(p.name) }))),
   ];
-  const transitionInfos: TransitionInfo[] = [
-    ...builds.flatMap((b) => b.transitions),
-    { name: '_halt_reap', role: 'reap', node: null },
-  ];
+  const transitionInfos: TransitionInfo[] = builds.flatMap((b) => b.transitions);
 
   // Every place and transition of the flat net is mapped exactly once.
   const mappedPlaces = new Set(placeInfos.map((p) => p.name));

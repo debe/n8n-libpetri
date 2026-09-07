@@ -8,15 +8,15 @@
  * `transition-failed` event (EVT-008) whose consumed tokens are lost (EXEC-030,
  * EXEC-031) while the run still quiesces (EXEC-040).
  *
-* Also pins the corrected IO-015 exact-explanation semantics (libpetri main, ec10f79): an inner `xor`
- * with no written child makes `validateOutSpec` THROW rather than report its enclosing
- * branch unsatisfied, so `xor(and(xor(d, e), …), and(retry, …))` cannot take the
- * `retry` branch — unless a place that is unwritten on that branch happens to be
- * declared *before* the inner `xor` inside the `and`, because `and` short-circuits on
- * its first unsatisfied child. That escape is an evaluation-order artifact IO-015 does
- * not promise (it defines `And` as a predicate over all children), so the gadget does
- * not rely on it: `X_run` routes success through `X/ok` and `X_route` carries the
- * per-edge `xor`s (see `support.ts`). Both facts are pinned below.
+ * Also pins the [IO-015] **exact-explanation** semantics libpetri 5.0.0 ships: validation
+ * searches for a branch that exactly explains the written set, so an inner `xor` with no
+ * written child no longer pre-empts the enclosing `xor` — `xor(and(xor(d, e), …),
+ * and(retry, …))` takes its `retry` branch, and an unselected subtree is never evaluated.
+ * `And` is a predicate over all of its children (no short-circuit), so the verdict does not
+ * depend on the order children are declared in; the last `describe` pins that both ways
+ * round. Together those are what let `X_run` carry the per-output routing in its own spec
+ * instead of parking the outcome on an `X/ok` place for a second transition to route
+ * (README "Per-node gadget", `collapsed-outcome.test.ts`).
  */
 import {
   PetriNet, PrecompiledNet, Transition, place, one, and, xor, outPlace, tokenOf, enumerateBranches,
@@ -191,7 +191,7 @@ describe('spike: validation is independent of child order inside the enclosing a
     })
     .build();
 
-  it('done declared first: the retry branch validates (and short-circuits before the inner xor)', async () => {
+  it('done declared first: the retry branch validates, with the inner xor declared after it', async () => {
     const net = PetriNet.builder('done-first').transition(build('y_run', doneFirst)).build();
     const r = await runNet(net, new Map([[input, [tokenOf('retry' as const)]]]));
     expect(failed(r.store)).toHaveLength(0);

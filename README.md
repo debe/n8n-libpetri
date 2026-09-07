@@ -1,439 +1,232 @@
 # n8n-libpetri
 
-**n8n-libpetri replaces n8n's intra-workflow scheduler with a Coloured Time Petri Net
-engine built on [libpetri](https://github.com/debe/libpetri).** n8n keeps its editor,
-workflow JSON, credentials, node ecosystem, persistence, webhooks, hooks and queue mode.
-Only the ~490-line `executionLoop` inside `WorkflowExecute.processRunExecutionData()` is
-replaced: the loop that pops `nodeExecutionStack`, calls `runNode()`, and hand-manages
-`waitingExecution` for multi-input joins. There is no n8n source fork; n8n is cloned at a
-pinned commit into a gitignored `.n8n/` and carries two rebasable patches.
+n8n-libpetri replaces n8n's intra-workflow scheduler with a coloured time Petri net.
+n8n still owns the editor, workflow format, credentials, nodes, persistence, webhooks,
+hooks and queue mode. This project replaces the roughly 490-line execution loop that
+pops `nodeExecutionStack`, calls `runNode()` and coordinates multi-input joins.
 
-This README is the single source of architectural truth. Read it before structural changes.
+The execution model is a Petri net. Concurrency, cycles, joins, retries, resource limits and
+terminal states therefore have explicit semantics. The scheduler executes that net. The
+verifier analyses the same net.
 
-## Why
+The integration targets n8n commit
+`441970b211d13a3ce547916b2b8ee93677b620e9`. The pinned checkout lives in the ignored
+`.n8n/` directory and receives two small, rebasable patches. This repository does not carry
+an n8n fork.
 
-1. **Real concurrency.** n8n completes one branch before starting the next. Two independent
-   500 ms HTTP calls take ~1 s. Under a net both transitions are enabled at once.
-2. **Analysability.** Once a workflow *is* a net, it can be asked about before activation,
-   and the answers come back as counterexamples that are literal node paths through the same
-   semantics production runs. Since M5 the primary engine is libpetri's **state-class graph**
-   (VER-010) — no solver — with the `SmtVerifier` (Z3/Spacer IC3-PDR) as the fallback for a
-   graph that truncates. The headline proper-completion question, *can this workflow strand a
-   branch?*, closes wherever that graph closes: `proven` or `violated` in milliseconds on the
-   fixtures and in ~100 ms on a 41-node chain. What bounds it is the workflow's **shape**
-   (independent branches make the class count combinatorial, cycles make it infinite), not
-   its node count, and a graph that truncates reports the truncation rather than a pass. No
-   verdict here is about firing order or about values — the honest surface, with the numbers,
-   is [`docs/verification.md`](docs/verification.md).
+## What changes
 
-## Principles
+| n8n keeps | n8n-libpetri provides |
+|---|---|
+| Workflow JSON and editor | Workflow-to-net compiler |
+| Node implementations and `runNode()` | `PetriScheduler` |
+| Credentials, expressions and data proxy | Marking codec for resume state |
+| Persistence, hooks, webhooks and queue mode | State-class and SMT verification |
+| Execution-engine interface | Scheduler registration behind that interface |
 
-1. **No null output spec, no `skipOutputValidation`.** Every transition declares a real
-   `Out` spec the executor validates and the verifier reads. One net serves execution and
-   verification. The only null-spec transitions are genuine sinks (libpetri CORE-043 AC4).
-2. **The net decides what runs.** Enablement, priority, inhibitors, read arcs, timed
-   transitions and ν-minting determine firing. No host-side dispatch queue, permit gating or
-   scheduler policy object. Retries, mutexes, concurrency limits and halts are places and arcs.
-3. **n8n's legacy behaviour is a candidate for abandonment, not a requirement.** Where n8n
-   encodes an artifact we model the correct semantics and record the divergence in
-   [`docs/divergences.md`](docs/divergences.md).
+Only v1 execution order is supported. v0 is deliberately left on n8n's scheduler.
 
-The philosophy in one line: the net expresses flow, which can be proven; enablement
-describes; it is resource-consumption based; you run when you have everything.
+## Execution model
 
-## The model — one net per execution
+One workflow execution creates one net. Each n8n node becomes a `SubnetDef` with places and
+transitions for start, run, completion, skipping, retry and exhaustion. Shared places model
+the concurrency budget, halt and pause state.
 
-### Emission rule
+The net decides what may run. There is no second dispatch queue or host-side permit system.
+Enablement follows from tokens, guards, inhibitors, read arcs, priorities and timed
+transitions.
 
-An **empty token** asserts "this edge carries nothing for this activation of the producer".
-The assertion is only meaningful when the producer cannot be re-activated by its own output,
-so after an SCC decomposition of the main-connection graph:
+### Edges and empty output
 
-| Edge | Producer fires with data (`X_run`) | Producer skipped (`X_skip`) |
+An explicit `empty` token means that an acyclic edge produced no data for this activation.
+That information matters at joins: every required input eventually contributes data or
+empty, so an acyclic AND-join can complete or skip without n8n's stuck-join fallback.
+
+Cycles need different rules because an empty token must not circulate forever. The compiler
+first finds strongly connected components, then emits:
+
+| Edge | Producer returned data | Producer skipped |
 |---|---|---|
-| tree edge, producer not in a cycle | `data \| empty` | `empty` |
-| tree edge, producer in a cycle | `data \| nil` | `empty` |
-| cycle edge (both ends in one SCC) | `data \| nil` | nothing |
+| Acyclic edge | `data` or `empty` | `empty` |
+| Edge leaving a cyclic producer | `data` or local `nil` | `empty` |
+| Edge inside a cycle | `data` or local `nil` | nothing |
 
-`nil` is a per-output local place consumed by a genuine sink transition. This one rule covers
-IF/Switch/Filter (routing items, empty is a fact), Loop Over Items (`done` is "not yet" on
-intermediate firings), arbitrary user cycles (no empty storms) and skipping a whole loop
-(empty flows past it on the exit edge). It is what makes an AND-join always complete in the
-acyclic case, which removes the cause of n8n's stuck-join fallback rather than the symptom.
+`nil` is consumed locally by a sink. It records that an output was not selected without
+inventing traffic on a cycle.
 
-### Per-node gadget
+### Node lifecycle
 
-Each n8n node compiles to a libpetri `SubnetDef` instantiated at prefix `node.id`. The
-node's outcome is routed through `X/ok_o`, so `X_run` has the same small spec for every node
-and the per-output routing lives on instantaneous `X_route_o` transitions (ADR 0004):
+The normal path is:
 
-```
-X_start:      one(X/in) one(_budget) one(X/idle) inhibitor(_halt) inhibitor(_halted)
-              [read(Y/done) per $('Y')]                              → X/running     priority depth
-X_run:        one(X/running) → and( xor( and( X/ok_o per connected output o ), [X/retry],
-                                         [and(_halt, _budget)] ), X/idle )
-              action: host.runNode(...)                                               priority depth + 1
-X_route_o:    one(X/ok_o) → and( xor( and(data edges_o), and(empty edges_o) | X/nil_o ),
-                                 X/routed_o )                      one per output     priority depth + 1
-X_done:       one(X/routed_0) … one(X/routed_k-1) → and( _budget, X/done )            priority depth + 1
-              (a node with no connected output keeps one X_route: one(X/ok) → and(_budget, X/done))
-X_skip:       one(X/in_empty) → and( empty tree edges, X/skipped )                    priority depth
-X_retry_wait: one(X/retry) one(X/tries) one(X/idle) inhibitor(_halt) inhibitor(_halted)
-              delayed(waitBetweenTries) → X/running                                   priority depth
-X_exhausted:  one(X/retry) inhibitor(X/tries) → xor( X/ok_o…, [and(_halt, _budget)] ) priority depth + 1
-sink_o:       one(X/nil_o)   (no Out spec: a genuine sink, CORE-043 AC4)
+```text
+input + idle + budget -> running -> routed -> done + budget
 ```
 
-With exactly one connected output the per-output names collapse to the unindexed `X/ok`,
-`X_route`, `X/routed`, so only genuinely multi-output nodes carry an index.
+`start` acquires one `_budget` token. `run` calls n8n's existing `runNode()` and routes the
+result. `done` refunds the token one scheduler cycle later. The split models duration and
+makes the budget a structural property of the net:
 
-- The two-phase start/run is textbook duration modelling. It makes
-  `_budget + Σ(running + retry) + Σ_o(ok_o + routed_o) = k` a real P-semiflow and
-  `mutualExclusion(A/running, B/running)` provable, with an explicit `X/idle` mutex
-  (`X/idle + X/running = 1` is found as a P-invariant) instead of reliance on an executor
-  implementation detail.
-- The budget is acquired by `X_start` and refunded by `X_done`, **one scheduling cycle after**
-  the completion that deposits the edge tokens — or by the halt branch, or by the two pause
-  outcomes, which route nothing. That one-cycle gap is what makes priority = DAG depth
-  reproduce n8n's depth-first order: the executor snapshots its ready set before the firing
-  pass, so a join / OR consumer needs the extra cycle for its `arm`, and refunding in the
-  same firing as the edge tokens let a shallower budget-blocked sibling take the unit a cycle
-  early (divergence #20, fixed in M4 — ADR 0004, `docs/conformance-final.md`). The unit is
-  **held across a retry wait**, as n8n's own retry loop blocks the run. The action never
-  throws (libpetri EXEC-030: a rejected action loses its consumed tokens).
-- Why the routed shape and not one nested spec: libpetri's validators (TypeScript and Java
-  alike) reject an inner `xor` with no satisfied child before the enclosing `xor` can select
-  a sibling branch, and the outcome depends on child order inside `and`. That is reported
-  upstream as an IO-015 question; the routed shape does not depend on it.
-- **Verifier scaling.** The flatteners expand `and` of `k` `xor`s into `2^k` virtual
-  transitions (IO-016). Routing per output turns that into `k` transitions of one `xor`
-  each, so execution and verification stay linear in `k`. That was the original reason for
-  the split (it applied above three connected outputs); since M4 it applies to every node
-  with an output, for the scheduling reason above, and at one output the two shapes flatten
-  to the same two branches.
-- Priority = DAG depth gives n8n's documented v1 depth-first completion at k = 1;
-  declaration order = canvas order (y, then x, ascending) gives sibling order. Measured on
-  n8n's own `v1 execution order > … depth-first & the most top-left one first`, which passes
-  at k = 1. Above k = 1 total order is given up by design (divergence #21).
-- `X/done` and `X/skipped` are markers. Read arcs on `Y/done` make `$('Y')` expression
-  dependencies explicit; an unmet one is a stranded token the verifier catches statically.
-- `IRunExecutionData` is written exactly as n8n writes it, so `WorkflowDataProxy`, `$node`,
-  `$json` and `pairedItem` keep working untouched.
-
-### Join gadget (k ≥ 2 inputs, or an input with several producers)
-
-```
-per input i:  X/free_i (1 token)
-per edge e into input i:
-  arm_e_data:  one(e/data)  one(X/free_i) → and(outPlace(X/ready_i), outPlace(X/hasdata))
-  arm_e_empty: one(e/empty) one(X/free_i) → outPlace(X/ready_i)
-X_start: one(X/ready_0)…one(X/ready_k-1) all(X/hasdata) one(_budget) one(X/idle) inhibitor(_halt)
-         → and(outPlace(X/running), outPlace(X/free_*))
-X_skip:  one(X/ready_0)…one(X/ready_k-1) inhibitor(X/hasdata) → and(empty edges…, outPlace(X/free_*))
+```text
+_budget + running + retry + in-flight routing = k
 ```
 
-`all()` requires at least one token, so "at least one non-empty input" is structural and
-start/skip are mutually exclusive without priority. `free_i` serialises slots so a second
-arrival waits until the current slot is consumed, matching n8n's first-free-slot allocator.
-Merge chooseBranch (`requiredInputs` naming every input) enumerates its data/empty
-combinations. A `requiredInputs` array shorter than the input count (Merge v3 chooseBranch
-with extra inputs) requires data on exactly the listed inputs and data-or-empty on the rest.
-An all-required node with an unwired lower input compiles to a join that can never complete,
-with a diagnostic: n8n pads the lower inputs and never runs such a node, and
-`unreachable({X/running})` reports it.
+Each node also has an `idle` token, giving the invariant `idle + running = 1`. Retries hold
+the budget while waiting, as n8n's retry loop does. A fatal error deposits `_halt`; all new
+starts and routing transitions inhibit on it. In-flight actions may finish, then the marking
+codec writes pending activations back to n8n's resumable state. Wait and destination-node
+stops use `_pause` in the same way.
 
-### OR-inputs (several producer edges into one input)
+Nodes with up to three connected outputs route directly from `run`. Wider fan-outs use one
+routing transition per output. This avoids the `2^k` flattening cost of an `and` containing
+many `xor` branches.
 
-n8n runs a node once per data arrival on an input and never propagates an empty. Deciding
-"skip" per empty edge would emit one empty per producer and strand a downstream join, so an
-input with `n > 1` empty-capable producer edges aggregates a **round**: one delivery per edge.
+### Joins and OR-inputs
 
-```
-arm_j_data:  one(e_j/data)  → and( X/ready_i, X/hasdata_i )   [payload on hasdata_i]
-arm_j_empty: one(e_j/empty) → X/ready_i
-X_start:     one(X/hasdata_i) one(_budget) one(X/idle) …  → X/running, X/ran_i   (one run per data arrival, immediately)
-X_skip:      exactly(n, X/ready_i) inhibitor(X/hasdata_i) inhibitor(X/ran_i) read(X/idle) → empty edges, X/skipped
-X_clear:     exactly(n, X/ready_i) inhibitor(X/hasdata_i) all(X/ran_i) read(X/idle)   (round closed after ≥ 1 run)
-```
+A join has one `free`, `ready` and `hasdata` place per input. An arriving edge claims its
+input slot. The node starts after all required slots are ready and at least one contains
+data; otherwise it skips and propagates empty output. The places make slot allocation and
+mutual exclusion explicit.
 
-`read(X/idle)` is essential: `X_start` consumes `hasdata_i` when it fires but deposits `ran_i`
-only when its action completes, so without the idle read an all-delivered round could skip
-while the run it had just started was still in flight. `X/idle` is the node's own mutex, taken
-by `X_start` and returned by `X_run`, so reading it closes exactly that window.
-Edges whose producer is in a cycle carry `nil`, never `empty`, and do not count towards `n`.
-The round form applies to single-input nodes; a cyclic producer's runs leave `ran_i` markers
-that a later all-empty round does not clear (divergence #10).
-Rounds that interleave (one producer delivers twice before its sibling delivers once) are
-counted positionally and may skip wrongly; that is the arrival-order class already in the
-divergence register, and `placeBound(X/ready_i, n)` proves a workflow free of it. Join inputs
-keep their slot semantics (above); this rule is for the direct form.
+Several producers targeting one input are an OR-input, not an AND-join. Each data arrival
+may activate the node. Empty-capable producers close a delivery round together, preventing
+one empty edge from prematurely skipping downstream work. The current round model is
+positional. Interleaved arrivals can expose the known FIFO/LIFO divergence documented in
+[`docs/divergences.md`](docs/divergences.md).
 
-### Expression references (`$('Y')`)
+### Expressions
 
-n8n evaluates `$('Y')` inside the node and throws "node is unexecuted" if `Y` has not run
-yet, so whether a cross-branch reference works depends on canvas order. The net makes the
-dependency explicit where it is well defined and reports the error where it is not:
-
-- `Y` reachable from the start node on a path avoiding `X`: `X_start` carries `read(Y/done)`,
-  and a twin `X_start_unmet: one(X/in) one(_budget) one(X/idle) read(Y/skipped)` (lower
-  priority) puts a token in `X/running` tagged with the unmet reference, so the action fails
-  with n8n's own error under the node's `onError` policy. `unreachable({X/in, Y/skipped})`
-  proves the reference is always satisfied.
-- `Y` unreachable from the start node (multi-trigger workflow): `Y/skipped` is seeded in the
-  initial marking, so `X` fails exactly as n8n would.
-- `Y` reachable only through `X` (self-, downstream- or loop-back reference): no read arc; the
-  expression fails inside the action as in n8n. A diagnostic names the pair.
-
-Deliberate divergence: a reference to a node on a parallel branch succeeds once that node
-has run, instead of failing or succeeding by canvas order.
-
-### Retries, halt, cancellation
-
-- `retryOnFail`: parameters are read as n8n's `getRetryParams` reads them,
-  `maxTries = min(5, max(2, node.maxTries || 3))`, `waitBetweenTries = min(5000, max(0,
-  node.waitBetweenTries || 1000))`; `X/tries` seeded with `maxTries − 1`; `X_retry_wait` is a
-  `delayed()` transition consuming one try; `X_exhausted` fires under `inhibitor(X/tries)`. The
-  net decides retry-vs-exhaust; the verifier proves at most `maxTries` attempts — the place
-  bound on `X/tries` plus the structural fact that no transition produces it, which is the
-  half that carries the claim.
-- A fatal node error deposits `_halt`. Every start, retry-wait, exhausted, skip and arm
-  transition inhibits on `_halt` and `_halted`, in-flight actions finish, and `_halt_reap`
-  clears the edge, `in`, `ready` and `hasdata` places with reset arcs so a halted run
-  quiesces cleanly. The reap leaves `X/retry` alone: it holds a budget unit, and clearing it
-  would break `_budget + Σ(running + retry) + Σ_o(ok_o + routed_o) = k`. The marking is captured when the halt
-  branch is written, i.e. before the reap fires, so the activations it clears are encoded
-  back onto `nodeExecutionStack` behind the failed entry the host pushed: n8n's loop `break`s
-  and leaves everything it has not popped there, and that stack is what a "Retry execution"
-  replays.
-- A Wait node (`waitTill`) or a `destinationNode` stop must not `close()` the executor:
-  ENV-013 close stops all scheduling, so routes still pending would be lost and the marking
-  could not be encoded. Instead `X_run` (and `X_exhausted`) carry two more outcome
-  alternatives, `and(X/waiting, _pause, _budget)` (PlaceRole `waiting`: the node put the
-  execution to wait and must re-run on resume, n8n's `pushExecutionStack`; the token carries
-  the node's input `executionData`) and `and(X/stopped, _pause, _budget)` (PlaceRole
-  `stopped`: the destination node ran, its outputs are recorded, its successors must not be
-  enqueued). Neither is routed, and both refund the budget since nothing routes afterwards.
-  `_pause` is the shared **control terminal** for both: only `X_start`, `X_start_unmet` and
-  `X_retry_wait` inhibit on it (in addition to `_halt` / `_halted`); routes, skips, arms,
-  clears, done and exhausted are **not** pause-inhibited, so a paused net drains every
-  structural transition and quiesces on its own with every token on an `in` / `ready` /
-  `hasdata` / `waiting` place, where the marking codec reads it into n8n's own
-  `nodeExecutionStack` and `waitingExecution`. The verifier **classifies** such a marking
-  rather than querying it: a quiescent class holding `_pause` / `_halted` / `X/waiting` /
-  `X/stopped` is a designed terminal, and the tokens counted as residue in it are exactly the
-  ones `encodeMarking` accepts in the mode that terminal is encoded with — anything else
-  (an unrouted `X/ok`, an unreaped `_halt`) is still reported. That is what M4's SMT form
-  could not do: `joinedOrDeadLettered` carries **no sink clause by design** (NU-040 AC4), and
-  even `deadlockFree`'s sink clause cannot express it, since a sink set admitting the arrival
-  would also excuse a real stranding on the same place — so a paused witness had to be
-  downgraded to `unknown` ([`docs/verification.md`](docs/verification.md)).
-- Cancellation is `executor.close()`; the workflow timeout stays n8n's own poll plus `close()`.
-  A cancellation that arrives while the net is paused encodes in the cancellation mode:
-  `close()` is exactly what can leave a completed action's output on `X/ok_o` with no
-  `X_route_o` left to drain it, and only that mode routes such a token instead of rejecting
-  the marking.
-
-### Concurrency budget and its safety condition
-
-`_budget` holds k unit tokens: k = 1 is sequential n8n, larger k is parallel. Positional
-pairing is sound above k = 1 only if every node fires at most once per execution, which the
-compiler checks (acyclic, and every input index has at most one producer). Otherwise k = 1.
-Lifting that is the genuine use of ν-lineage names and is deferred.
-
-The condition is about **arrival order**, not overlap: `X/idle` already makes two activations
-of one node structurally non-overlapping at every k (`X/idle + X/running = 1` is a found
-P-invariant). What breaks above k = 1 is that a node activated several times takes its
-payload → `runIndex` pairing from the order its inputs arrive, and that order becomes the
-producers' completion order rather than a structural fact.
+References such as `$('Y')` become read arcs on `Y/done` when `Y` is a valid upstream
+dependency. A skipped or unreachable dependency produces n8n's unexecuted-node error under
+the node's configured error policy. Self-, downstream- and loop-back references remain
+runtime expression errors.
 
 ### Concurrency
 
-Above k = 1 several node actions are in flight at once. What makes that safe, what it changes,
-and how k is chosen; the analysis and the measurements are in
-[ADR 0006](docs/adr/0006-concurrency.md).
+The initial `_budget` marking is the maximum number of node actions that may be in flight.
+Independent enabled transitions can therefore run concurrently. This is a consequence of
+the model, not the model's main claim.
 
-**The payload rule: a node's input items are read-only.** A token holds the very
-`INodeExecutionData[]` array n8n produced, and `X_route_o` hands the same array to every edge of
-an output — exactly as `addNodeToBeExecuted` writes it by reference into every waiting slot and
-stack entry. What keeps two concurrent consumers apart is n8n's own lineage step:
-`addPairedItemLineage` returns `{ ...item, pairedItem }` copies rather than stamping in place,
-so every activation reads and writes its own item objects, and `assignPairedItems` — the one
-in-place `pairedItem` write left — only ever touches the node's own fresh output. We add no
-second copy: the lineage step is synchronous, so serialising it in the net would protect
-nothing, and it costs 19 ns per item (0.19 ms for 10 000 items). The copy is shallow, so each
-item's `json` stays shared; a node that mutates its input `json` in place already corrupts its
-sibling in n8n, sequentially — concurrency only makes it nondeterministic.
-
-**The pause claim.** `runExecutionData.waitTill` is one execution-global field, so above k = 1
-the scheduler has to decide which node put the execution to wait. The claim is made in the same
-synchronous turn in which a node's own `runNode` resolves: a node that started after the field
-was already set never claims, and of the nodes that saw it change during their own run the one
-whose run finished first keeps it. A refused claim is reported by diagnostic and the
-`executionStatus: 'waiting'` that `host.createTaskData` stamped on that run — it reads the same
-global field — is corrected to what the run actually was. The residual (a node that sets the
-field and then keeps working while a sibling finishes) is divergence #15. `lastNodeExecuted`
-becomes the last node to *complete* (#16), a sibling in flight when the execution halts or
-pauses — or one that starts inside the halt window, which lasts until `_halt` reaches the
-marking — finishes and is recorded (#17), and the dynamic-credentials flags are not node-scoped
-above k = 1 (#18) — keep k = 1 for workflows that use dynamically-resolved credentials.
-
-**The error contract.** `WorkflowScheduler.executionError` is the value `processRunExecutionData`
-persists the execution as a success or a failure by, and n8n keeps it in one field it clears at
-the top of every loop iteration and every retry. The scheduler keeps two instead: the **halt
-error**, written once by the activation whose failure ended the execution and never overwritten,
-and the **leftover** — an error a node's `onError` policy continued past — which the next
-activation to *complete* replaces. `executionError` is `haltError ?? leftoverError`. At k = 1
-completion order is n8n's iteration order, so the value is byte-identical; above it the leftover
-follows completion order, like `lastNodeExecuted` (#19). Without the split a sibling's catch,
-retry or start could erase a halt the net had already taken.
-
-**Choosing k.** `registerPetriScheduler({ budget })`; the vitest/registration hook reads it
-from the **`N8N_LIBPETRI_BUDGET`** environment variable (`src/n8n-vitest-setup.ts`), default 1,
-and anything not a positive integer falls back to 1. The compiler may lower it: read
-`CompiledWorkflow.effectiveBudget` and `budgetRestriction` for what a workflow actually got.
-`PetriScheduler.maxInFlight` reports the high-water mark of concurrent runs (`X_run` actions)
-of the last execution: a **lower bound** on `_budget + Σ(running + retry) + Σ_o(ok_o + routed_o) = k`, since a
-retry wait and an exhausted recording hold their unit without running the node. A `retryOnFail`
-node holds its unit across the retry wait (ADR 0004), so a retry-heavy workflow wants k above
-its retry count.
-
-### Initial marking and the marking codec
-
-Every verification verdict is about markings reachable from the marking this section builds;
-a resumed or retried execution starts from a decoded one, which is outside that set
-([`docs/verification.md`](docs/verification.md)).
-
-n8n stays the system of record. Trigger data goes onto the **start node's own `X/in`**: n8n
-runs the trigger as `nodeExecutionStack[0]` (a webhook node passes its input through), and
-`$('Webhook')` read arcs need `Trigger/done`. Join inputs fed only by nodes unreachable from
-the start node are seeded with an empty token; a pre-filled `ready_i` slot withholds its
-`free_i` token so `free_i + ready_i ≤ 1` holds from the start. On a Wait node the marking is
-serialised into `nodeExecutionStack` and `waitingExecution` in n8n's own shape (empty tokens
-as `[]`, not-arrived as `null`); on resume the marking is rebuilt from a non-empty stack.
-
-## Layout
-
-```
-typescript/   one npm package, multi-entry: ".", "./compiler", "./verify", "./conformance"
-patches/n8n/  0001-extract-scheduler-loop, 0002-scheduler-registry (rebasable, upstream quality)
-scripts/      bootstrap-n8n.sh, run-conformance.sh, verify-patch.sh
-docs/         adr/, divergences.md, verification.md, conformance-*.md, differential.md,
-              state-of-the-project.md, assets/, diagrams/
-spec/         n8n concept → libpetri requirement mapping
-```
-
-## Status
-
-**All four milestones of the plan are done.** The engine runs n8n's own suite, the budget runs
-above 1, the verifier answers a measured subset of the questions, and every difference from n8n
-is registered. One page on what exists, what it is measured to do and what comes next:
-[`docs/state-of-the-project.md`](docs/state-of-the-project.md).
-
-### What works
-
-- **`PetriScheduler`** is a drop-in `WorkflowScheduler` for n8n's execution engine (`v1`; `v0`
-  routes to the legacy loop). Register it once and n8n's `executionLoop` is gone.
-- **The budget runs above 1.** The compiler lowers it to 1, with a diagnostic, on any workflow it
-  cannot prove k-safe.
-- **Wait nodes, destination stops, halts and cancellation resume**, through the marking codec, in
-  n8n's own `nodeExecutionStack` / `waitingExecution` shape.
-- **`verify(workflow)` and `n8n-libpetri verify`** run over the same net the scheduler executes.
-
-### Conformance — n8n's own tests, both engines
-
-`scripts/run-conformance.sh --scope=execution-engine|core|workflow|cli|all`, on the pinned clone.
-Loop-driving cases passed, then pure-helper cases. Full matrix and method:
-[`docs/conformance-final.md`](docs/conformance-final.md).
-
-| scope | cases | legacy (n8n's loop behind the seam) | libpetri k = 1 | k = 2 |
-|---|---|---|---|---|
-| execution-engine | 1657 | 44/44 + 1613/1613, *identical to the unpatched baseline* | 35/44 + 1611/1613, 11 regressions | 32/44 + 1611/1613, 3 regressions **against k = 1** |
-| core (all of `packages/core`) | 2124 | 44/44 + 2080/2080, identical | 35/44 + 2078/2080, the *same* 11 | — |
-| workflow (all of `packages/workflow`) | 9603 | same case set and status multisets | not applicable — no scheduler is ever constructed | — |
-| cli (`packages/cli` unit suite) | 20328 | identical to the baseline | 20328/20328, 0 regressions | — |
-
-The engine is **entered** in 5 of the 75 execution-engine files — the five `packages/core` files
-that actually run a workflow — and in **0** of `packages/cli`'s 1104, which the harness counts and
-prints per leg, so a patch-neutrality leg is never read as an engine result. The 11 regressions
-contain no defect: 8 are the AI-agent tool dispatch declared out of scope, 3 are registered
-divergences (#2, #11, #12). Widening from 1657 to 32 055 cases found no new failure anywhere.
-
-### Benchmark — the reason the project exists
-
-`npm run bench`; numbers are upper bounds, ratios reproduce under load
-([`docs/differential.md`](docs/differential.md)).
-
-| workflow | n8n | k = 1 | k = 2 | k = 4 |
-|---|---|---|---|---|
-| fan-out 2 × 500 ms | 1006 ms | 1019 ms | **507 ms** | 508 ms |
-| fan-out 8 × 500 ms | 4021 ms | 4023 ms | 2009 ms | **1006 ms** |
-| deep 8 × 500 ms chain | 4031 ms | 4024 ms | 4029 ms | 4028 ms |
-
-Every fan-out cell is `ceil(width / k) × 500 ms`; a chain with no parallelism to win is within
-0.2 % at every budget. Scheduling overhead over n8n's own loop is **≈ 16 µs per node** warm
-(≈ 79 µs cold), against 80 ms for an HTTP node — which is why the win is concurrency, not
-scheduler speed. A 185-node workflow compiles in under 9 ms and then caches.
-
-The differential harness compares the net against a faithful port of n8n's own loop under one
-host, on data, happens-before and attributed ordering: 23 fixtures × k ∈ {1, 2, 4} = 69 runs,
-**0 fail, 0 unattributed, 0 novel mechanisms**.
+The compiler currently lowers the effective budget to one when a workflow contains a cycle
+or several producers for one input index. Those shapes need activation lineage before their
+tokens can be paired safely at `k > 1`. The budget-equivalence tests preserve run data at
+budgets 1, 2, 4 and 8 for k-safe workflows without completion-order-sensitive stop
+behaviour. Completion order is intentionally allowed to change above one.
 
 ## Verification
 
+The CLI compiles workflow JSON to the same net used by `PetriScheduler`:
+
 ```bash
-npx n8n-libpetri verify my-workflow.json --budget 2 --property dead-nodes
+cd typescript
+npm ci
+npm run build
+npx n8n-libpetri verify ../workflow.json --budget 2 --property dead-nodes
 ```
 
-Six property families over `compile(workflow).net` — no verification net — each reported as a
-named check with its own verdict, `unknown` included. Counterexamples come back as node paths.
-Exit 0 clean, 1 on a finding (or on any `unknown` or `bounded` under `--strict`), 2 usage, **3
-when no usable z3 resolved**, so a run that verified nothing never looks like a clean one.
+Available properties:
 
-**Two routes, and the solver is the fallback.** The primary one is libpetri's state-class graph
-(VER-010): one enumeration per report, read by every family. A report whose graph closes decides
-every check off it — the only z3 the default run then starts is the 1 ms invariant-only call the
-budget family's P-semiflow needs. It
-**proves**, on any workflow whose graph closes: proper completion — *can this workflow strand a
-branch?* — the concurrency budget bound and its two-phase P-semiflow, one activation per node,
-the retry bound, the join-slot discipline and the OR-round arrival bound, and it **finds dead
-nodes** by name. Measured: 393 classes and 9 ms for the 6-node diamond, 2048 and ~110 ms for a
-41-node chain, and a stranding on `ifBothOutputs` in 25 ms (divergence #2). libpetri's
-`SmtVerifier` runs only where that graph truncates.
+- `proper-completion`
+- `dead-nodes`
+- `no-double-activation`
+- `budget`
+- `retry-bound`
+- `mutual-exclusion`
 
-What bounds it is **shape, not node count**: independent branches interleave combinatorially
-(NU-053 — the graph has no partial-order reduction), so a 20-way switch truncates at 200 000
-classes where a 41-node chain closes at 2048, and a cycle's state space is infinite, so a cyclic
-workflow gets the fourth verdict, `bounded` — the property holds for every run within the
-explored prefix, which is sound and is not a proof. A truncated graph never reads as a pass.
-`--max-classes` caps the enumeration (default 200 000, lowered when the heap cannot hold it;
-`0` turns the route off) and `--smt-fallback auto|off|force` controls the solver arm, which
-`auto` refuses to start above a measured net size because libpetri's pre-solver pipeline
-aborts the process on a big branchy net rather than failing.
-It still cannot prove a node *live* (that direction is a witness in a value-blind
-abstraction, so it is reported `unknown`, never `proven`), and it says nothing about firing
-order, values or timing (VER-004).
+The primary verifier explores libpetri's state-class graph. If that graph truncates, an
+optional Z3/Spacer backend can try the remaining query. Results are deliberately narrow:
 
-Every limit above is pinned by a test, so an improvement breaks the suite and forces a
-re-measurement. The measured surface is [`docs/verification.md`](docs/verification.md); the design
-and its limits are [ADR 0007](docs/adr/0007-verification.md).
+| Verdict | Meaning |
+|---|---|
+| `proven` | The explored model proves the property. |
+| `violated` | A reachable counterexample exists. |
+| `bounded` | No counterexample exists within the exact cyclic-run prefix shown. This is not a proof. |
+| `unknown` | The verifier could not decide the property. |
 
-## History
+Counterexamples are node paths through the production net. The verifier models control
+flow, not item values, timing or total execution order. Independent branches can make the
+state space grow combinatorially; productive cycles make it infinite. See
+[`docs/verification.md`](docs/verification.md) for the exact guarantees, limits and
+measurements.
 
-M5 (the verification routes inverted) made libpetri's state-class graph (VER-010) the primary
-decision procedure and the `SmtVerifier` the fallback, which is what made proper completion
-close; it added the `bounded` verdict for cyclic workflows and left no model change behind
-([`docs/verification.md`](docs/verification.md), [ADR 0007](docs/adr/0007-verification.md) §9-§12).
-M4 (verification and the final gate) added `src/verify`, the CLI, and the conformance scopes
-above; it also made the one model change of the project — the `_budget` refund moved from
-`X_route` to `X_done`, which restores depth-first order at k = 1 and closes divergence #20
-([`docs/conformance-final.md`](docs/conformance-final.md)).
-M3 (concurrency) brought the budget above 1, the differential harness and the benchmark
-([`docs/conformance-m3.md`](docs/conformance-m3.md), [`docs/differential.md`](docs/differential.md),
-[ADR 0006](docs/adr/0006-concurrency.md)).
-M2 (engine) put the `PetriScheduler` behind n8n's seam ([`docs/conformance-m2.md`](docs/conformance-m2.md)).
-M0/M1 were the scaffold, the compiler, the patches and the conformance harness.
-Open work: [`tasks/todo.md`](tasks/todo.md). Changes: [`CHANGELOG.md`](CHANGELOG.md).
+## Build and test
+
+The TypeScript package requires Node 24 or newer.
+
+```bash
+cd typescript
+npm ci
+npm run check
+npm test
+npm run build
+```
+
+To test against the pinned n8n checkout:
+
+```bash
+scripts/bootstrap-n8n.sh
+scripts/run-conformance.sh --engines=legacy,libpetri
+scripts/verify-patch.sh
+```
+
+Use `scripts/run-conformance.sh --engines=libpetri --budget=2` for a wider budget. The
+script records cases whose workflow shape forced the effective budget back to one.
+
+## Current evidence
+
+| Surface | Result |
+|---|---|
+| n8n execution-engine suite | Legacy: 1,657/1,657. Petri k=1: 1,646/1,657, all 11 regressions classified. |
+| n8n core suite | Legacy: 2,124/2,124. Petri: 2,113/2,124, the same 11 regressions. |
+| n8n workflow package | 9,603 cases pass; the scheduler is not entered there. |
+| n8n CLI package | 20,328 cases pass; the scheduler is registered but not entered there. |
+| Differential sweep | 23 fixtures at k=1,2,4: 49 pass, 20 registered divergences, 0 failures. |
+| Broader n8n run | 32,055 cases with no new failure class. |
+
+Eight of the 11 execution-engine regressions exercise AI-agent `EngineRequest` dispatch,
+which is outside the current scheduler scope. The other three are documented semantic
+differences: stuck-join handling and OR/join ordering. The exact cases and evidence are in
+[`docs/conformance-final.md`](docs/conformance-final.md).
+
+The benchmark is useful as a cost check, not as an architectural argument. A warm 100-node
+zero-work chain adds about 16 µs of scheduler overhead per node over n8n's loop on the
+measured machine. A 185-node workflow compiles to a cached `PrecompiledNet` in under 9 ms.
+Independent 500 ms branches fill the configured budget as expected. Full methodology and
+raw numbers are in [`docs/differential.md`](docs/differential.md).
+
+## Known limits
+
+- AI-agent `EngineRequest` and `EngineResponse` tool dispatch are not implemented.
+- Cyclic and multi-producer-input workflows currently run with an effective budget of one.
+- OR-input rounds do not yet carry activation lineage.
+- Completion-order fields such as `lastNodeExecuted`, `waitTill` and the selected fatal error
+  can differ when actions complete concurrently.
+- An in-flight sibling may finish after another node halts the execution.
+- Verification does not prove general liveness, value properties, timing or order.
+- Large parallel state spaces may return `unknown`; cyclic searches normally return
+  `bounded` unless another property is violated first.
+
+These constraints are tracked in [`docs/divergences.md`](docs/divergences.md) and
+[`docs/state-of-the-project.md`](docs/state-of-the-project.md).
+
+## Repository map
+
+| Path | Contents |
+|---|---|
+| `typescript/src/compiler/` | Workflow analysis and net construction |
+| `typescript/src/scheduler/` | n8n scheduler, actions and compiled-net cache |
+| `typescript/src/verify/` | Verification API, state graph, SMT fallback and CLI |
+| `typescript/src/conformance/` | Reference scheduler and differential harness |
+| `typescript/src/codec.ts` | Marking to and from n8n execution state |
+| `patches/n8n/` | Two rebasable n8n integration patches |
+| `spec/` | Executable requirements and traceability |
+| `docs/adr/` | Architectural decisions and amendments |
+| `docs/conformance-*.md` | Recorded n8n suite evidence |
+
+Start with the [project state](docs/state-of-the-project.md), then use
+[verification](docs/verification.md), [differential testing](docs/differential.md),
+[patching](patches/n8n/README.md) and [scripts](scripts/README.md) for the relevant task.
+Milestone history belongs in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 
-Apache-2.0. n8n itself is under the Sustainable Use License and is never committed here.
+Apache-2.0. See [`LICENSE`](LICENSE).

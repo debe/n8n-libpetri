@@ -1,26 +1,37 @@
 /**
  * The per-node gadget as a libpetri `SubnetDef` (MOD-001), instantiated at prefix `node.id`
  * (MOD-010) and composed by port binding (MOD-020). Implements README "Per-node gadget"
- * (ADR 0004: two-phase start/run with the outcome routed through `X/ok`):
+ * (ADR 0004: two-phase start/run, the outcome routed by `X_run` itself):
  *
  * ```
- * X_start:      one(X/in) one(_budget) one(X/idle) inhibitor(_halt) inhibitor(_halted) inhibitor(_pause)
+ * X_start:      one(X/in) one(_budget) one(X/idle) inhibitor(_halt) inhibitor(_pause)
  *               [read(Y/done) per $('Y')]                     → X/running        priority depth
  * X_start_unmet_k: the same without the reads, read(Y_k/skipped) → X/running (tagged) priority depth − 1
- * X_run:        one(X/running) → and( xor( X/ok, [X/retry], [and(_halt, _budget)],
+ * X_run:        one(X/running) → and( xor( and( per output o: xor( and(data edges_o),
+ *                                                                 and(empty edges_o) | X/nil_o ),
+ *                                               X/routed ),
+ *                                          [X/retry], [and(_halt, _budget)],
  *                                          and(X/waiting, _pause, _budget), and(X/stopped, _pause, _budget) ),
  *                                     X/idle )                                    priority depth + 1
- * X_route_o:    one(X/ok_o) → and( xor( and(data edges_o), and(empty edges_o) | X/nil_o ),
- *                                  X/routed_o )                                   priority depth + 1
- * X_done:       one(X/routed_0) … one(X/routed_k-1) → and( _budget, X/done )      priority depth + 1
- *   (a node with no connected output keeps one X_route: one(X/ok) → and(_budget, X/done))
+ * X_done:       one(X/routed) → and( _budget, X/done )                            priority depth + 1
  * X_skip:       one(X/in_empty) → and( empty tree edges, X/skipped )              priority depth
- * X_retry_wait: one(X/retry) one(X/tries) one(X/idle) inhibitor(_halt) inhibitor(_halted) inhibitor(_pause)
+ * X_retry_wait: one(X/retry) one(X/tries) one(X/idle) inhibitor(_halt) inhibitor(_pause)
  *               delayed(waitBetweenTries) → X/running                             priority depth
- * X_exhausted:  one(X/retry) inhibitor(X/tries) → xor( X/ok, [and(_halt, _budget)],
+ * X_exhausted:  one(X/retry) inhibitor(X/tries) → xor( <the same success branch>, [and(_halt, _budget)],
  *                                                      and(X/waiting, _pause, _budget), and(X/stopped, _pause, _budget) )
  *                                                                                 priority depth + 1
  * sink_o:       one(X/nil_o)  (no Out spec: a genuine sink, CORE-043 AC4)
+ * ```
+ *
+ * A node with **more than {@link SPLIT_ROUTING_ABOVE} connected outputs** keeps the routing
+ * on its own transition per output, because an `and` of `k` `xor`s is `2^k` flat branches
+ * (IO-016) — see {@link SPLIT_ROUTING_ABOVE} for the measurement:
+ *
+ * ```
+ * X_run success branch: and( X/ok_o per connected output o )
+ * X_route_o:    one(X/ok_o) → and( xor( and(data edges_o), and(empty edges_o) | X/nil_o ),
+ *                                  X/routed_o )                                   priority depth + 1
+ * X_done:       one(X/routed_0) … one(X/routed_k-1) → and( _budget, X/done )      priority depth + 1
  * ```
  *
  * The `waiting` outcome is n8n's `waitTill` (the node put the execution to wait and must
@@ -31,16 +42,19 @@
  * structural transitions and quiesces with every token on an in / ready / hasdata /
  * waiting place, where the marking codec reads it (README "Retries, halt, cancellation").
  *
- * **Per-output routing** ({@link SPLIT_ROUTING_ABOVE}, now 0): every node with at least one
- * connected output has its success branch produce `and(X/ok_o …)`, one
- * `X_route_o: one(X/ok_o) → and(xor(…), X/routed_o)` per output, and a single
- * `X_done: one(X/routed_0) … → and(_budget, X/done)`. That keeps the flatteners linear in
- * the output count (IO-016: `and` of `k` `xor`s is `2^k` virtual transitions) *and* puts the
- * budget refund one scheduling cycle after the edge tokens, which is the cycle a join / OR
- * consumer's `arm` fires in — see {@link SPLIT_ROUTING_ABOVE} for why that is what makes
- * priority = DAG depth reproduce n8n's depth-first order. With exactly one connected output
- * the per-output names collapse to the unindexed `X/ok`, `X_route`, `X/routed`. The
- * P-semiflow reads `n·_budget + n·running + n·retry + Σ_o(ok_o + routed_o) = n·k`.
+ * **`X_done` is what phases the budget refund**, at both shapes. `X_run` (or `X_route_o`)
+ * deposits the edge tokens and marks `X/routed`; `X_done` refunds `_budget` one scheduling
+ * cycle later, which is the cycle a join / OR consumer's `arm` fires in, so the consumer's
+ * `X_start` and a budget-blocked sibling's `X_start` land in one ready set and priority
+ * decides (M4, divergence #20 — see {@link SPLIT_ROUTING_ABOVE}). Every node has an
+ * `X_done`, including one with no connected output, whose success branch is just `X/routed`.
+ * The P-semiflow is `_budget + Σ_X(X/running + X/retry + inflight_X) = k`, where `inflight_X`
+ * is `X/routed` for a node that routes inside `X_run` and `X/ok_o + X/routed_o` for **one**
+ * output `o` of a node above {@link SPLIT_ROUTING_ABOVE}: a split node has no single
+ * `X/routed`, so the Farkas enumeration returns one such law **per output** instead of one
+ * folded law, and `verify.ts` `nodeCarriesUnit` accepts any of them ("at least one", not
+ * "all"). A workflow with no split node yields the single folded
+ * `_budget + Σ_X(X/running + X/retry + X/routed) = k`.
  *
  * Input sides (README "Join gadget", "OR-inputs"; ADR 0003):
  * - `join`: `arm_e_data` / `arm_e_empty` per edge consuming `X/free_i`, `X/ready_i`,
@@ -52,7 +66,7 @@
  * - `or`: one input with `n ≥ 2` empty-capable producers aggregates a round —
  *   `arm_data → and(ready_i, hasdata_i)`, `arm_empty → ready_i`, `X_start: one(hasdata_i)
  *   → and(running, ran_i)`, `X_skip: exactly(n, ready_i) inhibitor(hasdata_i)
- *   inhibitor(ran_i)`, `X_clear: exactly(n, ready_i) inhibitor(hasdata_i) all(ran_i)`, both
+ *   inhibitor(ran_i)`, `X_clear: exactly(n, ready_i) inhibitor(hasdata_i) inhibitor(_halt) all(ran_i)`, both
  *   with `read(idle)` (the round decision waits for an in-flight `X_start` to land `ran_i`).
  *   Producers inside a cycle deliver `hasdata_i` only and do not count towards `n`; their
  *   runs leave `ran_i` markers behind once the round is closed.
@@ -61,11 +75,13 @@
  * carries `data | empty`; a tree edge from a producer inside a cycle carries `data | nil`
  * on run and `empty` on skip; a cycle edge carries `data | nil` on run and nothing on skip.
  *
- * Every start, retry-wait, exhausted, skip and arm transition inhibits on `_halt` and
- * `_halted` (README "Retries, halt, cancellation"), so a halted run quiesces without a
- * post-halt cascade. `X/retry` is never reaped: it holds a budget unit.
+ * Every start, retry-wait, exhausted, skip, arm and clear transition inhibits on `_halt`
+ * (README "Retries, halt, cancellation"), so a halted run quiesces without a post-halt
+ * cascade — with every pending activation still on the `in` / edge / `ready` / `hasdata`
+ * place it was delivered to, which is where the marking codec reads it. Nothing consumes
+ * `_halt`: it is the halted run's terminal marker, not a signal to be acknowledged.
  *
- * Everything that crosses a node boundary is a port: `_budget` / `_halt` / `_halted` / `_pause`, the
+ * Everything that crosses a node boundary is a port: `_budget` / `_halt` / `_pause`, the
  * consumer-owned edge places (data and, for tree edges, empty), and `Y/done` / `Y/skipped`
  * for every `$('Y')` reference (read arcs, CORE-032). Places that stay inside the node keep
  * their prefixed names (MOD-012). Actions are bound after composition on the flat net
@@ -81,35 +97,56 @@ import type {
 } from './types.js';
 
 /**
- * Nodes with more connected outputs than this route per output: `X_route_o` deposits the
- * edge tokens and marks `X/routed_o`, and a single `X_done` refunds `_budget` once every
- * output is routed.
+ * Nodes with **more** connected outputs than this keep the routing on a transition of its
+ * own per output — `X_run` writes `X/ok_o`, `X_route_o` deposits the edge tokens and marks
+ * `X/routed_o` — instead of routing inside `X_run`'s own `Out` spec. Nodes at or below it
+ * route in `X_run` and have a single `X/routed`.
  *
- * **Zero, i.e. every node that has an output at all.** Two independent reasons, and the
- * second is why the threshold is not 3 any more:
+ * **Three**, and it is an IO-016 flattening threshold. The SMT and SCG flatteners expand an
+ * `and` of `k` `xor`s into `2^k` virtual transitions, so the outcome costs `2^k + 4` flat
+ * branches routed inside `X_run` (the four non-success outcomes on top) against `2k + 5`
+ * split across `X_run` and its `X_route_o`s. Neither figure counts `X_done`, which both
+ * shapes have. Measured with `enumerateBranches`
+ * (`tests/spikes/collapsed-outcome.test.ts`):
  *
- * 1. *Verifier scaling* (README, IO-016): the SMT and SCG flatteners expand an `and` of `k`
- *    `xor`s into `2^k` virtual transitions, and the split turns that into `k` transitions
- *    with one `xor` each. At `k = 1` both shapes flatten to two branches, so the split
- *    neither helps nor hurts the small nodes it now also applies to.
- * 2. *Scheduling phase* (M4). The executor collects its ready set from the enablement flags
- *    **before** the firing pass and only `updateDirtyTransitions()` sets them, so a
- *    transition another firing enables during that pass can fire no earlier than the next
- *    cycle (`precompiled-net-executor.ts` `fireReadyGeneral`). A join / OR consumer needs
- *    one such extra cycle for its `arm`, while a direct consumer does not — so when
- *    `X_route` deposited the edge tokens and refunded `_budget` in one firing, the shallower
- *    budget-blocked sibling was evaluable a full cycle before the deeper armed consumer and
- *    took the unit, and the net ran breadth-first exactly where priority = DAG depth was
- *    meant to give n8n's depth-first order. Refunding on `X_done` — one cycle after the edge
- *    tokens land, which is the cycle the `arm` fires in — puts both candidate `X_start`s in
- *    the same ready set, where priority decides. Measured: n8n's own
- *    `v1 execution order > should execute nodes in the correct order, depth-first & the most
- *    top-left one first` passes with it and fails without it (`docs/conformance-final.md`).
+ * | connected outputs | routed in `X_run` | split per output |
+ * |---|---|---|
+ * | 1 | **6** | 7 |
+ * | 2 | **8** | 9 |
+ * | 3 | 12 | **11** |
+ * | 4 | 20 | **13** |
+ * | 6 | 68 | **17** |
+ * | 10 | 1028 | **25** |
+ * | 20 | *`enumerateBranches` overflows the stack* | **45** |
  *
- * A node with **no** connected output keeps the single `X_route`, which has no edge token to
- * deposit and therefore no `arm` to wait for; it refunds `_budget` itself.
+ * Three is where it stops being a rout and becomes a trade: the split is one branch cheaper
+ * there, while the collapse removes five places and three transitions and **21 % of the
+ * state classes** (a three-output fan-out is 47 places / 20 transitions / 381 classes
+ * collapsed against 52 / 23 / 482 split — `tests/compiler/routing.test.ts`). From four
+ * outputs the branch count runs away and the split wins outright, so the threshold is 3 —
+ * the same value the pre-M4 gadget used, for the same underlying reason.
+ *
+ * **What M4 changed is not this threshold; it is `X_done`,** and `X_done` is now
+ * unconditional. The executor collects its ready set from the enablement flags **before**
+ * the firing pass and only `updateDirtyTransitions()` sets them, so a transition another
+ * firing enables during that pass can fire no earlier than the next cycle
+ * (`precompiled-net-executor.ts` `fireReadyGeneral`). A join / OR consumer needs one such
+ * extra cycle for its `arm`, while a direct consumer does not — so a firing that deposited
+ * the edge tokens *and* refunded `_budget` let the shallower budget-blocked sibling become
+ * evaluable a full cycle before the deeper armed consumer, and the net ran breadth-first
+ * exactly where priority = DAG depth was meant to give n8n's depth-first order
+ * (divergence #20). Refunding on `X_done` — one cycle after the edge tokens land, which is
+ * the cycle the `arm` fires in — puts both candidate `X_start`s in the same ready set,
+ * where priority decides. Measured: n8n's own `v1 execution order > should execute nodes in
+ * the correct order, depth-first & the most top-left one first` passes with it and fails
+ * without it (`docs/conformance-final.md`).
+ *
+ * That phase is preserved by both shapes here, because both mark `X/routed(_o)` in the
+ * firing that deposits the edge tokens and refund `_budget` from `X_done` in the next.
+ * Collapsing the routing into `X_run` therefore moves the *whole* chain one cycle earlier
+ * without changing any relative phase.
  */
-export const SPLIT_ROUTING_ABOVE = 0;
+export const SPLIT_ROUTING_ABOVE = 3;
 
 /** A consumer-owned host edge place pair (created by `compile`, bound into both subnets). */
 export interface HostEdgeSlot {
@@ -145,8 +182,6 @@ export interface GadgetBuild {
   readonly transitions: readonly TransitionInfo[];
   /** Place descriptors of every place this node owns (edge places included). */
   readonly places: readonly PendingPlace[];
-  /** Final names of the internal places `_halt_reap` resets (ready and hasdata places). */
-  readonly reapPlaceNames: readonly string[];
   /** Builds the `NodeGadget` once canonical place objects can be looked up by final name. */
   materialise(lookup: (finalName: string) => Place<unknown>): NodeGadget;
 }
@@ -237,7 +272,6 @@ export function buildNodeGadget(
   const refPorts: ReferencePort[] = [];
   const pending: PendingPlace[] = [];
   const transitions: TransitionInfo[] = [];
-  const reapPlaceNames: string[] = [];
   const body: Transition[] = [];
 
   const port = (portName: string, local: Place<unknown>, hostPlace: Place<unknown>, direction: PortDirection): void => {
@@ -260,8 +294,6 @@ export function buildNodeGadget(
   port('budget', budget, host.budget, 'inout');
   const halt = place<unknown>('halt');
   port('halt', halt, host.halt, 'inout');
-  const halted = place<unknown>('halted');
-  port('halted', halted, host.halted, 'input');
   const pause = place<unknown>('pause');
   port('pause', pause, host.pause, 'inout');
 
@@ -339,19 +371,15 @@ export function buildNodeGadget(
         hasdataI = internal(`hasdata_${i}`, 'hasdata', i);
         ran = internal(`ran_${i}`, 'ran', i);
         round = edges.filter((e) => e.empty !== null).length;
-        reapPlaceNames.push(F(`ready_${i}`), F(`hasdata_${i}`));
       } else {
         free = internal(`free_${i}`, 'free', i);
         if (form === 'choose-branch' && isRequired) {
           readyData = internal(`ready_${i}_data`, 'ready', i, { variant: 'data' });
-          reapPlaceNames.push(F(`ready_${i}_data`));
           if (emptyCapable) {
             readyEmpty = internal(`ready_${i}_empty`, 'ready', i, { variant: 'empty' });
-            reapPlaceNames.push(F(`ready_${i}_empty`));
           }
         } else {
           ready = internal(`ready_${i}`, 'ready', i);
-          reapPlaceNames.push(F(`ready_${i}`));
         }
       }
       inputs.push({
@@ -362,7 +390,6 @@ export function buildNodeGadget(
     }
   }
   const hasdata = form === 'join' ? internal('hasdata', 'hasdata', null) : null;
-  if (hasdata !== null) reapPlaceNames.push(F('hasdata'));
 
   // ---- skip exists iff an empty token can arrive where it decides the activation ----
   const hasSkip = form === 'direct' ? inEmptyLocal !== null
@@ -383,11 +410,6 @@ export function buildNodeGadget(
   const outputs: LocalOutput[] = [];
   const connectedOutputs = new Set(outgoing.map((e) => e.outputIndex)).size;
   const split = connectedOutputs > SPLIT_ROUTING_ABOVE;
-  // A node with a single connected output has one of each per-output name, so it keeps the
-  // unindexed `ok` / `route` / `routed` it carried before the threshold moved to 0. The
-  // `port` metadata still records the real output index, which need not be 0 (an IF wired
-  // only on its false branch routes output 1 through `X/ok`).
-  const sfx = (o: number): string => (connectedOutputs === 1 ? '' : `_${o}`);
   for (let o = 0; o < a.outputCount; o++) {
     const edges: LocalEdge[] = [];
     for (const e of outgoing) {
@@ -404,13 +426,13 @@ export function buildNodeGadget(
     }
     if (edges.length === 0) continue; // unconnected outputs get no places
     const nil = cyclic ? internal(`nil_${o}`, 'nil', o) : null;
-    const okO = split ? internal(`ok${sfx(o)}`, 'ok', o) : null;
-    const routedO = split ? internal(`routed${sfx(o)}`, 'routed', o) : null;
+    const okO = split ? internal(`ok_${o}`, 'ok', o) : null;
+    const routedO = split ? internal(`routed_${o}`, 'routed', o) : null;
     outputs.push({ index: o, edges, nil, ok: okO, routed: routedO });
   }
-  // `X/ok`: the unsplit single place, or — when exactly one output is routed — that
-  // output's own `ok`, which is the same place under the same name.
-  const ok = split ? (outputs.length === 1 ? outputs[0]!.ok : null) : internal('ok', 'ok', null);
+  // `X/routed`: the single "the outcome has been delivered" marker of a node that routes
+  // inside `X_run`. A split node has one per output instead (`outputs[*].routed`).
+  const routed = split ? null : internal('routed', 'routed', null);
   const skipEmpties: Out[] = [];
   for (const out of outputs) for (const e of out.edges) if (e.empty !== null) skipEmpties.push(outPlace(e.empty));
 
@@ -445,7 +467,14 @@ export function buildNodeGadget(
     andOf(out.edges.map((e) => outPlace(e.data))),
     out.nil !== null ? outPlace(out.nil) : andOf(out.edges.map((e) => outPlace(e.empty!))),
   );
-  const success: Out = split ? andOf(outputs.map((o) => outPlace(o.ok!))) : outPlace(ok!);
+  // The success branch. Collapsed: the per-output routing plus `X/routed`, which `X_done`
+  // consumes one cycle later — an inner `xor` left unwritten on a sibling branch of the
+  // enclosing `xor` is fine, IO-015 searches for an exact explanation
+  // (`tests/spikes/out-spec.test.ts`, `tests/spikes/collapsed-outcome.test.ts`). Split: one
+  // `X/ok_o` per output, each routed by its own `X_route_o`.
+  const success: Out = split
+    ? andOf(outputs.map((o) => outPlace(o.ok!)))
+    : andOf([...outputs.map(routingOf), outPlace(routed!)]);
   const haltBranch = and(outPlace(halt), outPlace(budget));
   // The two pause outcomes: the budget is refunded here since nothing routes afterwards.
   const waitingBranch = and(outPlace(waiting), outPlace(pause), outPlace(budget));
@@ -455,7 +484,7 @@ export function buildNodeGadget(
 
   // ---- X_start and its start_unmet twins ----
   const startBuilder = (local: string, priority: number) => {
-    const b = Transition.builder(local).priority(priority).inhibitors(halt, halted, pause);
+    const b = Transition.builder(local).priority(priority).inhibitors(halt, pause);
     if (form === 'direct') {
       b.inputs(one(inLocal!), one(budget), one(idle)).outputs(outPlace(running));
     } else if (form === 'or') {
@@ -494,12 +523,11 @@ export function buildNodeGadget(
     .priority(depth + 1).build());
   tinfo('run', 'run');
 
-  // ---- X_route: per-edge routing, budget refund, done (split per output above the threshold) ----
+  // ---- X_route_o (split shape only) and X_done: the budget refund, one cycle later ----
   const routeNames: string[] = [];
-  let doneName: string | null = null;
   if (split) {
     for (const out of outputs) {
-      const local = `route${sfx(out.index)}`;
+      const local = `route_${out.index}`;
       body.push(Transition.builder(local)
         .inputs(one(out.ok!))
         .outputs(and(routingOf(out), outPlace(out.routed!)))
@@ -507,20 +535,13 @@ export function buildNodeGadget(
       tinfo(local, 'route', { port: out.index });
       routeNames.push(F(local));
     }
-    body.push(Transition.builder('done')
-      .inputs(...outputs.map((o) => one(o.routed!)))
-      .outputs(and(outPlace(budget), outPlace(done)))
-      .priority(depth + 1).build());
-    tinfo('done', 'done');
-    doneName = F('done');
-  } else {
-    body.push(Transition.builder('route')
-      .inputs(one(ok!))
-      .outputs(and(...outputs.map(routingOf), outPlace(budget), outPlace(done)))
-      .priority(depth + 1).build());
-    tinfo('route', 'route');
-    routeNames.push(F('route'));
   }
+  body.push(Transition.builder('done')
+    .inputs(...(split ? outputs.map((o) => one(o.routed!)) : [one(routed!)]))
+    .outputs(and(outPlace(budget), outPlace(done)))
+    .priority(depth + 1).build());
+  tinfo('done', 'done');
+  const doneName = F('done');
 
   // ---- X_skip ----
   const skipNames: string[] = [];
@@ -528,7 +549,7 @@ export function buildNodeGadget(
     if (form === 'direct') {
       body.push(Transition.builder('skip')
         .inputs(one(inEmptyLocal!))
-        .inhibitors(halt, halted)
+        .inhibitor(halt)
         .outputs(andOf([...skipEmpties, outPlace(skipped!)]))
         .priority(depth).build());
       tinfo('skip', 'skip');
@@ -540,14 +561,14 @@ export function buildNodeGadget(
       const i = inputs[0]!;
       body.push(Transition.builder('skip')
         .inputs(exactly(i.round!, i.ready!))
-        .inhibitors(i.hasdata!, i.ran!, halt, halted)
+        .inhibitors(i.hasdata!, i.ran!, halt)
         .read(idle)
         .outputs(andOf([...skipEmpties, outPlace(skipped!)]))
         .priority(depth).build());
       tinfo('skip', 'skip');
       skipNames.push(F('skip'));
     } else if (form === 'join') {
-      const skip = Transition.builder('skip').inhibitors(hasdata!, halt, halted).priority(depth);
+      const skip = Transition.builder('skip').inhibitors(hasdata!, halt).priority(depth);
       for (const i of inputs) skip.inputs(one(i.ready!));
       skip.outputs(and(...skipEmpties, outPlace(skipped!), ...freeRefunds()));
       body.push(skip.build());
@@ -559,7 +580,7 @@ export function buildNodeGadget(
       for (const combo of combinations(choices)) {
         if (combo.every((v) => v === 'data')) continue; // that combination is X_start
         const local = `skip_${combo.map((v) => v[0]).join('')}`;
-        const skip = Transition.builder(local).inhibitors(halt, halted).priority(depth);
+        const skip = Transition.builder(local).inhibitor(halt).priority(depth);
         for (const i of inputs) {
           if (!i.required) {
             skip.inputs(one(i.ready!));
@@ -585,7 +606,7 @@ export function buildNodeGadget(
     const local = `clear_${i.index}`;
     body.push(Transition.builder(local)
       .inputs(exactly(i.round!, i.ready!), all(i.ran!))
-      .inhibitor(i.hasdata!)
+      .inhibitors(i.hasdata!, halt)
       .read(idle)
       .priority(depth).build());
     tinfo(local, 'clear', { port: i.index });
@@ -597,7 +618,7 @@ export function buildNodeGadget(
   for (const i of inputs) {
     for (const e of i.edges) {
       const dataName = `arm_e${e.edge.id}_data`;
-      const armData = Transition.builder(dataName).inputs(one(e.data)).inhibitors(halt, halted).priority(depth);
+      const armData = Transition.builder(dataName).inputs(one(e.data)).inhibitor(halt).priority(depth);
       if (form === 'or') {
         // A tree edge counts towards the round; a cycle edge only triggers a run.
         armData.outputs(e.empty !== null ? and(outPlace(i.ready!), outPlace(i.hasdata!)) : outPlace(i.hasdata!));
@@ -611,7 +632,7 @@ export function buildNodeGadget(
       armNames.push(F(dataName));
       if (e.empty !== null) {
         const emptyName = `arm_e${e.edge.id}_empty`;
-        const armEmpty = Transition.builder(emptyName).inputs(one(e.empty)).inhibitors(halt, halted).priority(depth);
+        const armEmpty = Transition.builder(emptyName).inputs(one(e.empty)).inhibitor(halt).priority(depth);
         if (form === 'or') {
           armEmpty.outputs(outPlace(i.ready!));
         } else {
@@ -629,14 +650,14 @@ export function buildNodeGadget(
   if (retry !== null && tries !== null) {
     body.push(Transition.builder('retry_wait')
       .inputs(one(retry), one(tries), one(idle))
-      .inhibitors(halt, halted, pause)
+      .inhibitors(halt, pause)
       .timing(delayed(a.waitBetweenTries!))
       .outputs(outPlace(running))
       .priority(depth).build());
     tinfo('retry_wait', 'retry');
     body.push(Transition.builder('exhausted')
       .inputs(one(retry))
-      .inhibitors(tries, halt, halted)
+      .inhibitors(tries, halt)
       .outputs(xorOf([success, ...(stopWorkflow ? [haltBranch] : []), waitingBranch, stoppedBranch]))
       .priority(depth + 1).build());
     tinfo('exhausted', 'exhausted');
@@ -691,8 +712,8 @@ export function buildNodeGadget(
       isErrorOutput: o.index === a.errorOutputIndex,
       edges: o.edges.map(slot),
       nil: opt(o.nil, `nil_${o.index}`),
-      ok: opt(o.ok, `ok${sfx(o.index)}`),
-      routed: opt(o.routed, `routed${sfx(o.index)}`),
+      ok: opt(o.ok, `ok_${o.index}`),
+      routed: opt(o.routed, `routed_${o.index}`),
     }));
     return {
       node: name, id, type: a.node.type, typeVersion: a.node.typeVersion,
@@ -702,9 +723,7 @@ export function buildNodeGadget(
       in: inFinal === null ? null : lookup(inFinal),
       inEmpty: inEmptyFinal === null ? null : lookup(inEmptyFinal),
       running: lookup(F('running')), idle: lookup(F('idle')),
-      // Non-null only when its local name is exactly `ok`: the unsplit place, or the one
-      // routed output's own `ok_o` whose index collapses away (`sfx`).
-      ok: opt(ok, 'ok'), splitRouting: split, done: lookup(F('done')),
+      routed: opt(routed, 'routed'), splitRouting: split, done: lookup(F('done')),
       skipped: hasSkip || referenced ? lookup(F('skipped')) : null,
       hasdata: opt(hasdata, 'hasdata'),
       retry: opt(retry, 'retry'),
@@ -722,5 +741,5 @@ export function buildNodeGadget(
     };
   };
 
-  return { def, prefix: id, ports, refPorts, exposesSkipped: hasSkip, transitions, places: pending, reapPlaceNames, materialise };
+  return { def, prefix: id, ports, refPorts, exposesSkipped: hasSkip, transitions, places: pending, materialise };
 }

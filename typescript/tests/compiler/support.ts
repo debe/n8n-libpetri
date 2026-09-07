@@ -4,7 +4,7 @@
  * an `InMemoryEventStore` attached. `run()` is never given a timeout (CLAUDE.md).
  */
 import {
-  BitmapNetExecutor, InMemoryEventStore, PrecompiledNetExecutor,
+  BitmapNetExecutor, InMemoryEventStore, PrecompiledNetExecutor, enumerateBranches,
   type Marking, type NetEvent, type Place, type Token, type Transition, type TransitionFailed,
 } from 'libpetri';
 import type { CompiledWorkflow, NodeGadget } from '../../src/compiler/index.js';
@@ -123,4 +123,28 @@ export function placeNames(c: CompiledWorkflow, pred: (name: string) => boolean 
 
 export function tokenCounts(m: Marking, places: readonly Place<unknown>[]): number[] {
   return places.map((p) => m.tokenCount(p));
+}
+
+/**
+ * The **success** branches of a node's outcome, as flat place-name sets (IO-016): the
+ * branches of `X_run` that deposit the edge tokens, or — for a node that routes per output
+ * ({@link SPLIT_ROUTING_ABOVE}) — the branches of `X_route_o`. `X_run`'s halt / waiting /
+ * stopped alternatives are dropped: none of them writes `X/routed`.
+ */
+export function successBranches(c: CompiledWorkflow, node: string, port?: number): string[][] {
+  const g = gadget(c, node);
+  const t = g.splitRouting ? transitionOf(c, node, 'route', port) : transitionOf(c, node, 'run');
+  const branches = enumerateBranches(t.outputSpec!).map((b) => [...b].map((p) => p.name).sort());
+  if (g.splitRouting) return branches;
+  return branches.filter((b) => b.includes(g.routed!.name));
+}
+
+/**
+ * Sorted names of the places a node's success outcome can write, excluding the markers it
+ * always writes (`X/idle`, `X/routed`) — i.e. the emission rule's edge and `nil` places.
+ */
+export function routingPlaces(c: CompiledWorkflow, node: string, port?: number): string[] {
+  const g = gadget(c, node);
+  const skip = new Set([g.idle.name, g.routed?.name, ...g.outputs.map((o) => o.routed?.name)]);
+  return [...new Set(successBranches(c, node, port).flat())].filter((n) => !skip.has(n)).sort();
 }

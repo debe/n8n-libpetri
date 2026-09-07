@@ -145,18 +145,18 @@ export interface CompileOptions {
  * Transition roles of the per-node gadget (README "Per-node gadget", ADR 0004):
  * - `start` / `start-unmet`: `X_start` and its per-reference twin that fires when the
  *   referenced node was skipped (the running token then carries the unmet reference);
- * - `run`: the node action; `route`: per-edge routing (one per connected output, carrying
- *   `port`; a node with no connected output has a single `X_route` with no `port`);
- *   `done`: the `X_done` that refunds the budget once every output is routed — present for
- *   every node with at least one connected output ({@link SPLIT_ROUTING_ABOVE} is 0), which
- *   is what puts the refund one scheduling cycle after the edge tokens;
+ * - `run`: the node action, which routes every output in its own `Out` spec unless the node
+ *   has more than {@link SPLIT_ROUTING_ABOVE} connected outputs; `route`: per-output
+ *   routing under that split shape only (one per connected output, carrying `port`);
+ *   `done`: the `X_done` that refunds the budget once the outcome is routed — **every**
+ *   node has one, which is what puts the refund one scheduling cycle after the edge tokens;
  * - `skip`: an empty activation; `arm`: an edge arrival of a join / OR input; `clear`:
  *   the OR-input round closer (a genuine sink, CORE-043 AC4);
- * - `retry` (`X_retry_wait`), `exhausted`, `sink` (`nil` drain), `reap` (`_halt_reap`).
+ * - `retry` (`X_retry_wait`), `exhausted`, `sink` (`nil` drain).
  */
 export type TransitionRole =
   | 'start' | 'start-unmet' | 'run' | 'route' | 'done' | 'skip' | 'arm' | 'clear' | 'retry' | 'exhausted'
-  | 'sink' | 'reap';
+  | 'sink';
 
 /**
  * Place roles. Besides the per-node gadget places (README "Per-node gadget"):
@@ -172,7 +172,7 @@ export type TransitionRole =
 export type PlaceRole =
   | 'in-data' | 'in-empty' | 'edge-data' | 'edge-empty' | 'nil' | 'ready' | 'hasdata' | 'ran' | 'free'
   | 'idle' | 'running' | 'ok' | 'routed' | 'done' | 'skipped' | 'retry' | 'tries' | 'waiting' | 'stopped'
-  | 'budget' | 'halt' | 'halted' | 'pause';
+  | 'budget' | 'halt' | 'pause';
 
 /** `tree`: the two ends are in different SCCs; `cycle`: both ends share one SCC. */
 export type EdgeKind = 'tree' | 'cycle';
@@ -192,10 +192,10 @@ export interface EdgeRef {
 }
 
 export interface TransitionInfo {
-  /** Full transition name in the flat net (`nodeId/start`, …, `_halt_reap`). */
+  /** Full transition name in the flat net (`nodeId/start`, `nodeId/run`, …). */
   readonly name: string;
   readonly role: TransitionRole;
-  /** Owning node name; `null` for the host-level `_halt_reap`. */
+  /** Owning node name; every transition of the flat net belongs to one. */
   readonly node: string | null;
   /** Output index of a per-output `route`; input index of a `clear`. */
   readonly port?: number;
@@ -212,9 +212,9 @@ export interface TransitionInfo {
 export interface PlaceInfo {
   readonly name: string;
   readonly role: PlaceRole;
-  /** Owning node name; `null` for `_budget`, `_halt`, `_halted`, `_pause`. Edge places belong to their consumer. */
+  /** Owning node name; `null` for `_budget`, `_halt`, `_pause`. Edge places belong to their consumer. */
   readonly node: string | null;
-  /** Input index for input-side places, output index for `nil` / `ok_o` / `routed_o`; `null` otherwise. */
+  /** Input index for input-side places, output index for `nil` / `ok_o` / `routed_o`; `null` otherwise (`X/routed` included). */
   readonly port: number | null;
   /** The canonical `Place` object of the flat net. */
   readonly place: Place<unknown>;
@@ -282,9 +282,9 @@ export interface OutputGadget {
   readonly edges: readonly EdgeSlot[];
   /** `X/nil_o` for a producer inside a cycle; `null` for an acyclic producer. */
   readonly nil: Place<unknown> | null;
-  /** `X/ok_o` under per-output routing (named `X/ok` when the node routes one output). */
+  /** `X/ok_o` under per-output routing; `null` when `X_run` routes this output in its own spec. */
   readonly ok: Place<unknown> | null;
-  /** `X/routed_o` under per-output routing (named `X/routed` when the node routes one output). */
+  /** `X/routed_o` under per-output routing; `null` when `X_run` routes (see `NodeGadget.routed`). */
   readonly routed: Place<unknown> | null;
 }
 
@@ -293,10 +293,13 @@ export interface NodeGadgetTransitions {
   /** One `X_start_unmet_k` per reference that carries a read arc, in reference order. */
   readonly startUnmet: readonly string[];
   readonly run: string;
-  /** One `X_route_o` per connected output (ascending index); the single `X_route` when the node has none. */
+  /**
+   * One `X_route_o` per connected output (ascending index) under per-output routing; empty
+   * when `X_run` routes in its own `Out` spec ({@link SPLIT_ROUTING_ABOVE}).
+   */
   readonly routes: readonly string[];
-  /** `X_done`; `null` only for a node with no connected output, whose `X_route` refunds the budget itself. */
-  readonly done: string | null;
+  /** `X_done`: the budget refund, one scheduling cycle after the edge tokens. Every node has one. */
+  readonly done: string;
   readonly skip: readonly string[];
   readonly arms: readonly string[];
   /** `X_clear` per OR-form input. */
@@ -337,17 +340,16 @@ export interface NodeGadget {
   readonly running: Place<unknown>;
   readonly idle: Place<unknown>;
   /**
-   * The routed outcome between `X_run` and `X_route` (ADR 0004), when there is exactly one
-   * such place: a node with no connected output, or one routing a single output (whose
-   * `X/ok_o` is named `X/ok`). `null` when the node routes several outputs — use
-   * `outputs[*].ok`.
+   * `X/routed`: the marker `X_run` writes in the same firing as the edge tokens and
+   * `X_done` consumes one scheduling cycle later to refund `_budget` (ADR 0004). `null`
+   * when the node routes per output — use `outputs[*].routed`.
    */
-  readonly ok: Place<unknown> | null;
+  readonly routed: Place<unknown> | null;
   /**
    * True when the node routes per connected output through `X/ok_o` → `X_route_o` →
-   * `X/routed_o` → `X_done`, i.e. whenever it has at least one connected output
-   * ({@link SPLIT_ROUTING_ABOVE} is 0). False only for a node with no connected output,
-   * whose single `X_route` refunds `_budget` itself.
+   * `X/routed_o` → `X_done`, i.e. when it has more than {@link SPLIT_ROUTING_ABOVE}
+   * connected outputs. False when `X_run` routes every output in its own `Out` spec and
+   * marks the single `X/routed`.
    */
   readonly splitRouting: boolean;
   readonly done: Place<unknown>;
@@ -374,8 +376,12 @@ export interface NodeGadget {
 
 export interface SharedPlaces {
   readonly budget: Place<unknown>;
+  /**
+   * `_halt`: the halted run's terminal marker. A fatal node error writes it and **nothing
+   * consumes it** — every transition that could move a pending activation on inhibits on it,
+   * so the run quiesces with its arrivals intact (README "Retries, halt, cancellation").
+   */
   readonly halt: Place<unknown>;
-  readonly halted: Place<unknown>;
   /** `_pause`: the control terminal for Wait and destination-node stops (README "Retries, halt, cancellation"). */
   readonly pause: Place<unknown>;
 }

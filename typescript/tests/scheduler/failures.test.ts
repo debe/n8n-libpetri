@@ -9,7 +9,7 @@ import { PetriScheduler, UNMET_REFERENCE_MESSAGE_TEMPLATE } from '../../src/sche
 import { conn, expressionRef, fanOut, linear, node, workflow } from '../fixtures/workflows.js';
 import {
   FakeHost, callsOf, execute, fakeHooks, fakeNodeHelpers, fakeWorkflow, items, newRunExecutionData, ranNodes,
-  transitionsFailed, transitionsStarted,
+  transitionsFailed, transitionsStarted, tokensResting,
 } from './support.js';
 
 const START = items({ n: 1 });
@@ -85,9 +85,9 @@ describe('fatal errors: what n8n\'s loop would have thrown out of run()', () => 
     expect(ranNodes(r.calls)).toEqual(['Trigger', 'A']);
     expect(r.runData.B).toBeUndefined();
     expect(r.runData.C).toBeUndefined();
-    // The action never throws (EXEC-030): the halt branch was taken, the reap fired, C never started.
+    // The action never throws (EXEC-030): the halt branch was taken, `_halt` rests, C never started.
     expect(transitionsFailed(r.store)).toEqual([]);
-    expect(transitionsStarted(r.store, (n) => n === '_halt_reap')).toHaveLength(1);
+    expect(tokensResting(r.store, '_halt')).toBe(1);
     expect(transitionsStarted(r.store, (n) => n === 'id:C/start')).toHaveLength(0);
     expect(r.scheduler.diagnostics.some((d) => d.includes("node 'B': fatal error"))).toBe(true);
   });

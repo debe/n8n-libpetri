@@ -1,5 +1,5 @@
 /**
- * Spike 7 — halt: `_halt` inhibits every start, `_halt_reap` clears the net.
+ * Spike 7 — halt: `_halt` inhibits every start, and a reap can clear the net.
  *
  * A fatal node error is an `xor` branch of `X_run` that deposits `_halt` (never a throw).
  * Every `X_start` carries `inhibitor(_halt)` and `inhibitor(_halted)` (CORE-031), so
@@ -8,6 +8,17 @@
  * An action already in flight when the halt lands still completes (EXEC-040 waits for
  * it) and its output IS deposited — after the reap, so it stays in the final marking.
  * That token is the reported consequence of "in-flight actions finish".
+ *
+ * **This is not the shipped shape.** What the spike pins is libpetri's semantics — that
+ * reset arcs apply at firing time, and that an in-flight action's output lands after the
+ * firing that reaped the places it would have used. The compiler has **no reap**: `_halt`
+ * is written once and never consumed, so it is the halted run's terminal marker and every
+ * start / retry-wait / exhausted / skip / arm / clear transition inhibits on it. The reap
+ * was deleted in M6 precisely because of the race this spike's last assertion measures —
+ * once `X_run` routed its own outcome, a sibling resolving in the same executor cycle
+ * deposited its arrivals later than the halt snapshot and earlier than the reap, and the
+ * activation was lost outright (README "Retries, halt, cancellation"; ADR 0004, "The reap
+ * is gone"; `tests/scheduler/control.test.ts`).
  */
 import { PetriNet, Transition, one, outPlace, tokenOf } from 'libpetri';
 import {

@@ -5,7 +5,7 @@
  * (error item) re-run, and `metadata.resumeError` disabling retries.
  */
 import { conn, node, retry as retryFixture, workflow } from '../fixtures/workflows.js';
-import { callsOf, execute, items, ranNodes, sleep, transitionsFailed, transitionsStarted } from './support.js';
+import { callsOf, execute, items, ranNodes, sleep, transitionsFailed, transitionsStarted, tokensResting,} from './support.js';
 
 const START = items({ n: 1 });
 
@@ -60,7 +60,7 @@ describe('retryOnFail', () => {
     expect(callsOf(r.calls, 'A').slice(-4)).toEqual(['handleNodeExecutionError(A)', 'upsertTaskData(A)', 'pushExecutionStack(A)', 'hook:nodeExecuteAfter(A)']);
     expect(r.runExecutionData.executionData!.nodeExecutionStack.map((e) => e.node.name)).toEqual(['A']);
     expect(transitionsStarted(r.store, (n) => n === 'id:A/exhausted')).toHaveLength(1);
-    expect(transitionsStarted(r.store, (n) => n === '_halt_reap')).toHaveLength(1);
+    expect(tokensResting(r.store, '_halt')).toBe(1);
   });
 
   it('exhausted under continueRegularOutput: the input passes through as output and the successor runs', async () => {

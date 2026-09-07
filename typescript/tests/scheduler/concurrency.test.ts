@@ -204,13 +204,15 @@ describe('cancellation with several nodes in flight', () => {
     // where n8n's loop leaves it. Nothing of `D` is recorded.
     expect(r.runData.D).toBeUndefined();
     expect(callsOf(r.calls, 'D')).not.toContain('runNode(D)');
-    expect(transitionsStarted(r.store, (n) => n === 'id:D/route')).toHaveLength(0);
+    // `D`'s start still fires — the entry is there — but `X_run` polls `shouldStopExecuting()`
+    // and takes the stopped branch, which marks no `X/routed`, so `id:D/done` never fires.
+    expect(transitionsStarted(r.store, (n) => n === 'id:D/done')).toHaveLength(0);
     const stack = r.runExecutionData.executionData!.nodeExecutionStack;
     expect(stack.map((e) => e.node.name)).toEqual(['D']);
     expect(stack[0]!.source).toEqual({ main: [{ previousNode: 'B', previousNodeOutput: 0, previousNodeRun: 0 }] });
   });
 
-  it('a cancellation that lands between X_run and X_route leaves the ok token, which only mode cancelled can encode', async () => {
+  it('a cancellation that lands after X_run leaves the routed unit, which only mode cancelled can encode', async () => {
     const r = await execute(linear, {
       A: async ({ host }) => { await sleep(5); host.cancel(); return { data: [items({ a: 1 })] }; },
     }, { startItems: START, budget: 4 });

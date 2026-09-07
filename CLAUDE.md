@@ -19,7 +19,10 @@ budget, marking codec) and the design principles live in the root
 - Every transition carries a real `Out` spec. Never `null`, never `skipOutputValidation`.
 - One net serves execution and verification. No separate "verification net".
 - The net decides what runs. No host-side dispatch queue, permit gating or scheduler policy.
-- Never call `executor.run(timeoutMs)`; use `close()` (libpetri's timeout branch leaks the loop).
+- The scheduler runs the net to quiescence and stops it only through `close()`. libpetri's
+  `run(ms, 'close')` is sound (5.0.0) but is *not* n8n's timeout: `shouldStopExecuting()` sets
+  the `status` / `timedOut` fields the caller reads, and n8n polls it between activations —
+  see ADR 0004, "The timeout is n8n's, not the net's".
 - Every n8n behaviour we do not reproduce is recorded in `docs/divergences.md`. No silent skips.
 - Reporting rule: only a minority of n8n's cases drive the scheduler loop — 44 of the
   execution-engine suite's 1657 (`src/conformance/classify.ts`), 44 of `packages/core`'s 2124,
@@ -44,17 +47,12 @@ House style mirrors `libpetri/typescript`: ESM-only, strict + `noUncheckedIndexe
 tests under `tests/` (not beside sources), vitest, tsup, no ESLint/Prettier. Doc comments cite
 libpetri requirement IDs (`IO-015`, `EXEC-003`, `MOD-010`, …).
 
-### libpetri version requirement
+### libpetri
 
-This project needs libpetri **newer than the published 4.1.0** — it relies on the bit-31
-sparse-enablement fix, the exact-explanation IO-015 validator (`and` unordered, an inner `xor` no
-longer pre-empting an enclosing one), the strict `DeadlockFree` / `TerminatesAtSink` split, and
-`run(ms, 'close')`. Until that release lands, develop against a local checkout of libpetri's
-`main`: `npm link ../../libpetri/typescript`.
-
-**When the release publishes, bump `libpetri` in `typescript/package.json` to it** and drop the
-link. Until then CI resolves `^4.1.0` from the registry, which is *older, different code* despite
-the matching version string, so CI is not currently testing what we ship.
+`libpetri@^5.0.0` — the release that made [IO-015] an exact-explanation search (`And` unordered,
+an inner `Xor` no longer pre-empting an enclosing one), split [VER-002] into strict `DeadlockFree`
+and `TerminatesAtSink`, added the `run(ms, 'close')` timeout policy, and fixed sparse enablement at
+bit 31. The compiler and the verifier both depend on those semantics; do not downgrade.
 
 ### n8n conformance (`scripts/`)
 

@@ -51,7 +51,7 @@ Three constraints were fixed before any code:
 
 | Family | libpetri property | Desirable answer |
 |---|---|---|
-| proper completion | M4: `joinedOrDeadLettered(p)` per join-input `ready_i` and per edge data place, sinks `_pause`, `_halted`; plus `placeBound(ready_i, capacity)` per join input. **M5: the quiescent classes of the state-class graph, classified (§§9–10); the SMT form is one whole-net `deadlockFree`** | no reachable quiescent marking holds a token there; no more arrivals pile up than the gadget can pair |
+| proper completion | M4: `joinedOrDeadLettered(p)` per join-input `ready_i` and per edge data place, sinks `_pause`, the halt marker; plus `placeBound(ready_i, capacity)` per join input. **M5: the quiescent classes of the state-class graph, classified (§§9–10); the SMT form is one whole-net `deadlockFree`** | no reachable quiescent marking holds a token there; no more arrivals pile up than the gadget can pair |
 | dead nodes | `unreachable({X/running})` per node | *no verdict* — the check reports `violated` when libpetri proves the unreachability, and `unknown` otherwise (§5) |
 | no double activation | `placeBound(X/running, 1)` per node | proven |
 | budget | `placeBound(_budget, k)` plus the two-phase P-semiflow | proven, and the semiflow is among the validated invariants |
@@ -75,11 +75,13 @@ places sinks — which drains the question of content. And a run that strands on
 another finishes is not a deadlock at all: the net quiesces, which is how every execution
 ends. The question has to be asked **per place**: *did anything get left behind here?*
 
-`_pause` and `_halted` are declared as the only sinks (VER-002) because they are the two
+`_pause` and the halt marker are declared as the only sinks (VER-002) because they are the two
 **designed** terminal markings (README "Retries, halt, cancellation"): a Wait node or a
-destination stop deposits `_pause`, and a fatal error deposits `_halt`, which `_halt_reap`
-turns into `_halted` after clearing the edge, `in`, `ready` and `hasdata` places. A marking
-holding either is terminal on purpose, and a token still sitting on a `ready_i` place there
+destination stop deposits `_pause`, and a fatal error deposits `_halt`. (Through M5 a
+`_halt_reap` turned `_halt` into `_halted` after clearing the edge, `in`, `ready` and
+`hasdata` places, and `_halted` was the declared sink; since M6 there is no reap and `_halt`
+itself is the sink — ADR 0004, "The reap is gone".) A marking holding either is terminal on
+purpose, and a token still sitting on a `ready_i` place there
 is the codec's business, not a defect. Declaring them leaves exactly the genuinely stuck runs.
 
 ### 3. The declared sinks are inert on `joinedOrDeadLettered`, so a paused witness is downgraded — **superseded by §10**
@@ -96,8 +98,8 @@ still on its `in` place — a *designed* terminal marking the codec writes back 
 the query calls it a stranding. On the three-way `fanOut` fixture all three edges come back
 `violated` in 1.3–2.7 s with a confirmed witness and `_pause` in the marking.
 
-So `verify()` downgrades a violation whose witness marking holds `_pause`, `_halt` or
-`_halted` to `unknown` with that reason, keeping the witness as evidence. It is not a proof
+So `verify()` downgrades a violation whose witness marking holds `_pause` or `_halt`
+to `unknown` with that reason, keeping the witness as evidence. It is not a proof
 either — Spacer returns one witness, and a real stranding could hide behind it. Closing the
 gap needs a per-place quiescence property that honours declared sinks: `deadlockFree` honours
 them but asks about the whole net, and on this net that is violated by every clean run. Both
@@ -307,7 +309,7 @@ SMT form is §10.
 ### 10. The pause filter is a classification, not a query — and it widens by codec mode
 
 §3 is the measured fact M4 could not work around: every workflow has reachable quiescent
-markings holding `_pause` (a Wait node or a destination stop) or `_halted`, because every
+markings holding `_pause` (a Wait node or a destination stop) or `_halt`, because every
 `X_run` offers those outcomes. In a workflow with a second branch in flight such a marking
 also holds an unconsumed arrival on an `in` / `ready` / `hasdata` place, which the marking
 codec writes back (ADR 0005) and which is therefore not a stranding. (On an unbranched
@@ -322,10 +324,9 @@ Enumeration does not have that problem, because a class is an object to be class
 than a query to be posed. `state-class.ts` puts every quiescent class in one of three boxes:
 
 1. **resting** — every token is on a place whose role is in `REST_ROLES` (`idle`, `done`,
-   `skipped`, `free`, `tries`, `budget`, `halted`, `pause`, `waiting`, `stopped`, `ran`,
+   `skipped`, `free`, `tries`, `budget`, `halt`, `pause`, `waiting`, `stopped`, `ran`,
    `nil`). A completed run.
-2. **a designed terminal** — it holds `_pause` / `_halt` / `_halted` / `X/waiting` /
-   `X/stopped`. Here the rest set widens, and **which** widening applies is decided by the
+2. **a designed terminal** — it holds `_pause` / `_halt` / `X/waiting` / `X/stopped`. Here the rest set widens, and **which** widening applies is decided by the
    codec mode the scheduler encodes that terminal with (`petri-scheduler.ts`):
    - a **paused** class (mode `pause`) widens by `in-data`, `ready`, `hasdata`, `retry` —
      `PAUSE_REST_ROLES`, exactly what `encodeMarking` pushes back onto `nodeExecutionStack`
@@ -342,18 +343,19 @@ than a query to be posed. `state-class.ts` puts every quiescent class in one of 
 `encodeMarking` in mode `pause` puts `X/in_empty` and an OR input's edge places in its
 `inFlight` list and **throws** a `CodecError` on them. Classifying as residue a marking the
 codec refuses to encode is precisely the direction that hides a defect. The structural reason
-the split is also the *right* one: `X_skip` and the `arm` transitions inhibit on `_halt` /
-`_halted` and not on `_pause` (`gadget.ts`), so under a pause those places drain on their own
+the split is also the *right* one: `X_skip` and the `arm` transitions inhibit on `_halt`
+and not on `_pause` (`gadget.ts`), so under a pause those places drain on their own
 and a token at rest on one is real pending work.
 
 The widening rather than a blanket skip stays deliberate: skipping a paused class outright is
-the only move in this design that could *hide* a defect. `halt` is out of both widened sets on
-purpose — a quiescent marking still holding `_halt` means `_halt_reap` never fired, which is a
-defect — and so are `ok`, `routed` and `running`.
+the only move in this design that could *hide* a defect. Since M6 `halt` is a **rest** role in
+all three sets — `_halt` is never consumed, so a quiescent marking holding it is the halted
+terminal rather than the evidence of a reap that never fired — while `ok`, `routed` and
+`running` stay out of every widening.
 
 Measured over every fixture plus three probe shapes, at k = 1 **and** k = 2: the roles that
 occur in a designed-terminal quiescent class are `in-data`, `ready`, `hasdata` and `retry`
-under a pause, and those plus `in-empty`, `edge-data`, `edge-empty` under `_halted`. Four of
+under a pause, and those plus `in-empty`, `edge-data`, `edge-empty` under a halt. Four of
 those seven appear only at k ≥ 2, where a second branch is in flight when the halt lands or
 while a node sits in its retry wait — which is why the earlier k = 1-only sweep concluded
 "only `in-data`, `ready` and `hasdata` ever appear" and why that sentence was wrong. Every role that occurs is in the set its own terminal widens
@@ -391,7 +393,7 @@ stranding in it is real whatever the BFS did next. Only the *absence* of one nee
 completeness. The same holds for a place bound exceeded, for two `running` places co-marked
 and for a `running` place *reached* (the dead-nodes family's negative direction), and all
 four now report from a truncated graph. Where the prefix happens to contain the witness this
-also saves the solver query outright; where it does not — `switch20`'s 200 006 classes mark
+also saves the solver query outright; where it does not — `switch20`'s 200 003 classes mark
 only two of its 22 `running` places — the fallback still runs, and on that fixture it earns
 its keep.
 
@@ -490,9 +492,10 @@ The measurements are in [`docs/verification.md`](../verification.md). The shape 
 result, after M5:
 
 **The headline property closes.** Proper completion — *can this workflow strand a branch?* —
-is `proven` in 1–111 ms on every acyclic fixture (50 classes for a 4-node chain, 393 for the
-diamond, 2048 for a 41-node chain, 6151 for a 9-node fan-out, 47 924 for the 21-node
-generated workflow), and `violated` in 25 ms on `ifBothOutputs`, where it strands
+is `proven` in 1–120 ms on every acyclic fixture (43 classes for a 4-node chain, 330 for the
+diamond, 1967 for a 41-node chain, 5894 for a 9-node fan-out, 41 147 for the 21-node
+generated workflow — the M5 figures were 50 / 393 / 2048 / 6151 / 47 924, before M6 shrank the
+gadget), and `violated` in 25 ms on `ifBothOutputs`, where it strands
 `Merge/ready_0` and `Merge/hasdata` — the already-registered divergence #2, caught by the
 property that exists to catch it, with the firing path that reaches the stuck marking. M4
 measured every one of those as `unknown` at 30 s, 60 s and 600 s.
@@ -501,10 +504,10 @@ measured every one of those as `unknown` at 30 s, 60 s and 600 s.
 which OOMed a 4 GB heap at 49 nodes; M5 pays that only for the budget semiflow (§12) and
 refuses it above a measured join count (§9), so a 41-node chain verifies end to end and a
 49-node branchy one reports `unknown` instead of aborting. The new wall is the class count,
-and it is about *shape* rather than size: depth is nearly free (2048 classes at 41 nodes),
-independent width is not (6151 at 9 nodes, 200 000+ at 22), and a cycle is unbounded. It is
+and it is about *shape* rather than size: depth is nearly free (1967 classes at 41 nodes),
+independent width is not (5894 at 9 nodes, 200 000+ at 22), and a cycle is unbounded. It is
 also a statement about **k = 1**, which is what `verify()` compiles by default: at k = 2 the
-same 41-node chain costs 31 448 classes and at k = 4 it truncates.
+same 41-node chain costs 29 767 classes and at k = 4 it truncates.
 
 **A cycle is no longer a blank.** `loopOverItems` — n8n's most common cyclic shape — comes
 back `bounded` at `k = 21` cyclic-node runs in 3.9 s (ten complete passes of its two-node
@@ -529,7 +532,7 @@ a class (§9), which on the cyclic fixtures saves a whole 30 s timeout per repor
 `proven` is genuinely available.
 
 For the *bound* families it earns its place outright. On `switch20`, whose graph truncates
-after marking only two of 22 `running` places in 200 006 classes, z3 proves
+after marking only two of 22 `running` places in 200 003 classes, z3 proves
 `placeBound(_budget, 1)` and all 22 `placeBound(X/running, 1)` — 23 of that report's 24
 proofs, at about 2.9 s a query. What it cannot do on the same net is the *witness* direction:
 `dead-nodes` sends 20 `unreachable` queries and gets 20 timeouts, 11 minutes for nothing,

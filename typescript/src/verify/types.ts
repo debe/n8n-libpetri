@@ -67,9 +67,9 @@ export type CheckSubject =
 export interface CounterexampleStep {
   /** The flat transition name, `_b<k>` branch suffix included (the flattener's own name). */
   readonly transition: string;
-  /** The net transition the branch belongs to (`nodeId/run`, `_halt_reap`, …). */
+  /** The net transition the branch belongs to (`nodeId/run`, `nodeId/route_0`, …). */
   readonly source: string;
-  /** Owning node name, `null` for the host-level `_halt_reap`. */
+  /** Owning node name, `null` for a host-level transition that belongs to no node. */
   readonly node: string | null;
   readonly role: TransitionRole | null;
   readonly port?: number;
@@ -203,7 +203,7 @@ export interface StateSpaceSummary {
   readonly elapsedMs: number;
   /** Classes nothing can fire from: the markings a run can come to rest in. */
   readonly quiescent: number;
-  /** Of those, the designed terminals: a paused (`_pause`) or halted (`_halted`) run. */
+  /** Of those, the designed terminals: a paused (`_pause`) or halted (`_halt`) run. */
   readonly terminal: number;
   /** Places some quiescent class leaves pending work on. Non-zero means a stranding. */
   readonly strandedPlaces: number;
@@ -252,7 +252,7 @@ export interface InvariantSummary {
   /** Basis ∪ added semiflows: the set every query's rule bodies carry. */
   readonly encoded: number;
   /**
-   * Rendered `w·_budget + w·Σ(running + ok + retry) = w·k` when it survives validation;
+   * Rendered `w·_budget + w·Σ_X(running + retry + in-flight) = w·k` when it survives validation;
    * `null` when no law covering `_budget` and every `X/running` was found (the H1 guard
    * drops any row whose support touches a reset or consume-all place).
    */

@@ -17,6 +17,8 @@ export const SHAPES = {
   merge: { inputCount: 2, outputCount: 1 },
   mergeChoose: { inputCount: 2, outputCount: 1, requiredInputs: [0, 1] },
   loop: { inputCount: 1, outputCount: 2, loopNode: true, outputNames: ['loop', 'done'] },
+  /** A three-output router: at `SPLIT_ROUTING_ABOVE`, so it still routes inside `X_run`. */
+  switch3: { inputCount: 1, outputCount: 3 },
   /** A four-output router: above `SPLIT_ROUTING_ABOVE`, so it routes per output. */
   switch4: { inputCount: 1, outputCount: 4 },
   /** Merge v3 chooseBranch with `numberInputs: 3`: `requiredInputs` stays `[0, 1]`. */
@@ -224,6 +226,20 @@ export const ifBothOutputs = workflow('if-both-outputs', [
   conn('IF', 0, 'C', 0), conn('IF', 1, 'C', 0),
   conn('C', 0, 'Merge', 0), conn('Trigger', 0, 'Merge', 1),
   conn('Merge', 0, 'End', 0),
+], 'Trigger');
+
+/**
+ * A three-output router: the largest node that still routes inside `X_run`
+ * ({@link SPLIT_ROUTING_ABOVE}). Not in {@link ALL} — it exists to measure the threshold
+ * against `fanOut4`, its one-output-wider twin (`tests/compiler/routing.test.ts`).
+ */
+export const fanOut3 = workflow('fan-out-3', [
+  node('Trigger', 'trigger', [0, 0]),
+  node('Q', 'switch3', [200, 0]),
+  ...Array.from({ length: 3 }, (_, i) => node(`S${i}`, 'set', [400, i * 100])),
+], [
+  conn('Trigger', 0, 'Q', 0),
+  ...Array.from({ length: 3 }, (_, i) => conn('Q', i, `S${i}`, 0)),
 ], 'Trigger');
 
 /** Trigger → Q (four connected outputs, routed per output) → S0…S3. */

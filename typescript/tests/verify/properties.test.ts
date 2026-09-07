@@ -48,7 +48,7 @@ describeZ3('verify: properties', () => {
       }
     });
 
-    it('the two-phase semiflow _budget + sum(running + ok) = k is among the invariants', { timeout: CASE_TIMEOUT_MS }, async () => {
+    it('the two-phase semiflow _budget + sum(running + routed) = k is among the invariants', { timeout: CASE_TIMEOUT_MS }, async () => {
       const report = await verify(diamond, { ...base, budget: 2, properties: ['budget'] });
       const semiflow = report.invariants.budgetSemiflow;
       expect(semiflow, digest(report)).not.toBeNull();
@@ -56,9 +56,10 @@ describeZ3('verify: properties', () => {
       expect(semiflow).toMatch(/= 2$/);
       for (const g of compile(diamond, { budget: 2 }).netMap.nodes) {
         expect(semiflow, `${g.node} is not in the semiflow`).toContain(g.running.name);
-        // The in-flight place: `X/ok` for a node routing one (or no) output, `X/ok_o` for a
-        // node routing per output — where the enumeration returns one law per output.
-        const inFlight = g.ok?.name ?? g.outputs[0]!.ok!.name;
+        // The in-flight place: `X/routed` for a node that routes inside `X_run`, `X/ok_o`
+        // for one above `SPLIT_ROUTING_ABOVE` — where the enumeration returns one law per
+        // output rather than one folded law.
+        const inFlight = g.routed?.name ?? g.outputs[0]!.ok!.name;
         expect(semiflow, `${g.node} holds no in-flight place in the semiflow`).toContain(inFlight);
       }
       const structural = report.checks.find((c) => c.subject.kind === 'net')!;
@@ -259,7 +260,7 @@ describeZ3('verify: properties', () => {
       expect(quiescence.length).toBe(1 + readyPlaces + compiled.edgeDataPlaces.length);
       const sinks = quiescence[0]!.query.sinks;
       expect(sinks).toContain('_pause');
-      expect(sinks).toContain('_halted');
+      expect(sinks).toContain('_halt'); // never consumed: the halted run's terminal marker
       expect(sinks.some((p) => p.endsWith('/idle'))).toBe(true);
       expect(sinks.some((p) => p.endsWith('/done'))).toBe(true);
       expect(sinks.some((p) => p.endsWith('/ready_0'))).toBe(false);
@@ -335,7 +336,16 @@ describeZ3('verify: properties', () => {
       expect(whole.reason).toMatch(/deadlockFree fallback \(VER-002, structural rest set as sinks\) was not asked/);
       expect(whole.reason).toMatch(/can never return proven/);
       expect(whole.reason).toMatch(/not a proof/);
-      expect(checksOf(report, 'proper-completion').some((c) => c.verdict === 'proven'), digest(report)).toBe(false);
+      // Nothing borrows a proof from the truncated prefix: every row the *graph* decides is
+      // `bounded`. The one row the solver still closes is the structural join-slot bound —
+      // a `placeBound`, not a reachability question, so it is sound on a truncated graph.
+      for (const c of checksOf(report, 'proper-completion')) {
+        if (c.query.route === 'smt') continue;
+        expect(c.verdict, `${c.name}: ${digest(report)}`).toBe('bounded');
+      }
+      expect(checksOf(report, 'proper-completion')
+        .filter((c) => c.verdict === 'proven')
+        .map((c) => c.subject.kind), digest(report)).toEqual(['join-input']);
     });
 
     it('an acyclic workflow whose graph truncates has nothing to bound, and stays unknown — with the query really asked', { timeout: CASE_TIMEOUT_MS }, async () => {
@@ -419,7 +429,8 @@ describeZ3('verify: properties', () => {
 
     it('carries the solver-free route\'s own numbers, so a truncation is visible in the JSON', { timeout: CASE_TIMEOUT_MS }, async () => {
       const report = await verify(diamond, { ...base, properties: ['proper-completion'] });
-      expect(report.stateSpace.classes).toBe(393);
+      // Re-measured with the collapsed outcome (ADR 0004): 393 with X/ok + X_route per node.
+      expect(report.stateSpace.classes).toBe(330);
       expect(report.stateSpace.complete).toBe(true);
       expect(report.stateSpace.maxClasses).toBe(200_000);
       expect(report.stateSpace.strandedPlaces).toBe(0);

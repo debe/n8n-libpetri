@@ -66,14 +66,17 @@ describe('the solver-free route (VER-010)', () => {
     // The class counts are exact: the graph is deterministic, so a moved number means the
     // net changed and the doc is stale. `npx tsx tests/verify/measure-graph.ts` re-measures.
     const cases: ReadonlyArray<readonly [string, Parameters<typeof verify>[0], number, 'proven' | 'violated']> = [
-      ['linear', linear, 50, 'proven'],
-      ['diamond', diamond, 393, 'proven'],
-      ['fanOut', fanOut, 99, 'proven'],
-      ['multiProducer', multiProducer, 245, 'proven'],
-      ['chooseBranch', chooseBranch, 108, 'proven'],
-      ['ifBothOutputs', ifBothOutputs, 889, 'violated'],
-      ['chain40 (41 nodes)', generateChain(40), 2048, 'proven'],
-      ['wide8 (9 nodes)', generateFanOut(8), 6151, 'proven'],
+      // Counts before the routed outcome was collapsed into `X_run` (ADR 0004), for the
+      // record: 50, 393, 99, 245, 108, 889, 2048, 6151. Removing one place and one
+      // transition per node removed a class per activation, most on the join-heavy shapes.
+      ['linear', linear, 43, 'proven'],
+      ['diamond', diamond, 330, 'proven'],
+      ['fanOut', fanOut, 90, 'proven'],
+      ['multiProducer', multiProducer, 218, 'proven'],
+      ['chooseBranch', chooseBranch, 77, 'proven'],
+      ['ifBothOutputs', ifBothOutputs, 732, 'violated'],
+      ['chain40 (41 nodes)', generateChain(40), 1967, 'proven'],
+      ['wide8 (9 nodes)', generateFanOut(8), 5894, 'proven'],
     ];
 
     for (const [label, workflow, classes, verdict] of cases) {
@@ -96,9 +99,10 @@ describe('the solver-free route (VER-010)', () => {
     // the doc's table fixes. The class count grows sharply with the budget — a second unit
     // lets independent branches interleave — so the k = 2 counts are pinned too: "41 nodes
     // closes in 106 ms" is a statement about k = 1 and must not be read as a general ceiling.
+    // Before the collapse: 1551 and 31448.
     const atBudgetTwo: ReadonlyArray<readonly [string, Parameters<typeof verify>[0], number]> = [
-      ['diamond', diamond, 1551],
-      ['chain40 (41 nodes)', generateChain(40), 31448],
+      ['diamond', diamond, 1094],
+      ['chain40 (41 nodes)', generateChain(40), 29767],
     ];
     for (const [label, workflow, classes] of atBudgetTwo) {
       it(`${label} at k = 2: ${classes} classes`, { timeout: CASE_TIMEOUT_MS }, async () => {
@@ -185,9 +189,9 @@ describe('the solver-free route (VER-010)', () => {
     it('the rest sets are the documented ones, and each widening matches the codec mode of its terminal', () => {
       // The structural rest set: a token here is residue of a finished run.
       expect([...REST_ROLES].sort()).toEqual([
-        'budget', 'done', 'free', 'halted', 'idle', 'nil', 'pause', 'ran', 'skipped', 'stopped', 'tries', 'waiting',
+        'budget', 'done', 'free', 'halt', 'idle', 'nil', 'pause', 'ran', 'skipped', 'stopped', 'tries', 'waiting',
       ]);
-      expect([...TERMINAL_ROLES].sort()).toEqual(['halt', 'halted', 'pause', 'stopped', 'waiting']);
+      expect([...TERMINAL_ROLES].sort()).toEqual(['halt', 'pause', 'stopped', 'waiting']);
       // A *paused* class is encoded in codec mode `pause`, which pushes back the arrivals and
       // the retry unit and throws a CodecError on `X/in_empty` and on an OR input's edge
       // places. So the pause widening is exactly the four it writes back — no more.
@@ -195,13 +199,13 @@ describe('the solver-free route (VER-010)', () => {
       expect(pauseWidening).toEqual(['hasdata', 'in-data', 'ready', 'retry']);
       // A *halted* class is encoded in mode `cancelled`, the one mode that legitimately sees
       // an undrained marking: it also handles the empty and the edge places, which a halt
-      // stops draining (X_skip and the arms inhibit on _halt / _halted, not on _pause).
+      // stops draining (X_skip and the arms inhibit on _halt, not on _pause).
       const haltWidening = [...HALT_REST_ROLES].filter((r) => !PAUSE_REST_ROLES.has(r)).sort();
       expect(haltWidening).toEqual(['edge-data', 'edge-empty', 'in-empty']);
-      for (const set of [PAUSE_REST_ROLES, HALT_REST_ROLES]) {
-        // `halt` stays out of both: a quiescent marking holding `_halt` means the reap never
-        // fired, which is a defect and not a designed terminal.
-        expect(set.has('halt')).toBe(false);
+      // `_halt` is never consumed, so it *is* the halted terminal's marker and rests in
+      // every one of the three sets; `ok` and `running` are pending work in all of them.
+      for (const set of [REST_ROLES, PAUSE_REST_ROLES, HALT_REST_ROLES]) {
+        expect(set.has('halt')).toBe(true);
         expect(set.has('ok')).toBe(false);
         expect(set.has('running')).toBe(false);
       }
@@ -209,7 +213,7 @@ describe('the solver-free route (VER-010)', () => {
       expect(restRolesFor('pause')).toBe(PAUSE_REST_ROLES);
       expect(restRolesFor('halt')).toBe(HALT_REST_ROLES);
       // A marking holding both is encoded on the halt path, so the halt set classifies it.
-      expect(terminalKindOf(['pause', 'halted'])).toBe('halt');
+      expect(terminalKindOf(['pause', 'halt'])).toBe('halt');
       expect(terminalKindOf(['waiting', 'idle'])).toBe('pause');
       expect(terminalKindOf(['idle', 'done', null])).toBe('none');
     });
@@ -219,7 +223,7 @@ describe('the solver-free route (VER-010)', () => {
       // codec's write-back surface" — but `encodeMarking` in mode `pause` puts `g.inEmpty` in
       // its inFlight list and *throws* on it. Under a halt (mode `cancelled`) it is dropped
       // with a diagnostic, which is right for a run that is over. Structurally the split is
-      // exact: X_skip inhibits on _halt / _halted and not on _pause, so an unconsumed empty
+      // exact: X_skip inhibits on _halt and not on _pause, so an unconsumed empty
       // can only come to rest under a halt in the first place.
       expect(PAUSE_REST_ROLES.has('in-empty')).toBe(false);
       expect(HALT_REST_ROLES.has('in-empty')).toBe(true);
@@ -311,7 +315,9 @@ describe('the solver-free route (VER-010)', () => {
         compiled.net, markingStateOf(compiled.initialMarking(null)), compiled.netMap, 1_000);
       expect(space.usable).toBe(true);
       expect(space.complete).toBe(false);
-      expect(space.classes).toBeLessThanOrEqual(1_000 + 1);
+      // The cap is checked per expansion, so the class that trips it can carry its own
+      // successors past the bound: what it promises is O(cap), not exactly cap.
+      expect(space.classes).toBeLessThanOrEqual(1_000 + 8);
       expect(space.truncationCause({ hasCycle: true, independentBranches: false })).toBe('cycle');
       expect(space.truncationCause({ hasCycle: false, independentBranches: true })).toBe('parallelism');
       // Neither shape: the cap was simply set below what the workflow needs. Reporting
@@ -332,7 +338,7 @@ describe('the solver-free route (VER-010)', () => {
     });
 
     it('a cap set too low is reported as a cap, not as parallelism the workflow does not have', { timeout: CASE_TIMEOUT_MS }, async () => {
-      // `linear` is Trigger -> A -> B -> C: no cycle, no branching node, 50 classes. At a
+      // `linear` is Trigger -> A -> B -> C: no cycle, no branching node, 43 classes. At a
       // 10-class cap the old cause was `parallelism`, and every reason read "independent
       // parallel branches blow the class count up combinatorially" — about a chain.
       const report = await completionOf(linear, 10);

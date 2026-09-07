@@ -86,7 +86,7 @@ describe('structuralHash', () => {
 describe('the budget semiflow across a halt (README "Retries, halt, cancellation")', () => {
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-  it('_budget + Σ(running + ok + retry) = k holds at quiescence when a halt lands while a retry is pending: the reap leaves X/retry alone', async () => {
+  it('_budget + Σ(running + routed + retry) = k holds at quiescence when a halt lands while a retry is pending: nothing clears X/retry', async () => {
     // T -> A (retryOnFail, wait 5000 ms) and T -> B at k = 2: A_run takes the retry branch,
     // B_run halts 30 ms later. The pending retry strands (retry_wait and exhausted inhibit on
     // _halt / _halted), still holding its budget unit.
@@ -111,33 +111,28 @@ describe('the budget semiflow across a halt (README "Retries, halt, cancellation
         };
         return halt;
       }
-      // T forwards its input as data on every edge.
-      const forward: TransitionAction = async (ctx) => { ctx.output(g.ok!, ctx.input(g.running)); ctx.output(g.idle, null); };
-      return forward;
-    }).withActions((info, map) => {
-      if (info.role !== 'route' || info.node !== 'T') return null;
-      const g = map.node('T');
-      // X_route only deposits the edge tokens and marks routed now; X_done refunds the
-      // budget one scheduling cycle later (SPLIT_ROUTING_ABOVE = 0).
-      const route: TransitionAction = async (ctx) => {
-        const v = ctx.input(g.ok!);
+      // T forwards its input as data on every edge and marks X/routed; X_done refunds the
+      // budget one scheduling cycle later (ADR 0004).
+      const forward: TransitionAction = async (ctx) => {
+        const v = ctx.input(g.running);
         for (const out of g.outputs) for (const e of out.edges) ctx.output(e.data, v);
-        ctx.output(g.outputs[0]!.routed!, null);
+        ctx.output(g.routed!, null);
+        ctx.output(g.idle, null);
       };
-      return route;
+      return forward;
     });
     const { marking, store } = await runCompiled(c, c.initialMarking('items'));
     expect(failed(store)).toEqual([]);
-    expect(started(store, (n) => n === '_halt_reap')).toHaveLength(1);
     expect(started(store, (n) => n.endsWith('/retry_wait') || n.endsWith('/exhausted'))).toEqual([]);
     const a = c.netMap.node('A');
     const held = c.netMap.nodes.reduce((n, g) =>
-      n + marking.tokenCount(g.running) + (g.ok === null ? 0 : marking.tokenCount(g.ok)) + (g.retry === null ? 0 : marking.tokenCount(g.retry)), 0);
+      n + marking.tokenCount(g.running) + (g.routed === null ? 0 : marking.tokenCount(g.routed))
+      + (g.retry === null ? 0 : marking.tokenCount(g.retry)), 0);
     expect(marking.tokenCount(a.retry!)).toBe(1);
     expect(marking.tokenCount(a.tries!)).toBe(2);
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(1);
     expect(marking.tokenCount(c.netMap.shared.budget) + held).toBe(2);
-    expect(marking.tokenCount(c.netMap.shared.halted)).toBe(1);
-    expect(marking.tokenCount(c.netMap.shared.halt)).toBe(0);
+    // `_halt` is the terminal marker and nothing consumes it (`compiler/compile.ts`).
+    expect(marking.tokenCount(c.netMap.shared.halt)).toBe(1);
   });
 });

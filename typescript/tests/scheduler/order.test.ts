@@ -6,7 +6,7 @@
  * `support.ts`, read off that file line by line. The stack machinery the net replaces
  * (`isExecutionStackNotEmpty`, `popExecutionStack`, `addNodeToBeExecuted`) is the only
  * difference: the entries are popped once up front, and `addNodeToBeExecuted` is never
- * called (routing is `X_route`, next cycle).
+ * called (the successors' entries land with `X_run`'s own outputs, next cycle).
  */
 import type { INodeExecutionData, ITaskDataConnections } from 'n8n-workflow';
 import { conn, diamond, fanOut, linear, node, workflow } from '../fixtures/workflows.js';

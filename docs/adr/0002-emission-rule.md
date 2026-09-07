@@ -27,7 +27,7 @@ An **empty token** asserts "this edge carries nothing for this activation of the
 assertion is only meaningful when the producer cannot be re-activated by its own output, so
 edges are classified after an SCC decomposition of the main-connection graph:
 
-| Edge | Producer fires with data (`X_run` → `X_route`) | Producer skipped (`X_skip`) |
+| Edge | Producer fires with data (`X_run`, or `X_route_o` above the split threshold) | Producer skipped (`X_skip`) |
 |---|---|---|
 | tree edge, producer not in a cycle | `data \| empty` | `empty` |
 | tree edge, producer in a cycle | `data \| nil` | `empty` |
@@ -64,7 +64,7 @@ edges are classified after an SCC decomposition of the main-connection graph:
 
 - `typescript/tests/spikes/out-spec.test.ts` — the `and`-of-`xor` spec is valid and compiles;
   branch selection by written place; both-written and neither-written are IO-015 violations
-  with the exact messages libpetri 4.1.0 emits; tokens lost; run quiesces.
+  with the exact messages libpetri 5.0.0 emits; tokens lost; run quiesces.
 - `typescript/tests/spikes/emission-cycle.test.ts` — a three-iteration Loop-Over-Items cycle
   terminates with 4 loop-node firings and 3 body firings; every `nil` place peaks at one token
   and ends empty; skipping the whole loop yields `empty` on the exit edge; the `empty`-on-cycle

@@ -52,8 +52,8 @@
  * | complete join slot (every input has a token, at least one with data) | a stack entry `{ node, data: { main: items \| [] per input }, source: { main } }`; an entry-headed slot is the entry verbatim |
  * | partial join slot; complete all-empty slot (a skip, seen under `cancelled` only) | `waitingExecution[X][k]` / `waitingExecutionSource[X][k]`: items + source, `[]` + `null`, `null` |
  * | OR round: `X/ready_i` beyond the pending arrivals and the seeds | `waitingExecution[C][k] = { main: [[]] }` per delivery |
- * | `X/ok` (cancelled only) | routed by the encoder as `X_route` would have: the arrivals join their consumers' inputs |
- * | `_pause`, `_budget`, `_halt(ed)`, `X/idle`, `X/free_i`, `X/tries`, `X/done`, `X/skipped`, `X/ran_i`, `X/hasdata` (counter), `X/routed_o`, `X/nil_o`, `X/stopped` with `ran: true`, a join slot holding nothing but seeded empties | discarded (re-seeded on decode) |
+ * | `X/ok_o` (per-output routing, cancelled only) | routed by the encoder as `X_route_o` would have: the arrivals join their consumers' inputs |
+ * | `_pause`, `_budget`, `_halt`, `X/idle`, `X/free_i`, `X/tries`, `X/done`, `X/skipped`, `X/ran_i`, `X/hasdata` (counter), `X/routed(_o)`, `X/nil_o`, `X/stopped` with `ran: true`, a join slot holding nothing but seeded empties | discarded (re-seeded on decode) |
  *
  * Stack order: the waiting node first, then depth descending, canvas order, token FIFO —
  * the deepest pending node first, which is where n8n's LIFO stack (`unshift`) has it.
@@ -64,12 +64,13 @@
  * quiescence with leftovers, divergence #2) writes every pending token to
  * `waitingExecution` — n8n's own stuck-slot shape — never to the stack, and reports each
  * through `onDiagnostic`. A token on a place the net drains on its own before quiescence
- * (`X/running`, `X/ok(_o)`, `X/routed_o`, `X/in_empty`, an OR input's edge places in
+ * (`X/running`, `X/routed(_o)`, `X/ok_o`, `X/in_empty`, an OR input's edge places in
  * `pause` and `stranded`; `X/retry` in `stranded`) is a {@link CodecError} naming the place:
  * the net must be drained before encoding. `cancelled` (`executor.close()`, ENV-013) is the
  * one mode that legitimately sees them, which is why the scheduler also uses it for the two
  * markings a `close()` can have caught mid-flight: a pause raced by a cancellation, and the
- * pre-reap snapshot of a halted run.
+ * quiescent marking of a halted run, which keeps every pending activation where it was
+ * delivered because nothing reaps it (`compiler/compile.ts`).
  *
  * Round trips: `encode(decode(x))` reproduces n8n's `x` up to slot renumbering and the
  * canonical stack order; `decode(encode(m))` reproduces the pending activations of `m`
@@ -396,7 +397,7 @@ interface Cell {
   readonly place: Place<unknown>;
 }
 
-/** An arrival a token on `X/ok` (routed by the encoder) adds to a consumer's input. */
+/** An arrival a token on `X/ok_o` (routed by the encoder) adds to a consumer's input. */
 interface RoutedArrival {
   readonly inputIndex: number;
   /** `null`: the output was empty (the consumer's `empty` place would have received a unit). */
@@ -454,7 +455,7 @@ export function encodeMarking(
   // ---- places the net drains on its own before it quiesces ----
   for (const g of nodes) {
     if (mode !== 'cancelled') {
-      const inFlight: Array<Place<unknown> | null> = [g.running, g.ok, g.inEmpty, ...g.outputs.flatMap((o) => [o.ok, o.routed])];
+      const inFlight: Array<Place<unknown> | null> = [g.running, g.routed, g.inEmpty, ...g.outputs.flatMap((o) => [o.ok, o.routed])];
       if (g.form === 'or') for (const e of g.inputs[0]!.edges) inFlight.push(e.data, e.empty);
       for (const p of inFlight) if (p !== null && marking.tokenCount(p) > 0) throw undrained(g, p);
     }
@@ -675,16 +676,20 @@ function joinQueue(g: NodeGadget, i: InputGadget, marking: Marking, routedHere: 
 }
 
 /**
- * The arrivals the tokens still on `X/ok` (`close()` stopped the net between `X_run` and
- * `X_route`) would have produced, per consumer, in canonical edge order — where n8n's
- * `addNodeToBeExecuted` had put them before the next iteration's cancellation check.
+ * The arrivals the tokens still on `X/ok_o` (`close()` stopped a **per-output routing** node
+ * between `X_run` and `X_route_o`) would have produced, per consumer, in canonical edge
+ * order — where n8n's `addNodeToBeExecuted` had put them before the next iteration's
+ * cancellation check.
+ *
+ * Only a node above {@link SPLIT_ROUTING_ABOVE} has such a place: everywhere else `X_run`
+ * deposits the edge tokens itself, so a cancellation catches them already on the consumer's
+ * edge places, where `joinQueue` and the direct-form arrival list read them.
  */
 function collectRouted(marking: Marking, nodes: readonly NodeGadget[]): Map<string, RoutedArrival[]> {
   const routed = new Map<string, RoutedArrival[]>();
   for (const g of nodes) {
-    const okTokens = g.splitRouting
-      ? g.outputs.flatMap((o) => marking.peekTokens(o.ok!).map((t) => ({ t, outputs: [o] })))
-      : marking.peekTokens(g.ok!).map((t) => ({ t, outputs: g.outputs }));
+    if (!g.splitRouting) continue;
+    const okTokens = g.outputs.flatMap((o) => marking.peekTokens(o.ok!).map((t) => ({ t, outputs: [o] })));
     for (const { t, outputs } of okTokens) {
       const v = t.value as OkPayload;
       for (const out of outputs) {

@@ -141,7 +141,7 @@ export function expectedSuccessSequence(node: string): string[] {
     'normalizeNodeErrors',                     // 240
     `rewireOutputLog(${node})`,                // 248
     `upsertTaskData(${node})`,                 // 250
-    `hook:nodeExecuteAfter(${node})`,          // 368 (after the enqueue, which is X_route next cycle)
+    `hook:nodeExecuteAfter(${node})`,          // 368 (after the enqueue, which lands next cycle)
   ];
 }
 
@@ -156,6 +156,20 @@ export function transitionsStarted(store: InMemoryEventStore, filter?: (name: st
     if (e.type === 'transition-started' && (filter === undefined || filter(e.transitionName))) names.push(e.transitionName);
   }
   return names;
+}
+
+/**
+ * Tokens the run left on `place`: `token-added` minus `token-removed`. The halted-run
+ * assertions use it on `_halt`, which nothing consumes (`compiler/compile.ts`), in place of
+ * the `_halt_reap` firing they used to count.
+ */
+export function tokensResting(store: InMemoryEventStore, place: string): number {
+  let n = 0;
+  for (const e of store.events()) {
+    if (e.type === 'token-added' && e.placeName === place) n += 1;
+    if (e.type === 'token-removed' && e.placeName === place) n -= 1;
+  }
+  return n;
 }
 
 export function transitionsFailed(store: InMemoryEventStore): string[] {

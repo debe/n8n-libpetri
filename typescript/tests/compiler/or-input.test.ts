@@ -21,8 +21,8 @@ describe('OR form structure (multiProducer: A and B both feed C.0)', () => {
     const empty = c.netMap.transitionObject('id:C/arm_e0_empty');
     expect(inputNames(empty)).toEqual(['id:C/in0_e0_empty']);
     expect(outputNames(empty)).toEqual(['id:C/ready_0']);
-    expect(inhibitorNames(data)).toEqual(['_halt', '_halted']);
-    expect(inhibitorNames(empty)).toEqual(['_halt', '_halted']);
+    expect(inhibitorNames(data)).toEqual(['_halt']);
+    expect(inhibitorNames(empty)).toEqual(['_halt']);
   });
 
   it('X_start: one(hasdata_i) budget idle → running + ran_i, one run per data arrival', () => {
@@ -34,7 +34,7 @@ describe('OR form structure (multiProducer: A and B both feed C.0)', () => {
   it('X_skip: exactly(n, ready_i) inhibitor(hasdata_i) inhibitor(ran_i) read(idle) → empties + skipped', () => {
     const skip = transitionOf(c, 'C', 'skip');
     expect(skip.inputSpecs).toEqual([{ type: 'exactly', count: 2, place: gadget(c, 'C').inputs[0]!.ready }]);
-    expect(inhibitorNames(skip)).toEqual(['_halt', '_halted', 'id:C/hasdata_0', 'id:C/ran_0']);
+    expect(inhibitorNames(skip)).toEqual(['_halt', 'id:C/hasdata_0', 'id:C/ran_0']);
     expect(readNames(skip)).toEqual(['id:C/idle']);
     expect(outputNames(skip)).toEqual(['id:C/skipped']); // C has no outgoing edges in this fixture
   });
@@ -46,7 +46,8 @@ describe('OR form structure (multiProducer: A and B both feed C.0)', () => {
     expect(clear.inputSpecs.map((s) => [s.type, s.place.name, 'count' in s ? s.count : null])).toEqual([
       ['exactly', 'id:C/ready_0', 2], ['all', 'id:C/ran_0', null],
     ]);
-    expect(inhibitorNames(clear)).toEqual(['id:C/hasdata_0']);
+    // Halt-inhibited too: without a reap, a halted run must not close a half-armed round.
+    expect(inhibitorNames(clear)).toEqual(['_halt', 'id:C/hasdata_0']);
     expect(readNames(clear)).toEqual(['id:C/idle']);
     expect(clear.outputSpec).toBeNull();
     expect(c.netMap.transition('id:C/clear_0')).toMatchObject({ role: 'clear', node: 'C', port: 0 });
@@ -111,7 +112,9 @@ describe.each<Executor>(['precompiled', 'bitmap'])('OR input end to end on %s (I
     expect(count(c, marking, 'id:Merge/free_1')).toBe(1);
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(1);
     expect(started(store, (n) => n.startsWith('id:C/'))).toEqual([
-      'id:C/arm_e2_data', 'id:C/arm_e3_empty', 'id:C/start', 'id:C/run', 'id:C/route', 'id:C/clear_0', 'id:C/done',
+      // `X_run` routes C's single output itself, so `X/done` is marked in the cycle after
+      // the run and `X_clear` closes the round alongside it.
+      'id:C/arm_e2_data', 'id:C/arm_e3_empty', 'id:C/start', 'id:C/run', 'id:C/done', 'id:C/clear_0',
     ]);
   });
 

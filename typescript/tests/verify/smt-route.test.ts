@@ -58,7 +58,7 @@ describe('the SMT route is refused above the measured size ceiling', () => {
     const big = flatten(compile(generateWorkflow(12)).net);
     const small = flatten(compile(generateWorkflow(1)).net);
     expect(big.places.length).toBeGreaterThan(SMT_MAX_FLAT_PLACES);
-    expect(smtRefusalFor(big, 24, 'auto')).toContain('599 flat places');
+    expect(smtRefusalFor(big, 24, 'auto')).toContain('526 flat places');
     expect(smtRefusalFor(big, 24, 'force')).toBeNull();
     // Under the places ceiling, the join count is what refuses: the pipeline's cost is
     // driven by joins, not by node count (a 41-node chain runs it in 1.8 s).

@@ -13,8 +13,8 @@ This report does three things they could not:
    `packages/workflow`** and **all of `packages/cli`'s unit suite** as *patch-neutrality*
    legs: 29 931 further cases that run with the engine registered and never entered. That
    distinction is measured, not assumed, and it is spelled out below;
-2. it records the one **model change** of M4 — the `_budget` refund moved off `X_route` onto
-   `X_done` — and the n8n case that change makes pass;
+2. it records the one **model change** of M4 — the `_budget` refund moved off the firing that
+   deposits the edge tokens onto `X_done` — and the n8n case that change makes pass;
 3. it states, in one paragraph a reader can trust, what this engine reproduces and what it
    does not.
 
@@ -304,6 +304,16 @@ wait for. Cost: one place and one transition per node with an output, and one ex
 cycle per node completion (synchronous — the loop `continue`s on dirty bits, it does not
 await). The flatteners get *cheaper*, not dearer: the `and` of `k` `xor`s that IO-016 expands
 into `2^k` virtual transitions is now `k` transitions of one `xor` for every node.
+
+> **Superseded in part by M6** (ADR 0004's M6 amendment). What survives is the phase, which
+> is what this section is about: `X_done` is unconditional and still refunds one cycle after
+> the edge tokens land, so both candidate starts still reach one ready set. What does not
+> survive is *how* M4 got there. `SPLIT_ROUTING_ABOVE` is **3** again: at or below three
+> connected outputs `X_run` routes in its own `Out` spec and marks a single `X/routed`, and
+> `X/ok` / `X_route` exist only above the threshold. The numbers in the rest of this document
+> — pass counts, divergence attributions, the differ's verdicts — are unaffected; the shape
+> names are not. Nothing below re-measures the net's size, which shrank
+> (`docs/verification.md`).
 
 **Measured, before and after, by the differential harness** (`src/conformance/differ-cli.ts`
 over `tests/conformance/differ-fixtures.ts`, 23 fixtures × k ∈ {1, 2, 4} = 69 runs). Before:

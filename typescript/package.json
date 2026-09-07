@@ -58,7 +58,7 @@
     "bench": "vitest bench --run"
   },
   "dependencies": {
-    "libpetri": "^4.1.0"
+    "libpetri": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^26.0.1",

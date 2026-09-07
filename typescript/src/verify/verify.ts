@@ -52,7 +52,7 @@
  *    come to rest; it is a **stranding** when it still holds a token on a place whose
  *    `PlaceRole` means pending work (`state-class.ts` `REST_ROLES`), and it is a *designed*
  *    terminal — a paused or halted run whose pending activations the marking codec writes
- *    back (ADR 0005) — when it holds `_pause` / `_halted` / `X/waiting` / `X/stopped`, where
+ *    back (ADR 0005) — when it holds `_pause` / `_halt` / `X/waiting` / `X/stopped`, where
  *    the rest set widens to what the codec accepts in the mode that terminal is encoded with
  *    (`state-class.ts` `PAUSE_REST_ROLES` / `HALT_REST_ROLES`). That filter is what M4 could
  *    not express: `joinedOrDeadLettered` carries no sink clause (NU-040 AC4), so a paused
@@ -74,7 +74,7 @@
  * 3. **no double activation** — `X/running` never holds two tokens: the `X/idle` mutex made
  *    structural (`X/idle + X/running = 1` is a found P-invariant, ADR 0004).
  * 4. **budget** — `_budget` never exceeds `k`, plus the two-phase P-semiflow
- *    `w·_budget + w·Σ(running + ok + retry) = w·k` read off the validated invariants. A net
+ *    `w·_budget + w·Σ_X(running + retry + in-flight) = w·k` read off the validated invariants. A net
  *    whose budget were a self-loop would prove the bound trivially: the incidence column is
  *    zero, so the encoder never sees the place move. The two-phase gadget is what makes the
  *    bound mean something, and the semiflow is the half that carries the claim.
@@ -213,15 +213,18 @@ export function renderInvariant(invariant: PInvariant, flat: FlatNet): string {
 /**
  * The two-phase budget semiflow, if the verifier kept it: a law giving `_budget` and every
  * `X/running` the same positive weight `w`, summing to `w·k`, and touching at least one
- * in-flight place of every node that has one (`X/ok`, the split-routing `X/ok_o` /
- * `X/routed_o`, or `X/retry`). A node holds its unit from `X_start` to `X_route`, so those
- * places are exactly where the unit sits while it is not in `_budget` (ADR 0004).
+ * in-flight place of every node that has one (`X/routed`, the per-output-routing
+ * `X/ok_o` / `X/routed_o`, or `X/retry`). A node holds its unit from `X_start` to
+ * `X_done`, so those places are exactly where the unit sits while it is not in `_budget`
+ * (ADR 0004).
  *
- * "At least one", not "all": a node with `n` connected outputs routes per output
- * (`SPLIT_ROUTING_ABOVE`), and the Farkas enumeration then returns **one law per output**
- * — `_budget + … + X/ok_o + X/routed_o + X/running + … = w·k` for each `o` — rather than one
+ * "At least one", not "all": a node with more than `SPLIT_ROUTING_ABOVE` connected outputs
+ * routes per output, and the Farkas enumeration then returns **one law per output** —
+ * `_budget + … + X/ok_o + X/routed_o + X/running + … = w·k` for each `o` — rather than one
  * law folding all `n` in at weight `w/n`. Every one of them is the conservation law; the
- * first is returned.
+ * first is returned. A workflow with no such node yields the single folded law
+ * `_budget + Σ_X(X/running + X/retry + X/routed) = k` — one term per node, since every node
+ * has an `X/routed`.
  */
 export function budgetSemiflowOf(
   invariants: readonly PInvariant[], flat: FlatNet, map: NetMapView, budget: number,
@@ -238,7 +241,7 @@ export function budgetSemiflowOf(
 function nodeCarriesUnit(g: NodeGadget, terms: ReadonlyMap<string, number>, w: number): boolean {
   if ((terms.get(g.running.name) ?? 0) !== w) return false;
   const inFlight = [
-    g.ok,
+    g.routed,
     g.retry,
     ...g.outputs.flatMap((o) => [o.ok, o.routed]),
   ].filter((p): p is Place<unknown> => p !== null);
@@ -497,7 +500,7 @@ function provenUnreachableReason(ctx: Context): string {
  * Why an SMT proper-completion violation whose witness is a designed terminal is downgraded.
  *
  * A paused marking (`_pause`, from a Wait node or a destination stop) or a halted one
- * (`_halted`) holds unconsumed arrivals on purpose: the marking codec writes them back into
+ * (`_halt`) holds unconsumed arrivals on purpose: the marking codec writes them back into
  * n8n's `nodeExecutionStack` (ADR 0005). The sink set cannot exclude the witness — declaring
  * the `in` / `ready` / `hasdata` places as sinks would also excuse a genuine stranding on
  * them, which is the whole question — so the query cannot separate the two. It is not a
@@ -512,7 +515,7 @@ const PAUSE_WITNESS_REASON =
   'excused it would also excuse a real stranding on the same places, so the query cannot separate ' +
   'the two; the solver-free route classifies the marking instead';
 
-/** True when the witness marking holds `_pause`, `_halt` or `_halted`. */
+/** True when the witness marking holds `_pause` or `_halt`. */
 function witnessIsDesignedTerminal(cex: Counterexample | null): boolean {
   return cex !== null && cex.stuckMarking.some(
     (p) => p.role !== null && TERMINAL_ROLES.has(p.role));
@@ -725,7 +728,7 @@ function graphStranding(ctx: Context, place: Place<unknown>): Decision | null {
  * per-input, per-edge and arrival-bound rows.
  *
  * The whole-net row is the headline and is asked first, because it is the one that covers
- * places the per-place rows do not: a token left on `X/hasdata`, on `X/ok`, on an unreaped
+ * places the per-place rows do not: a token left on `X/hasdata`, on `X/routed`, on an unreaped
  * `_halt`. The per-place rows keep the granularity a finding needs — which input of which
  * node — and are decided from the same graph at no extra cost.
  */
@@ -1176,7 +1179,7 @@ async function runBudget(ctx: Context): Promise<void> {
       ? 'No validated conservation law covers _budget together with every X/running: the budget unit ' +
         'cannot be tracked structurally, so the bound above rests on the reachable-set enumeration alone.'
       : `_budget + the in-flight places of every node is conserved at ${k}, so a unit is held from ` +
-        'X_start to X_route and refunded exactly once (ADR 0004).',
+        'X_start to X_done and refunded exactly once (ADR 0004).',
     reason: semiflow === null
       ? ctx.smtRefusal
         ?? 'the P-invariant computation returned no law giving _budget and every X/running the same positive weight'

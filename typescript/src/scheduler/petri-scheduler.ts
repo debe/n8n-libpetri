@@ -17,10 +17,10 @@
  *    `host.abortSignal` → `executor.close()` (ENV-013) is the only cancellation. Per-execution
  *    state reaches the actions through `executionContextProvider` under `ENV_KEY`.
  * 5. After quiescence the marking is classified and written back (`finish`), in this order:
- *    - a halt (`_halt` / `_halted`): n8n's `handleNodeExecutionError` pushed the failed
- *      entry and its loop `break`s, leaving every entry it had not popped on the stack, so
- *      the activations `_halt_reap` cleared (snapshotted when the halt branch was written)
- *      are encoded back after it — that stack is what "Retry execution" replays;
+ *    - a halt (`_halt`, which nothing consumes): n8n's `handleNodeExecutionError` pushed the
+ *      failed entry and its loop `break`s, leaving every entry it had not popped on the
+ *      stack, so the activations still resting in the marking are encoded back after it —
+ *      that stack is what "Retry execution" replays;
  *    - `_pause` / `X/waiting` / `X/stopped` → `encodeMarking` rewrites `executionData` so
  *      n8n saves and resumes it. After a destination-node stop the entries the run filter
  *      excludes are dropped through `host.isNodeFilteredOut`, the predicate n8n's loop
@@ -38,12 +38,11 @@
  *    hook rejecting) rejects `run()` exactly as n8n's does — after the net quiesced and the
  *    pending state was written back, which is the state n8n's loop leaves behind.
  */
-import { Marking, PrecompiledNetExecutor, type EventStore, type Place, type Token } from 'libpetri';
+import { Marking, PrecompiledNetExecutor, type EventStore } from 'libpetri';
 import type { ExecutionBaseError, IRunExecutionData, Workflow } from 'n8n-workflow';
 import { decodeExecutionData, encodeMarking, type EncodeMode } from '../codec.js';
 import {
-  analyse, compile, structuralHash, type CompiledWorkflow, type NodeGadget, type PlaceRole,
-  type WorkflowDescription,
+  analyse, compile, structuralHash, type CompiledWorkflow, type WorkflowDescription,
 } from '../compiler/index.js';
 import { describeWorkflow } from '../n8n/adapter.js';
 import type {
@@ -72,37 +71,10 @@ export interface PetriSchedulerOptions {
 export type SchedulerOutcome =
   | 'legacy' | 'nothing-to-run' | 'completed' | 'paused' | 'cancelled' | 'halted' | 'stranded' | 'fatal';
 
-/**
- * The places `_halt_reap` clears with reset arcs (`compile.ts`, README "Retries, halt,
- * cancellation"): everything a pending activation can sit on before it starts.
- */
-const REAPED_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
-  'in-data', 'in-empty', 'edge-data', 'edge-empty', 'ready', 'hasdata',
-]);
-
-/**
- * The places one `X_start` firing takes a token from — one per activation, so the number of
- * `X_start` firings since a marking snapshot is the number of tokens that snapshot holds on
- * each of them and the net no longer does (`PetriScheduler.haltPending`).
- */
-function startInputPlaces(g: NodeGadget): readonly Place<unknown>[] {
-  if (g.form === 'direct') return g.in === null ? [] : [g.in];
-  if (g.form === 'or') {
-    const hasdata = g.inputs[0]?.hasdata ?? null;
-    return hasdata === null ? [] : [hasdata];
-  }
-  const places: Place<unknown>[] = [];
-  for (const i of g.inputs) {
-    const p = g.form === 'choose-branch' && i.required ? i.readyData : i.ready;
-    if (p !== null) places.push(p);
-  }
-  return places;
-}
-
 export class PetriScheduler implements WorkflowScheduler {
   private readonly state: SchedulerState = {
     haltError: undefined, leftoverError: undefined, closeFunction: undefined, fatal: undefined,
-    haltMarking: undefined, haltStarts: undefined, waitingNode: undefined, waitTillAtStart: undefined,
+    waitingNode: undefined, waitTillAtStart: undefined,
     starts: new Map(), inFlight: 0, maxInFlight: 0,
   };
   private readonly cache: CompiledWorkflowCache;
@@ -117,7 +89,7 @@ export class PetriScheduler implements WorkflowScheduler {
    * The most node runs (`X_run` actions, i.e. `host.runNode` calls) that were ever in flight
    * at once during the last `run()` — README "Concurrency". Bounded by the effective budget
    * k, because every such activation holds a `_budget` unit. It is a **lower bound** on the
-   * `_budget + Σ(running + ok + retry) = k` semiflow rather than a reading of it: a node
+   * `_budget + Σ_X(running + retry + in-flight) = k` semiflow rather than a reading of it: a node
    * waiting between retries and one recording an exhausted attempt each hold their unit
    * without running anything, so the tokens in flight can exceed this number.
    */
@@ -177,8 +149,6 @@ export class PetriScheduler implements WorkflowScheduler {
     this.state.haltError = undefined;
     this.state.leftoverError = undefined;
     this.state.fatal = undefined;
-    this.state.haltMarking = undefined;
-    this.state.haltStarts = undefined;
     this.state.waitingNode = undefined;
     this.state.waitTillAtStart = runExecutionData.waitTill;
     this.state.starts.clear();
@@ -229,7 +199,6 @@ export class PetriScheduler implements WorkflowScheduler {
     let executor: PrecompiledNetExecutor | undefined;
     const env: ExecutionEnv = {
       host, workflow, runExecutionData, hooks, state: this.state, diagnostic: (m) => this.diagnostic(m),
-      snapshotMarking: () => executor?.getMarking(),
     };
     const contexts = new Map<string, unknown>([[ENV_KEY, env]]);
     executor = new PrecompiledNetExecutor(compiled.net, initial, {
@@ -281,15 +250,16 @@ export class PetriScheduler implements WorkflowScheduler {
     const node = (name: string) => workflow.nodes[name];
     const diag = (m: string) => this.diagnostic(m);
 
-    if (marking.tokenCount(shared.halted) > 0 || marking.tokenCount(shared.halt) > 0) {
+    if (marking.tokenCount(shared.halt) > 0) {
       // n8n's `handleNodeExecutionError` pushed the failed entry and its loop `break`s, so
       // everything it had not popped stays on the stack — the entries `ExecutionService`
-      // replays on "Retry execution". `_halt_reap` destroyed those tokens here, so they come
-      // from the snapshot taken when the halt branch was written, merged with what the
-      // in-flight actions deposited afterwards (EXEC-040: they finish, and their routes are
+      // replays on "Retry execution". Nothing consumes `_halt` and nothing clears those
+      // tokens (`compiler/compile.ts`), so the quiescent marking holds every one of them:
+      // the ones that were pending when the halt branch was written, and the ones an
+      // in-flight action deposited afterwards (EXEC-040: they finish, and their routes are
       // not halt-inhibited).
       const pushed = [...executionData.nodeExecutionStack];
-      encodeMarking(compiled, this.haltPending(compiled, marking), executionData, { mode: 'cancelled', node, onDiagnostic: diag });
+      encodeMarking(compiled, marking, executionData, { mode: 'cancelled', node, onDiagnostic: diag });
       const pending = executionData.nodeExecutionStack;
       executionData.nodeExecutionStack = [...pushed, ...pending];
       if (pending.length > 0) {
@@ -338,46 +308,4 @@ export class PetriScheduler implements WorkflowScheduler {
     return this.diagnostics.length > before ? 'stranded' : 'completed';
   }
 
-  /**
-   * What was pending when the execution halted: the quiescent marking plus, on every place
-   * `_halt_reap` clears with a reset arc, the tokens the snapshot still had. The two are
-   * disjoint — the reap emptied those places, so anything the final marking holds on them
-   * arrived after it — and the snapshot's are the older ones, hence first in the FIFO.
-   * Places the reap leaves alone (`X/retry`, `X/waiting`, `X/stopped`) are taken from the
-   * final marking only, so a token that merely moved is never counted twice.
-   */
-  private haltPending(compiled: CompiledWorkflow, marking: Marking): Marking {
-    const snapshot = this.state.haltMarking;
-    const startsAtSnapshot = this.state.haltStarts;
-    this.state.haltMarking = undefined;
-    this.state.haltStarts = undefined;
-    if (snapshot === undefined) return marking;
-    // Above k = 1 the snapshot can be one or more activations ahead of the reap: it is taken
-    // when the halting action writes its branch, and `_halt` only reaches the marking when
-    // that action resolves, so another node's `X_start` may consume a token in between and
-    // run it. Those activations are already recorded in `runData`; re-encoding them would
-    // put a second entry for the same run on `nodeExecutionStack` (ADR 0006). Drop as many
-    // of the snapshot's oldest tokens per start-input place as that node started since.
-    const drop = new Map<string, number>();
-    for (const g of compiled.netMap.nodes) {
-      const started = (this.state.starts.get(g.node) ?? 0) - (startsAtSnapshot?.get(g.node) ?? 0);
-      if (started <= 0) continue;
-      for (const p of startInputPlaces(g)) drop.set(p.name, started);
-      this.diagnostic(
-        `halted: node '${g.node}' started ${started} activation(s) after the halt snapshot; ` +
-        'not re-encoded as pending (k > 1)');
-    }
-    const merged = Marking.empty();
-    const add = (place: Place<unknown>, tokens: readonly Token<unknown>[]): void => {
-      for (const t of tokens) merged.addToken(place, t);
-    };
-    for (const p of compiled.netMap.places) {
-      if (REAPED_ROLES.has(p.role)) {
-        // FIFO: a start takes the oldest token, so the ones it took are at the front.
-        add(p.place, snapshot.peekTokens(p.place).slice(drop.get(p.name) ?? 0));
-      }
-      add(p.place, marking.peekTokens(p.place));
-    }
-    return merged;
-  }
 }

@@ -94,7 +94,39 @@
       green, `scripts/verify-patch.sh` clean, the conformance numbers re-measured for this
       report, `docs/state-of-the-project.md` written
 
-**The four-milestone plan is done.** Everything below is what it left open.
+## M5 — Solver-free verification
+- [x] The state-class graph (VER-010) became the primary proper-completion route, with the
+      `SmtVerifier` as the fallback for a graph that truncates; the `bounded` verdict quantifies
+      the explored cyclic-run prefix rather than passing a truncation off as a proof
+
+## M6 — libpetri 5.0.0: the two workarounds deleted
+- [x] **The routed outcome is gone.** libpetri 5.0.0 made [IO-015] an exact-explanation search,
+      so `X_run` carries the per-output routing in its own `Out` spec and marks `X/routed`;
+      `X/ok` and `X_route` are deleted at or below `SPLIT_ROUTING_ABOVE` (3) connected outputs.
+      Above the threshold the per-output split stays, because an `and` of k `xor`s flattens to
+      `2^k` (IO-016). `X_done` is kept and unconditional, so the budget refund still lands one
+      scheduling cycle after the edge tokens and divergence #20 stays fixed (ADR 0004's M6
+      amendment; `tests/spikes/collapsed-outcome.test.ts`)
+- [x] **The halt reap is gone.** `_halt_reap` and `_halted` are deleted; `_halt` is written once
+      and never consumed, so it is the halted run's terminal marker and every start / retry-wait /
+      exhausted / skip / arm / clear inhibits on it. That closed the race the reap introduced once
+      `X_run` routed its own outcome (a sibling resolving in the same executor cycle lost its
+      arrivals), and removed `state.haltMarking`, `haltStarts`, `haltPending` and
+      `ExecutionEnv.snapshotMarking` with it
+- [x] **The timeout poll stays.** libpetri's `run(ms, 'close')` is sound but is not n8n's
+      timeout: `shouldStopExecuting()` sets the `status` / `timedOut` fields the caller reads to
+      tell a timeout from a cancellation, and n8n polls it *between* activations. The stale
+      "libpetri leaks the losing loop" rationale was replaced with this one in CLAUDE.md, the
+      README and ADR 0004 ("The timeout is n8n's, not the net's")
+- [x] Structural hash v5 → v7; the budget semiflow restated as
+      `_budget + Σ_X(X/running + X/retry + in-flight_X) = k`, one law per output for a split node
+- [x] Final integration: `npm run check && npm test` (48 files, 815 tests) `&& npm run build`
+      green, `scripts/verify-patch.sh` clean; conformance re-measured (legacy 44/44 + 1613/1613
+      identical; libpetri k = 1 35/44 + 1611/1613, 11 regressions; k = 2 32/44, 3 against k = 1);
+      differential 49 pass / 20 divergent / 0 fail; the net-size and state-class reduction measured
+      before/after and recorded in `docs/state-of-the-project.md`
+
+**The plan through M6 is done.** Everything below is what it left open.
 
 ---
 
@@ -136,12 +168,12 @@ an upstream ask, or work that was specified and deliberately not built.
 
 ### 2. Model and compiler corners
 
-- [ ] **The `X_skip` half of the halt-snapshot race is unguarded.** `X_start` increments a per-node
+- [x] **The `X_skip` half of the halt-snapshot race is unguarded.** `X_start` increments a per-node
       counter the snapshot subtracts, but `X_skip` is a structural transition with no bound action,
       so a skip consuming an `in_empty` / `ready_i` token inside the same ≤ 2-microtask window
-      would be double-encoded. Two targeted experiments (400 runs sweeping sleep durations, 520
-      sweeping microtask offsets) failed to reach the window; not fixed blind, because a fix means
-      binding an action to a structural transition and nothing here could pin it with a failing test
+      would be double-encoded. **Closed in M6 by removal**: there is no snapshot and no reap, so
+      nothing is reconstructed and a token another transition consumed is simply absent from the
+      quiescent marking (ADR 0004, "The reap is gone")
 - [ ] **Cyclic OR node** (n ≥ 2 tree producers plus a cycle-edge producer): cycle-triggered runs
       leave `X/ran_i` markers after the round closes, so a later all-empty round does not skip.
       Rare shape; flagged (divergence #10), not modelled
@@ -235,17 +267,22 @@ an upstream ask, or work that was specified and deliberately not built.
 - [ ] Phases 1–3 (flatten, structural pre-check, invariants) are recomputed per query; a cached
       `FlatNet` + invariants per (net, marking) would cut a full run by an order of magnitude
 - [ ] Every compiled net reports `Structurally bounded: NO`: `X/done`, `X/skipped`, `X/ran` and the
-      other markers are produced and never consumed. Removing `_halt_reap`'s reset arcs recovers
-      every dropped invariant (13 found / 0 dropped against 8 / 5) and the join-input query still
-      does not close, so the H1 guard is a contributing cause, not the cause. A compiler change that
-      consumed the markers, or a verifier option that bounded them, is what IC3 is missing
-- [ ] `PrecompiledNetExecutor.getMarking()` caches `this.marking` on its first call and never
-      invalidates it, so a second mid-run snapshot silently returns the first one's marking. The
-      scheduler takes exactly one (`haltMarking ??=`) and the halt-snapshot logic depends on it
-      being the one taken inside the halting action, so it is correct today only by accident
-- [ ] Nested-`xor` validation depends on child order inside `and` (IO-015 defines `And` as
-      unordered); Java/Rust validators unchecked for the same behaviour. The routed gadget does not
-      depend on it, which is why it is a question and not a blocker
+      other markers are produced and never consumed. The reset arcs this item blamed for the dropped
+      invariants are **gone since M6** (`_halt_reap` was deleted with them, ADR 0004), so the
+      invariant counts want re-measuring; the markers are still produced and never consumed, so the
+      finding itself stands. A compiler change that consumed them, or a verifier option that
+      bounded them, is what IC3 is missing
+- [x] `PrecompiledNetExecutor.getMarking()` caches `this.marking` on its first call and never
+      invalidates it, so a second mid-run snapshot silently returns the first one's marking. **No
+      longer reachable from here:** M6 deleted the halt snapshot along with the reap (ADR 0004),
+      so the scheduler never calls `getMarking()` mid-run. Still worth reporting upstream — the
+      cache is a trap for any consumer that snapshots twice
+- [x] Nested-`xor` validation depends on child order inside `and` (IO-015 defines `And` as
+      unordered). **Fixed in libpetri 5.0.0**: [IO-015] is an exact-explanation search, `And` is
+      unordered and an unselected subtree is never evaluated. M6 is the consumer of that fix — the
+      routing moved back inside `X_run` (ADR 0004's M6 amendment), pinned by
+      `tests/spikes/out-spec.test.ts` and `tests/spikes/collapsed-outcome.test.ts`. Java/Rust
+      validators still unchecked for the same behaviour
 
 ### 5. Harness and CI
 
@@ -270,9 +307,11 @@ an upstream ask, or work that was specified and deliberately not built.
 - [ ] The **classifier counts the six out-of-scope AI-agent "waiting tools" cases as loop-driving**,
       so every headline needs the "excluding out-of-scope" restatement. Either add an exclusion list
       to `src/conformance/classify.ts` or keep stating both figures
-- [ ] The **differ's candidate leg has no timeout** — cancellation is `close()`-only and
-      `run(timeoutMs)` is forbidden — so a net that never quiesces hangs it. The reference leg has a
-      10 000-activation valve; the candidate leg has only the fixtures' own bounds
+- [ ] The **differ's candidate leg has no timeout** so a net that never quiesces hangs it. The
+      reference leg has a 10 000-activation valve; the candidate leg has only the fixtures' own
+      bounds. libpetri 5.0.0's `run(ms, 'close')` **is** the right tool here — a harness safety
+      valve is not n8n's timeout, so the hard rule that keeps it out of the scheduler does not
+      apply to `src/conformance/`
 - [ ] The **row #17 attribution rule is coarse**: any candidate-only activation in a halted, paused
       or cancelled run is attributed to it. A tighter rule needs the activation's trace start to fall
       after the halting activation's, and the halting instant is not observable from the trace

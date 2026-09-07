@@ -98,7 +98,9 @@ describe.each<Executor>(['precompiled', 'bitmap'])('reference twin end to end on
         const g = map.node('B');
         return async (ctx) => {
           tagged = ctx.input(g.running);
-          ctx.output(g.ok!, tagged);
+          // B has one connected output; `X_run` routes it and marks `X/routed` (ADR 0004).
+          for (const out of g.outputs) for (const e of out.edges) ctx.output(e.data, tagged);
+          ctx.output(g.routed!, null);
           ctx.output(g.idle, null);
         };
       });

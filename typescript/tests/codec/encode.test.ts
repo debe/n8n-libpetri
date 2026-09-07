@@ -9,7 +9,7 @@ import type { INode } from 'n8n-workflow';
 import { CodecError, decodeExecutionData, encodeMarking } from '../../src/codec.js';
 import { compile } from '../../src/compiler/index.js';
 import type { OkPayload, RetryPayload, RunPayload, StoppedPayload, WaitingPayload } from '../../src/scheduler/index.js';
-import { chooseBranch, conn, diamond, fanOut, ifBothOutputs, linear, node, twoTriggers, workflow } from '../fixtures/workflows.js';
+import { chooseBranch, conn, diamond, fanOut, fanOut4, ifBothOutputs, linear, node, twoTriggers, workflow } from '../fixtures/workflows.js';
 import { fakeWorkflow, items } from '../scheduler/support.js';
 import { edge, edgeData, emptyState, entryFor, entryPayload, gadget, live, named, put, slotsOf, src, stateOf } from './support.js';
 
@@ -269,7 +269,7 @@ describe('discards and untouched fields', () => {
 describe('undrained places', () => {
   it.each([
     ['X/running', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, gadget(c, 'A').running, [{ executionData: {} as never, attempt: 0 } satisfies RunPayload]), 'id:A/running'],
-    ['X/ok', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, gadget(c, 'A').ok!, [{ nodeSuccessData: [], runIndex: 0 } satisfies OkPayload]), 'id:A/ok'],
+    ['X/routed', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, gadget(c, 'A').routed!, [null]), 'id:A/routed'],
     ['X/in_empty', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, gadget(c, 'A').inEmpty!, [null]), 'id:A/in_empty'],
   ])('%s in pause mode is a CodecError naming the place', (_what, arrange, place) => {
     const c = compile(linear);
@@ -303,17 +303,35 @@ describe('undrained places', () => {
     expect(() => encodeMarking(c, live(m), emptyState(), { mode: 'stranded' })).toThrow('id:B/retry');
   });
 
-  it('cancelled: a token on X/ok is routed by the encoder as X_route would have (data edges become entries, empties nothing)', () => {
+  it('cancelled: a token on X/ok_o is routed by the encoder as X_route_o would have (data edges become entries, empties nothing)', () => {
+    // `Q` has four connected outputs, above `SPLIT_ROUTING_ABOVE`, so it is the one shape
+    // that still parks its outcome on `X/ok_o` between `X_run` and `X_route_o` — the window
+    // `close()` (ENV-013) can catch and only mode `cancelled` can encode.
+    const c = compile(fanOut4);
+    const wf = fakeWorkflow(fanOut4);
+    const m = c.sharedMarking();
+    const t = items({ t: 1 });
+    const ok: OkPayload = { nodeSuccessData: [t, [], [], []], runIndex: 4 };
+    const q = gadget(c, 'Q');
+    expect(q.splitRouting).toBe(true);
+    expect(q.routed).toBeNull();
+    for (const o of q.outputs) put(m, o.ok!, [ok]);
+    const x = encodeMarking(c, live(m), emptyState(), { mode: 'cancelled', node: (n) => wf.nodes[n] });
+    expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.S0, data: { main: [t] }, source: { main: [src('Q', 0, 4)] } }]);
+  });
+
+  it('cancelled: a node that routes inside X_run has already deposited its edges, so only X/routed is discarded', () => {
+    // The collapsed shape has no window between the run and the routing: `close()` between
+    // `X_run` and `X_done` leaves the arrivals on the consumers' own edge places, which the
+    // ordinary encode paths read, plus one `X/routed` unit the refund never consumed.
     const c = compile(diamond);
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const t = items({ t: 1 });
-    const ok: OkPayload = { nodeSuccessData: [t, []], runIndex: 4 };
-    // IF routes two outputs, so `X_run` writes the outcome to `X/ok_0` and `X/ok_1` and
-    // there is no single `X/ok` (gadget.ts, SPLIT_ROUTING_ABOVE = 0). Each `X_route_o`
-    // would have drained its own; the encoder does the same, per output.
-    expect(gadget(c, 'IF').ok).toBeNull();
-    for (const o of gadget(c, 'IF').outputs) put(m, o.ok!, [ok]);
+    expect(gadget(c, 'IF').splitRouting).toBe(false);
+    expect(gadget(c, 'IF').outputs.every((o) => o.ok === null)).toBe(true);
+    put(m, gadget(c, 'IF').routed!, [null]);
+    put(m, gadget(c, 'A').in!, [edge(t, src('IF', 0, 4))]);
     const x = encodeMarking(c, live(m), emptyState(), { mode: 'cancelled', node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.A, data: { main: [t] }, source: { main: [src('IF', 0, 4)] } }]);
   });

@@ -1,7 +1,7 @@
 /**
  * Payload safety above k = 1 (ADR 0006).
  *
- * A token holds the very `INodeExecutionData[]` array n8n produced, and `X_route` hands the
+ * A token holds the very `INodeExecutionData[]` array n8n produced, and the routing hands the
  * *same* `EdgePayload` — same array, same item objects — to every edge of an output. That is
  * exactly what n8n does: `addNodeToBeExecuted` writes `nodeSuccessData[outputIndex]` by
  * reference into every waiting slot and stack entry (`workflow-execute.ts:534-537`,

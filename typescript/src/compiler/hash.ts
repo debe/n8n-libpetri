@@ -18,9 +18,13 @@ export function structuralHash(analysis: WorkflowAnalysis): string {
   const canonical = {
     // 2: clamped retry params (retryParamsOf); 3: classified references, OR form, split
     // routing; 4: start-node set, _pause, X/waiting and X/stopped outcomes; 5: per-output
-    // routing for every node with an output (SPLIT_ROUTING_ABOVE = 0), so `_budget` is
-    // refunded by X_done one cycle after the edge tokens land
-    v: 5,
+    // routing for every node with an output, so `_budget` is refunded by X_done one cycle
+    // after the edge tokens land; 6: X_run routes in its own Out spec at or below
+    // SPLIT_ROUTING_ABOVE (3) connected outputs — X/ok and X_route are gone there and
+    // X_done consumes a single X/routed; 7: no `_halted` and no `_halt_reap` — `_halt` is
+    // the halted run's terminal marker, never consumed, and the pending activations rest
+    // where they were delivered
+    v: 7,
     start: analysis.startNode,
     starts: [...analysis.startNodes],
     nodes: analysis.nodes.map((a) => ({

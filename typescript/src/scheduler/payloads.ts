@@ -83,8 +83,9 @@ export interface RetryPayload {
 }
 
 /**
- * The token on `X/ok` (or every `X/ok_o` under split routing): the node's recorded output
- * and the run index it was recorded under, which becomes `previousNodeRun` on every edge.
+ * The value `X_run` routes with — carried on every `X/ok_o` under per-output routing, and
+ * read straight out of the outcome everywhere else: the node's recorded output and the run
+ * index it was recorded under, which becomes `previousNodeRun` on every edge.
  * `nodeSuccessData` is `[]` when the node produced nothing routable (n8n's
  * `nodeSuccessData === null` branch, a filtered-out node): every edge then receives `empty`.
  */
