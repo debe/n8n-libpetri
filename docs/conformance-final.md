@@ -3,9 +3,11 @@
 The final gate. [`docs/conformance-m2.md`](conformance-m2.md) reported n8n's
 `packages/core/src/execution-engine` suite at k = 1 and
 [`docs/conformance-m3.md`](conformance-m3.md) reported it per budget; both stand as written,
-with one arithmetic caveat: their headlines are out of 36 loop-driving cases, and M4 widened
-the classifier to 44 (below), so the denominators here and there differ by the eight
-`webhook-respond-branch-order.test.ts` cases and by nothing else.
+with two caveats. The first is arithmetic: their headlines are out of 36 loop-driving cases,
+and M4 widened the classifier to 44 (below), so the denominators here and there differ by the
+eight `webhook-respond-branch-order.test.ts` cases and by nothing else. The second is an
+attribution: both blamed the depth-first ordering case on divergence #12, and M4 measured it
+as #20 (below), which is also why that case now passes at k = 1.
 This report does three things they could not:
 
 1. it widens the run past the filtered execution-engine set to **all of `packages/core`** —
@@ -128,7 +130,7 @@ baselines. The construction counter was run on two of those legs and found the e
 the 27 `packages/core` files outside `src/execution-engine` were not re-run with the counter,
 but the classifier finds no loop-driving case in them either. That is evidence that patches
 0001 and 0002 change nothing around the seam, across tens of thousands of cases. It is not
-evidence about the scheduler, and this report does not count it as such.
+evidence about the scheduler.
 
 Excluding the AI-agent `EngineRequest` / `EngineResponse` tool dispatch that is out of scope
 by decision (6 loop-driving + 2 helper cases, unchanged since M2), the k = 1 legs read
@@ -197,7 +199,7 @@ because `scheduler-registry.js` is a file patch 0002 *adds* and a stale one surv
 of the unpatched tree, which would label a legacy run `libpetri`.
 
 But registering is not entering, and here it does not: **the factory is constructed zero
-times in 1104 files.** `packages/cli` has five production call sites
+times in 1104 files.** `packages/cli` reaches the seam from four production files
 (`manual-execution.service.ts`, `workflow-runner.ts`, `workflow-execute-additional-data.ts`,
 `scaling/job-processor.ts`), and every cli test that reaches them mocks `n8n-core`'s
 `WorkflowExecute` first (`vi.mock('n8n-core')`, `vi.spyOn(WorkflowExecute.prototype, …)`);
@@ -238,8 +240,7 @@ one file whose *name* matches the loop-driving file rule —
 `IWorkflowExecuteAdditionalData` (hooks, static data, credentials plumbing) and never runs a
 workflow, so no describe block matches a pattern and the file contributes nothing to the
 headline. The cli scope's value is not a loop headline: it is 20328 cases of the layer *around*
-the engine — webhooks, waiting forms, executions, the agents module, the public API — none of
-which changes under the PetriScheduler.
+the engine, none of which changes under the PetriScheduler.
 
 ## The classifier, and which cases are loop-driving in the wider scopes
 
@@ -388,8 +389,8 @@ count went from 13 to 11. The second was the mirror image in `packages/cli`: a f
 `n8n-workflow` without `NodeHelpers` made that same dynamic import throw and took its 24 cases
 down with it; the shim now catches it, skips registration for that one file and reports the
 skip as a diagnostic (above). Both were the harness perturbing tests it had no business
-touching, and in both cases the proof that it was the harness and not the engine is that the
-failures reproduce with `N8N_EXECUTION_ENGINE=legacy` under the same config.
+touching, and in both cases the failures reproduce with `N8N_EXECUTION_ENGINE=legacy` under
+the same config — which pins it on the harness, not the engine.
 
 ## Divergence register, final state
 
@@ -410,11 +411,10 @@ failures reproduce with `N8N_EXECUTION_ENGINE=legacy` under the same config.
   model change), and **#8** (the query it names, `placeBound(ready_i, n)`, was measured in M4
   and does not close on a compiled net; the join-slot form that does close cannot fail).
 
-Of the 21, **6 bite above k = 1** (#15–#19 and #21; of those only #16 can also bite at
-k = 1) and **1 is v0 only**
-(#3). At k = 1 on a v1 workflow the register that can bite is: #2, #5, #8, #9, #10, #11, #12,
-#13, #14 — arrival order, join arrival counts and stop semantics, all of them ordering or
-join-strandedness, none of them a silent data corruption.
+Of the 21, **6 bite above k = 1** (#15–#19 and #21; of those only #16 can also bite at k = 1)
+and **1 is v0 only** (#3). At k = 1 on a v1 workflow the register that can bite is: #2, #5,
+#8, #9, #10, #11, #12, #13, #14 — arrival order, join arrival counts and stop semantics, all
+of them ordering or join-strandedness, none of them a silent data corruption.
 
 ## What this engine reproduces, and what it does not
 

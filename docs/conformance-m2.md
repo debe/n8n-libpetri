@@ -16,7 +16,7 @@ cases in 75 files); the classifier in `typescript/src/conformance/classify.ts` s
 of them as loop-driving by describe-block name, and those 36 are this report's headline. (M4
 widened it to 44 — see [`conformance-final.md`](conformance-final.md).) The remaining
 1621 are pure helpers (`runNode`, `assignPairedItems`, `checkReadyForExecution`, error
-reporting, execution contexts, request helpers, …) and are reported separately as a
+reporting, execution contexts, request helpers, …), which this report states separately as a
 regression guard, not as evidence that the engine works. The pinned per-pattern counts live
 in `typescript/tests/conformance/classify.test.ts`.
 
@@ -35,12 +35,12 @@ passes here, and no case is missing or new — the two runs cover the same 1657 
 
 Timings on an idle machine (load average 1.5–4.2): legacy 7 s, libpetri 10 s, whole script
 17 s wall. The suite is load-sensitive (an earlier run took 507 s at load average > 20 and
-hit a 5 s vitest timeout), so it must be run idle.
+hit a 5 s vitest timeout), so run it idle.
 
 ## Classification
 
-Every failing case, with its root cause. `defect-fixed` cases were fixed in this pass and are
-pinned by a `FakeHost` test that was verified to fail against the pre-fix code.
+Every failing case, with its root cause. This pass fixed the `defect-fixed` cases and pinned
+each with a `FakeHost` test that first failed against the pre-fix code.
 
 | case (n8n) | class | root cause |
 |---|---|---|
@@ -65,8 +65,8 @@ of the helper shortfall. Excluding them, the libpetri engine passes **26 / 30** 
 cases and **1621 / 1621** helpers, and the four remaining failures are the two registered and
 two proposed divergence rows above.
 
-No failing case is classified `defect-open`: every failure is either fixed, a registered or
-proposed abandonment, or the declared out-of-scope area.
+Every failure falls in one of three classes: fixed, a registered or proposed abandonment, or
+the declared out-of-scope area. None is `defect-open`.
 
 ## Reproducing
 

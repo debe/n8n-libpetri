@@ -15,11 +15,11 @@ independent 500 ms HTTP calls should take ~500 ms, not ~1 s.
 
 ## What the budget leg is compared to, and why
 
-A k > 1 leg is **not** compared to the unpatched baseline. n8n's suite asserts its own total
-`nodeExecutionOrder`, so comparing a deliberately concurrent run to it fails by construction
-and the exit status would say nothing. Each k > 1 leg is compared to the **k = 1 libpetri
-leg** — same engine, same divergences, only the budget differs — so a regression there is a
-real one. `scripts/run-conformance.sh` does this automatically for `--budget=N` with N > 1.
+`scripts/run-conformance.sh` compares each k > 1 leg to the **k = 1 libpetri leg**, not to the
+unpatched baseline, and does so automatically for `--budget=N` with N > 1. n8n's suite asserts
+its own total `nodeExecutionOrder`, so a deliberately concurrent run fails against that
+baseline by construction and the exit status would say nothing. Against the k = 1 leg — same
+engine, same divergences, only the budget differs — a regression is a real one.
 
 ## Headline
 
@@ -49,7 +49,7 @@ The legacy leg was re-run in this pass and is still byte-identical to the baseli
 
 Timings on a machine at load average 3.0–5.1: legacy 8 s, libpetri 10 s per budget leg, the
 whole `--budget=1` script 18 s. The suite is load-sensitive (an earlier run took 507 s at load
-average > 20 and hit a 5 s vitest timeout), so it must be run idle.
+average > 20 and hit a 5 s vitest timeout), so run it idle.
 
 ## Every case that passes at k = 1 and fails above it
 
