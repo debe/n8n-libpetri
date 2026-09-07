@@ -116,7 +116,7 @@
   </g>
 
   <!-- ══ RIGHT: the compiled net ═══════════════════════════════════════ -->
-  <text class="muted eyebrow" x="664" y="42">WHAT EVERY ONE OF THEM BECOMES</text>
+  <text class="muted eyebrow" x="664" y="42">WHAT ONE OF THEM BECOMES</text>
   <text class="accent plbl" x="1204" y="42" text-anchor="end">run is where n8n’s runNode() is called</text>
   <rect class="canvas" x="664" y="62" width="540" height="470" rx="12" stroke-width="1.25"/>
 

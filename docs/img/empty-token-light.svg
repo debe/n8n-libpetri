@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 1012" width="1240" height="1012" role="img"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 1200" width="1240" height="1200" role="img"
      aria-label="An n8n workflow that splits at IF and rejoins at Merge, then three frames of the compiled net running. IF routes data to A and an empty token to B. A runs and B skips, but the skip still delivers an empty to Merge. Both of Merge's input slots are claimed and one carries data, so Merge starts without any stuck-join fallback.">
   <title>The empty token, and why the join never sticks</title>
   <!-- PALETTE - the only block that differs between the light and dark variants. -->
@@ -26,7 +26,7 @@
     <marker id="aw"  viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="awF" d="M0 0 L10 5 L0 10 z"/></marker>
     <pattern id="grid" width="18" height="18" patternUnits="userSpaceOnUse"><circle class="dot" cx="1.6" cy="1.6" r="1.15"/></pattern>
   </defs>
-  <rect class="bg" x="0" y="0" width="1240" height="1012"/>
+  <rect class="bg" x="0" y="0" width="1240" height="1200"/>
 
   <text class="muted eyebrow" x="36" y="38">THE WORKFLOW YOU DRAW</text>
   <text class="faint note" x="1204" y="38" text-anchor="end">IF takes one branch &#183; B is never reached &#183; Merge still runs</text>
@@ -161,9 +161,9 @@
   <rect class="frame" x="36" y="724" width="1168" height="176" rx="12" stroke-width="1.25"/>
   <circle class="badge" cx="773" cy="768" r="13"/>
   <text class="onacc" x="773" y="773" text-anchor="middle" font-size="14" font-weight="700">3</text>
-  <text class="ink fhead" x="798" y="773">Each arrival claims a slot, then Merge starts</text>
+  <text class="ink fhead" x="798" y="773">Each arrival claims a slot</text>
   <text class="muted fbody" x="760" y="808">The data arrival raises <tspan class="accent">has data</tspan>. The empty one does not.</text>
-  <text class="muted fbody" x="760" y="830">All slots ready and one holds data, so Merge runs.</text>
+  <text class="muted fbody" x="760" y="830">Both slots are ready; only slot 0 brought data.</text>
     <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M114 806 C145.5 806 145.5 770 177 770"/>
     <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M114 806 C145.5 806 145.5 842 177 842"/>
     <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M203 770 L244 770"/>
@@ -175,10 +175,10 @@
     <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M418 770 C448.5 770 448.5 752 479 752"/>
     <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M418 770 C448.5 770 448.5 788 479 788"/>
     <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M418 842 L479 842"/>
-    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M505 752 C537.5 752 537.5 806 570 806"/>
-    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M505 788 C537.5 788 537.5 806 570 806"/>
-    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M505 842 C537.5 842 537.5 806 570 806"/>
-    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M590 806 L639 806"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M505 752 C537.5 752 537.5 806 570 806"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M505 788 C537.5 788 537.5 806 570 806"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M505 842 C537.5 842 537.5 806 570 806"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M590 806 L639 806"/>
     <rect class="bar" x="94" y="787" width="20" height="38" rx="3" stroke-width="1.4"/>
     <circle class="place" cx="190" cy="770" r="13" stroke-width="1.7"/>
     <rect class="bar" x="244" y="751" width="20" height="38" rx="3" stroke-width="1.4"/>
@@ -191,8 +191,8 @@
     <circle class="place" cx="492" cy="752" r="13" stroke-width="1.7"/><circle class="tok" cx="492" cy="752" r="5"/>
     <circle class="place" cx="492" cy="788" r="13" stroke-width="1.7"/><circle class="tok" cx="492" cy="788" r="5"/>
     <circle class="place" cx="492" cy="842" r="13" stroke-width="1.7"/><circle class="tok" cx="492" cy="842" r="5"/>
-    <rect class="barLit" x="570" y="787" width="20" height="38" rx="3" stroke-width="1.4"/>
-    <circle class="term" cx="652" cy="806" r="13" stroke-width="1.7"/><circle class="tok" cx="652" cy="806" r="5"/>
+    <rect class="bar" x="570" y="787" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="term" cx="652" cy="806" r="13" stroke-width="1.7"/>
     <text class="muted tlbl" x="104" y="842" text-anchor="middle">IF runs</text>
     <text class="muted plbl" x="190" y="748" text-anchor="middle">to A</text>
     <text class="muted tlbl" x="254" y="748" text-anchor="middle">A runs</text>
@@ -208,17 +208,67 @@
     <text class="muted tlbl" x="580" y="868" text-anchor="middle">Merge starts</text>
     <text class="muted plbl" x="652" y="868" text-anchor="middle">running</text>
 
-  <line class="panelln" stroke-width="1.25" x1="36" y1="914" x2="1204" y2="914"/>
-  <circle class="place" cx="46" cy="940" r="10" stroke-width="1.6"/>
-  <text class="muted note" x="62" y="944">place: holds tokens</text>
-  <rect class="bar" x="216" y="930" width="14" height="20" rx="2" stroke-width="1.3"/>
-  <text class="muted note" x="238" y="944">transition: fires, moving tokens</text>
-  <rect class="barLit" x="452" y="930" width="14" height="20" rx="2" stroke-width="1.3"/>
-  <text class="muted note" x="474" y="944">just fired</text>
-  <circle class="place" cx="576" cy="940" r="10" stroke-width="1.6"/><circle class="tok" cx="576" cy="940" r="4"/>
-  <text class="muted note" x="592" y="944">data token</text>
-  <circle class="place" cx="686" cy="940" r="10" stroke-width="1.6"/><circle class="tokE" cx="686" cy="940" r="4" stroke-width="1.6"/>
-  <text class="muted note" x="702" y="944">empty token</text>
-  <text class="faint note" x="36" y="972">to A: A/in &#183; to B: B/in_empty &#183; from A: in0_e0 &#183; from B: in1_e5_empty &#183; claim slot 0: arm_e0_data &#183; claim slot 1: arm_e5_empty</text>
-  <text class="faint note" x="36" y="994">slot i ready: ready_i &#183; has data: hasdata &#183; running: Merge/running. Compiler names, read off dotExport() of the compiled diamond fixture.</text>
+  <rect class="frame" x="36" y="912" width="1168" height="176" rx="12" stroke-width="1.25"/>
+  <circle class="badge" cx="773" cy="956" r="13"/>
+  <text class="onacc" x="773" y="961" text-anchor="middle" font-size="14" font-weight="700">4</text>
+  <text class="ink fhead" x="798" y="961">Merge starts</text>
+  <text class="muted fbody" x="760" y="996">All slots ready and one holding data is the whole condition.</text>
+  <text class="muted fbody" x="760" y="1018">Start consumes all three, and Merge runs on A&#8217;s data alone.</text>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M114 994 C145.5 994 145.5 958 177 958"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M114 994 C145.5 994 145.5 1030 177 1030"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M203 958 L244 958"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M264 958 L329 958"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M203 1030 L244 1030"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M264 1030 L329 1030"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M355 958 L398 958"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M355 1030 L398 1030"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M418 958 C448.5 958 448.5 940 479 940"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M418 958 C448.5 958 448.5 976 479 976"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M418 1030 L479 1030"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M505 940 C537.5 940 537.5 994 570 994"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M505 976 C537.5 976 537.5 994 570 994"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M505 1030 C537.5 1030 537.5 994 570 994"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M590 994 L639 994"/>
+    <rect class="bar" x="94" y="975" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="190" cy="958" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="244" y="939" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="342" cy="958" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="398" y="939" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="190" cy="1030" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="244" y="1011" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="342" cy="1030" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="398" y="1011" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="492" cy="940" r="13" stroke-width="1.7"/>
+    <circle class="place" cx="492" cy="976" r="13" stroke-width="1.7"/>
+    <circle class="place" cx="492" cy="1030" r="13" stroke-width="1.7"/>
+    <rect class="barLit" x="570" y="975" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="term" cx="652" cy="994" r="13" stroke-width="1.7"/><circle class="tok" cx="652" cy="994" r="5"/>
+    <text class="muted tlbl" x="104" y="1030" text-anchor="middle">IF runs</text>
+    <text class="muted plbl" x="190" y="936" text-anchor="middle">to A</text>
+    <text class="muted tlbl" x="254" y="936" text-anchor="middle">A runs</text>
+    <text class="muted plbl" x="342" y="936" text-anchor="middle">from A</text>
+    <text class="muted tlbl" x="408" y="936" text-anchor="middle">claim slot 0</text>
+    <text class="muted plbl" x="190" y="1060" text-anchor="middle">to B</text>
+    <text class="muted tlbl" x="254" y="1060" text-anchor="middle">B skips</text>
+    <text class="muted plbl" x="342" y="1060" text-anchor="middle">from B</text>
+    <text class="muted tlbl" x="408" y="1060" text-anchor="middle">claim slot 1</text>
+    <text class="muted plbl" x="512" y="944" text-anchor="start">slot 0 ready</text>
+    <text class="muted plbl" x="512" y="980" text-anchor="start">has data</text>
+    <text class="muted plbl" x="512" y="1034" text-anchor="start">slot 1 ready</text>
+    <text class="muted tlbl" x="580" y="1056" text-anchor="middle">Merge starts</text>
+    <text class="muted plbl" x="652" y="1056" text-anchor="middle">running</text>
+
+  <line class="panelln" stroke-width="1.25" x1="36" y1="1102" x2="1204" y2="1102"/>
+  <circle class="place" cx="46" cy="1128" r="10" stroke-width="1.6"/>
+  <text class="muted note" x="62" y="1132">place: holds tokens</text>
+  <rect class="bar" x="216" y="1118" width="14" height="20" rx="2" stroke-width="1.3"/>
+  <text class="muted note" x="238" y="1132">transition: fires, moving tokens</text>
+  <rect class="barLit" x="452" y="1118" width="14" height="20" rx="2" stroke-width="1.3"/>
+  <text class="muted note" x="474" y="1132">just fired</text>
+  <circle class="place" cx="576" cy="1128" r="10" stroke-width="1.6"/><circle class="tok" cx="576" cy="1128" r="4"/>
+  <text class="muted note" x="592" y="1132">data token</text>
+  <circle class="place" cx="686" cy="1128" r="10" stroke-width="1.6"/><circle class="tokE" cx="686" cy="1128" r="4" stroke-width="1.6"/>
+  <text class="muted note" x="702" y="1132">empty token</text>
+  <text class="faint note" x="36" y="1160">to A: A/in &#183; to B: B/in_empty &#183; from A: in0_e0 &#183; from B: in1_e5_empty &#183; claim slot 0: arm_e0_data &#183; claim slot 1: arm_e5_empty</text>
+  <text class="faint note" x="36" y="1182">slot i ready: ready_i &#183; has data: hasdata &#183; running: Merge/running. Compiler names, read off dotExport() of the compiled diamond fixture.</text>
 </svg>

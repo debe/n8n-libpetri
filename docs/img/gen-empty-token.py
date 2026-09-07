@@ -6,8 +6,11 @@ scheduler actually does on that fixture. Re-run after changing either.
 """
 import io
 
-W, H = 1240, 1012
 FX, FW, FH, GAP, FY0 = 36, 1168, 176, 12, 348
+FRAME_COUNT = 4
+# The footer sits 14px under the last frame; the canvas ends 98px under the footer rule.
+FOOT = FY0 + FRAME_COUNT * (FH + GAP) - GAP + 14
+W, H = 1240, FOOT + 98
 CY_OFF, CAP_X = 82, 760
 XS = dict(if_run=104, a_in=190, a_run=254, m_in0=342, arm0=408, slot=492,
           b_inE=190, b_skip=254, m_in1E=342, arm1=408, m_start=580, m_run=652)
@@ -77,12 +80,16 @@ FRAMES = [
          b1='B&#8217;s skip consumes the empty and passes an empty on.',
          b2='Both of Merge&#8217;s inputs are now accounted for.',
          tok={'m_in0': 'data', 'm_in1E': 'empty'}, lit={'a', 'b'}),
-    dict(n='3', head='Each arrival claims a slot, then Merge starts',
+    dict(n='3', head='Each arrival claims a slot',
          b1='The data arrival raises <tspan class="accent">has data</tspan>. The empty one does not.',
-         b2='All slots ready and one holds data, so Merge runs.',
-         tok={'ready_0': 'data', 'hasdata': 'data', 'ready_1': 'data', 'm_running': 'data'},
-         lit={'arm', 'start'}),
+         b2='Both slots are ready; only slot 0 brought data.',
+         tok={'ready_0': 'data', 'hasdata': 'data', 'ready_1': 'data'}, lit={'arm'}),
+    dict(n='4', head='Merge starts',
+         b1='All slots ready and one holding data is the whole condition.',
+         b2='Start consumes all three, and Merge runs on A&#8217;s data alone.',
+         tok={'m_running': 'data'}, lit={'start'}),
 ]
+assert len(FRAMES) == FRAME_COUNT
 
 PALETTE_LIGHT = """    .bg { fill:#ffffff; } .canvas { fill:#f7f7f8; stroke:#e4e5e9; } .dot { fill:#d9dae0; }
     .frame { fill:#fbfbfc; stroke:#e8e9ed; }
@@ -172,19 +179,19 @@ def build(palette):
     {stage(cy, f['tok'], f['lit'])}''')
 
     o.append(f'''
-  <line class="panelln" stroke-width="1.25" x1="36" y1="914" x2="1204" y2="914"/>
-  <circle class="place" cx="46" cy="940" r="10" stroke-width="1.6"/>
-  <text class="muted note" x="62" y="944">place: holds tokens</text>
-  <rect class="bar" x="216" y="930" width="14" height="20" rx="2" stroke-width="1.3"/>
-  <text class="muted note" x="238" y="944">transition: fires, moving tokens</text>
-  <rect class="barLit" x="452" y="930" width="14" height="20" rx="2" stroke-width="1.3"/>
-  <text class="muted note" x="474" y="944">just fired</text>
-  <circle class="place" cx="576" cy="940" r="10" stroke-width="1.6"/><circle class="tok" cx="576" cy="940" r="4"/>
-  <text class="muted note" x="592" y="944">data token</text>
-  <circle class="place" cx="686" cy="940" r="10" stroke-width="1.6"/><circle class="tokE" cx="686" cy="940" r="4" stroke-width="1.6"/>
-  <text class="muted note" x="702" y="944">empty token</text>
-  <text class="faint note" x="36" y="972">to A: A/in &#183; to B: B/in_empty &#183; from A: in0_e0 &#183; from B: in1_e5_empty &#183; claim slot 0: arm_e0_data &#183; claim slot 1: arm_e5_empty</text>
-  <text class="faint note" x="36" y="994">slot i ready: ready_i &#183; has data: hasdata &#183; running: Merge/running. Compiler names, read off dotExport() of the compiled diamond fixture.</text>
+  <line class="panelln" stroke-width="1.25" x1="36" y1="{FOOT}" x2="1204" y2="{FOOT}"/>
+  <circle class="place" cx="46" cy="{FOOT+26}" r="10" stroke-width="1.6"/>
+  <text class="muted note" x="62" y="{FOOT+30}">place: holds tokens</text>
+  <rect class="bar" x="216" y="{FOOT+16}" width="14" height="20" rx="2" stroke-width="1.3"/>
+  <text class="muted note" x="238" y="{FOOT+30}">transition: fires, moving tokens</text>
+  <rect class="barLit" x="452" y="{FOOT+16}" width="14" height="20" rx="2" stroke-width="1.3"/>
+  <text class="muted note" x="474" y="{FOOT+30}">just fired</text>
+  <circle class="place" cx="576" cy="{FOOT+26}" r="10" stroke-width="1.6"/><circle class="tok" cx="576" cy="{FOOT+26}" r="4"/>
+  <text class="muted note" x="592" y="{FOOT+30}">data token</text>
+  <circle class="place" cx="686" cy="{FOOT+26}" r="10" stroke-width="1.6"/><circle class="tokE" cx="686" cy="{FOOT+26}" r="4" stroke-width="1.6"/>
+  <text class="muted note" x="702" y="{FOOT+30}">empty token</text>
+  <text class="faint note" x="36" y="{FOOT+58}">to A: A/in &#183; to B: B/in_empty &#183; from A: in0_e0 &#183; from B: in1_e5_empty &#183; claim slot 0: arm_e0_data &#183; claim slot 1: arm_e5_empty</text>
+  <text class="faint note" x="36" y="{FOOT+80}">slot i ready: ready_i &#183; has data: hasdata &#183; running: Merge/running. Compiler names, read off dotExport() of the compiled diamond fixture.</text>
 </svg>''')
     return '\n'.join(o)
 

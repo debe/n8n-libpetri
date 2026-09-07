@@ -22,14 +22,15 @@ verifier analyses the same net.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/workflow-to-net-dark.svg" />
-  <img alt="A six-node n8n canvas beside the Petri net gadget every one of its nodes compiles to:
+  <img alt="A six-node n8n canvas beside the Petri net gadget one of its nodes compiles to:
   in, idle, running, routed and done places, start, run and done transitions, a shared budget
   place and a halt place that inhibits the start." src="docs/img/workflow-to-net-light.svg" />
 </picture>
 
 *What the compiler does. Circles are places, bars are transitions, and a token sits in a place.
-Every node on the canvas becomes the same gadget, wired to the shared `_budget` and `_halt` places.
-`run` is the only transition that calls into n8n.*
+Four of these six nodes compile to exactly this gadget, wired to the shared `_budget` and `_halt`
+places; `Trigger` drops the skip branch, and `Merge` adds the join below. `run` is the only
+transition that calls `runNode()`.*
 
 ## Contents
 
@@ -69,7 +70,7 @@ recovery pass after the stack drains; the net needs none.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/empty-token-dark.svg" />
-  <img alt="An n8n workflow that splits at IF and rejoins at Merge, above three frames of its
+  <img alt="An n8n workflow that splits at IF and rejoins at Merge, above four frames of its
   compiled net running. IF routes data to A and an empty token to B. B never runs, but its skip
   still delivers an empty to Merge, so both of Merge's input slots are claimed and it starts."
   src="docs/img/empty-token-light.svg" />
