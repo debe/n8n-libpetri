@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 640" width="1240" height="640" role="img"
+     aria-label="Left: the diamond workflow on an n8n canvas - Trigger into IF, which branches to A and B, both into Merge, then End. Right: what one of those nodes compiles to - a Petri net gadget with in, idle, running, routed and done places, start, run and done transitions, a shared budget token and a halt place that inhibits the start.">
+  <title>A workflow, and the net it compiles to</title>
+  <!-- PALETTE - the only block that differs between the light and dark variants. -->
+  <style>
+    .bg      { fill: #0d1117; }
+    .canvas  { fill: #12171e; stroke: #2a313a; }
+    .dot     { fill: #262d36; }
+    .card    { fill: #1b222b; stroke: #333c47; }
+    .cardln  { stroke: #333c47; }
+    .glyph   { stroke: #a9b2bd; fill: none; }
+    .wire    { stroke: #4d5661; fill: none; }
+    .ink     { fill: #e9eef4; }
+    .muted   { fill: #a9b2bd; }
+    .faint   { fill: #7d8794; }
+    .accent  { fill: #ff6b8b; }
+    .accentS { stroke: #ff6b8b; }
+    .place   { fill: #12171e; stroke: #9aa4b1; }
+    .term    { fill: #16283d; stroke: #6ea8e8; }
+    .bar     { fill: #d8a63a; stroke: #f0cd76; }
+    .tok     { fill: #e9eef4; }
+    .arc     { stroke: #9aa4b1; fill: none; }
+    .inhib   { stroke: #ff6b8b; fill: none; }
+    .inhibD  { fill: #12171e; stroke: #ff6b8b; }
+    .panelln { stroke: #2a313a; }
+    .ahF     { fill: #9aa4b1; }
+    .awF     { fill: #4d5661; }
+    .inhF    { fill: #12171e; stroke: #ff6b8b; }
+    .onacc   { stroke: #12060a; }
+    text     { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    .eyebrow { font-size: 12.5px; font-weight: 700; letter-spacing: 1.4px; }
+    .nodelbl { font-size: 13px; font-weight: 600; }
+    .plbl    { font-size: 12px; }
+    .tlbl    { font-size: 12px; font-weight: 600; }
+    .note    { font-size: 13px; }
+    .mono    { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="ahF" d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+    <marker id="aw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path class="awF" d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+    <marker id="inh" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <circle class="inhF" cx="5" cy="5" r="3.6" stroke-width="1.4"/>
+    </marker>
+    <pattern id="grid" width="18" height="18" patternUnits="userSpaceOnUse">
+      <circle class="dot" cx="1.6" cy="1.6" r="1.15"/>
+    </pattern>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1240" height="640"/>
+
+  <!-- ══ LEFT: the n8n canvas ══════════════════════════════════════════ -->
+  <text class="muted eyebrow" x="36" y="42">WHAT YOU DRAW IN n8n</text>
+  <rect class="canvas" x="36" y="62" width="540" height="470" rx="12" stroke-width="1.25"/>
+  <rect x="37" y="63" width="538" height="468" rx="11" fill="url(#grid)"/>
+
+  <!-- wires (drawn under the cards) -->
+  <g class="wire" stroke-width="1.75" marker-end="url(#aw)">
+    <path d="M138 250 C160 250 162 250 182 250"/>
+    <path d="M246 238 C272 238 276 190 300 190"/>
+    <path d="M246 262 C272 262 276 320 300 320"/>
+    <path d="M364 190 C392 190 396 238 418 238"/>
+    <path d="M364 320 C392 320 396 262 418 262"/>
+    <path d="M482 250 C500 250 500 250 518 250"/>
+  </g>
+
+  <!-- Trigger: n8n rounds the left edge of a trigger node -->
+  <path class="card" stroke-width="1.4" d="M102 222 h28 a6 6 0 0 1 6 6 v44 a6 6 0 0 1 -6 6 h-28 a28 28 0 0 1 0 -56 z"/>
+  <g class="glyph" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M116 236 l-7 12 h6 l-3 10 l8 -12 h-6 z"/>
+  </g>
+  <text class="ink nodelbl" x="119" y="296" text-anchor="middle">Trigger</text>
+
+  <!-- IF -->
+  <rect class="card" x="186" y="222" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round">
+    <path d="M204 262 h6 l12 -24 h6"/><path d="M204 250 h24"/>
+    <circle class="muted" cx="231" cy="238" r="2.6" stroke="none"/>
+    <circle class="muted" cx="231" cy="250" r="2.6" stroke="none"/>
+  </g>
+  <text class="ink nodelbl" x="216" y="296" text-anchor="middle">IF</text>
+
+  <!-- A -->
+  <rect class="card" x="304" y="162" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M322 200 l18 -18 l6 6 l-18 18 h-6 z"/></g>
+  <text class="ink nodelbl" x="334" y="236" text-anchor="middle">A</text>
+
+  <!-- B -->
+  <rect class="card" x="304" y="292" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M322 330 l18 -18 l6 6 l-18 18 h-6 z"/></g>
+  <text class="ink nodelbl" x="334" y="366" text-anchor="middle">B</text>
+
+  <!-- Merge -->
+  <rect class="card" x="422" y="222" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round">
+    <path d="M438 238 h10 l8 12 h10"/><path d="M438 262 h10 l8 -12"/>
+  </g>
+  <text class="ink nodelbl" x="452" y="296" text-anchor="middle">Merge</text>
+
+  <!-- End -->
+  <rect class="card" x="522" y="222" width="46" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M536 250 l18 -18 l6 6 l-18 18 h-6 z"/></g>
+  <text class="ink nodelbl" x="545" y="296" text-anchor="middle">End</text>
+
+  <text class="faint note" x="56" y="508">6 nodes on the canvas</text>
+
+  <!-- ══ the seam ══════════════════════════════════════════════════════ -->
+  <g transform="translate(608 288)">
+    <line class="panelln" stroke-width="1.25" x1="0" y1="-226" x2="0" y2="-40"/>
+    <line class="panelln" stroke-width="1.25" x1="0" y1="52" x2="0" y2="244"/>
+    <circle class="accent" cx="0" cy="6" r="17"/>
+    <path d="M-6 -2 L2 6 L-6 14" class="onacc" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- ══ RIGHT: the compiled net ═══════════════════════════════════════ -->
+  <text class="muted eyebrow" x="664" y="42">WHAT EVERY ONE OF THEM BECOMES</text>
+  <text class="accent plbl" x="1204" y="42" text-anchor="end">run is where n8n’s runNode() is called</text>
+  <rect class="canvas" x="664" y="62" width="540" height="470" rx="12" stroke-width="1.25"/>
+
+  <!-- halt: never consumed, inhibits every start -->
+  <circle class="term" cx="712" cy="112" r="14" stroke-width="1.6"/>
+  <text class="muted plbl" x="734" y="116">_halt</text>
+  <path class="inhib" stroke-width="1.6" marker-end="url(#inh)" d="M712 128 C712 168 748 170 762 196"/>
+  <text class="accent plbl" x="700" y="152" text-anchor="end">inhibits every start</text>
+
+  <!-- main chain: in -> start -> running -> run -> routed -> done -> done -->
+  <g class="arc" stroke-width="1.7" marker-end="url(#ah)">
+    <path d="M726 218 L757 218"/>
+    <path d="M787 218 L818 218"/>
+    <path d="M846 218 L877 218"/>
+    <path d="M907 218 L938 218"/>
+    <path d="M966 218 L997 218"/>
+    <path d="M1027 218 L1058 218"/>
+  </g>
+
+  <circle class="place" cx="712" cy="218" r="14" stroke-width="1.7"/>
+  <circle class="tok" cx="712" cy="218" r="5"/>
+  <text class="muted plbl" x="712" y="192" text-anchor="middle">in</text>
+
+  <rect class="bar" x="762" y="199" width="22" height="38" rx="3" stroke-width="1.4"/>
+  <text class="ink tlbl" x="773" y="192" text-anchor="middle">start</text>
+
+  <circle class="place" cx="832" cy="218" r="14" stroke-width="1.7"/>
+  <text class="muted plbl" x="832" y="192" text-anchor="middle">running</text>
+
+  <rect class="bar" x="882" y="199" width="22" height="38" rx="3" stroke-width="1.4"/>
+  <text class="ink tlbl" x="893" y="192" text-anchor="middle">run</text>
+
+  <circle class="place" cx="952" cy="218" r="14" stroke-width="1.7"/>
+  <text class="muted plbl" x="952" y="192" text-anchor="middle">routed</text>
+
+  <rect class="bar" x="1002" y="199" width="22" height="38" rx="3" stroke-width="1.4"/>
+  <text class="ink tlbl" x="1013" y="192" text-anchor="middle">done</text>
+
+  <circle class="term" cx="1072" cy="218" r="14" stroke-width="1.7"/>
+  <text class="muted plbl" x="1072" y="192" text-anchor="middle">done</text>
+
+  <!-- run calls n8n -->
+
+  <!-- idle: start takes it, run gives it back -->
+  <circle class="place" cx="832" cy="330" r="14" stroke-width="1.7"/>
+  <circle class="tok" cx="832" cy="330" r="5"/>
+  <text class="muted plbl" x="832" y="358" text-anchor="middle">idle</text>
+  <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M818 330 C790 330 773 300 773 243"/>
+  <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M893 243 C893 300 862 330 848 330"/>
+
+  <!-- budget: start takes one, done refunds one cycle later -->
+  <circle class="place" cx="952" cy="430" r="16" stroke-width="1.7"/>
+  <circle class="tok" cx="947" cy="430" r="4.5"/>
+  <circle class="tok" cx="957" cy="430" r="4.5"/>
+  <text class="muted plbl" x="952" y="462" text-anchor="middle">_budget  (k)</text>
+  <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M937 424 C860 402 776 372 771 243"/>
+  <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M1013 243 C1013 350 995 418 969 427"/>
+
+  <text class="faint plbl" x="684" y="474">idle + running = 1</text>
+  <text class="faint plbl" x="810" y="474">·</text>
+  <text class="faint plbl" x="826" y="474">_budget refunded one cycle after the edge tokens</text>
+  <text class="faint note" x="684" y="508">One node: 9 places, 4 transitions. Skip, wait and stop branches left out here.</text>
+
+  <!-- ══ footer ════════════════════════════════════════════════════════ -->
+  <line class="panelln" stroke-width="1.25" x1="36" y1="566" x2="1204" y2="566"/>
+  <text class="muted note" x="36" y="596">The whole canvas above compiles to one net:</text>
+  <text class="ink mono"   x="336" y="596">62 places · 27 transitions · 330 state classes at k = 1</text>
+  <text class="faint note" x="36" y="618">The scheduler runs that net. The verifier proves that same net. Neither builds a second model.</text>
+</svg>

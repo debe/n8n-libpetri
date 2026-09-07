@@ -9,10 +9,18 @@ The execution model is a Petri net. Concurrency, cycles, joins, retries, resourc
 terminal states therefore have explicit semantics. The scheduler executes that net. The
 verifier analyses the same net.
 
+![An n8n diamond workflow above three frames of its compiled net running. IF routes data to A
+and an empty token to B. B never runs, but its skip still delivers an empty to Merge, so both
+of Merge's input slots are claimed and it starts.](docs/img/empty-token-light.svg)
+
+*The `diamond` fixture and its compiled net. `IF` takes one branch, so `B` never runs. The branch
+it did not take still emits an `empty` token, `B`'s skip passes that empty on, and `Merge` starts:
+both slots claimed, one holding data. n8n needs a stuck-join fallback here. This run never has two
+nodes in flight — the guarantee is about semantics, not throughput.*
+
 The integration targets n8n commit
 `441970b211d13a3ce547916b2b8ee93677b620e9`. The pinned checkout lives in the ignored
-`.n8n/` directory and receives two small, rebasable patches. This repository does not carry
-an n8n fork.
+`.n8n/` directory and receives two small, rebasable patches. This repository carries no n8n fork.
 
 ## What changes
 
@@ -24,7 +32,7 @@ an n8n fork.
 | Persistence, hooks, webhooks and queue mode | State-class and SMT verification |
 | Execution-engine interface | Scheduler registration behind that interface |
 
-Only v1 execution order is supported. v0 is deliberately left on n8n's scheduler.
+n8n-libpetri supports v1 execution order only, and deliberately leaves v0 on n8n's scheduler.
 
 ## Execution model
 
@@ -38,7 +46,7 @@ transitions.
 
 ### Edges and empty output
 
-An explicit `empty` token means that an acyclic edge produced no data for this activation.
+An explicit `empty` token means an acyclic edge produced no data for this activation.
 That information matters at joins: every required input eventually contributes data or
 empty, so an acyclic AND-join can complete or skip without n8n's stuck-join fallback.
 
@@ -51,7 +59,7 @@ first finds strongly connected components, then emits:
 | Edge leaving a cyclic producer | `data` or local `nil` | `empty` |
 | Edge inside a cycle | `data` or local `nil` | nothing |
 
-`nil` is consumed locally by a sink. It records that an output was not selected without
+A local sink consumes `nil`. It records that an output was not selected without
 inventing traffic on a cycle.
 
 ### Node lifecycle
@@ -61,6 +69,13 @@ The normal path is:
 ```text
 input + idle + budget -> running -> routed -> done + budget
 ```
+
+![One n8n node and the Petri net gadget it compiles to: in, idle, running, routed and done
+places, start, run and done transitions, a shared budget place and a halt place that inhibits
+the start.](docs/img/workflow-to-net-light.svg)
+
+*Every node on the canvas becomes this gadget. Nothing consumes `_halt`, so it inhibits every
+start; `X_done` refunds `_budget` one scheduling cycle after the edge tokens.*
 
 `start` acquires one `_budget` token. `run` calls n8n's existing `runNode()` and routes the
 result. `done` refunds the token one scheduler cycle later. The split models duration and
@@ -72,8 +87,8 @@ _budget + running + retry + in-flight routing = k
 
 Each node also has an `idle` token, giving the invariant `idle + running = 1`. Retries hold
 the budget while waiting, as n8n's retry loop does. A fatal error deposits `_halt`; all new
-starts and routing transitions inhibit on it. In-flight actions may finish, then the marking
-codec writes pending activations back to n8n's resumable state. Wait and destination-node
+starts and routing transitions inhibit on it. In-flight actions may finish; the marking codec then
+writes pending activations back to n8n's resumable state. Wait and destination-node
 stops use `_pause` in the same way.
 
 Nodes with up to three connected outputs route directly from `run`. Wider fan-outs use one
@@ -82,10 +97,10 @@ many `xor` branches.
 
 ### Joins and OR-inputs
 
-A join has one `free`, `ready` and `hasdata` place per input. An arriving edge claims its
-input slot. The node starts after all required slots are ready and at least one contains
-data; otherwise it skips and propagates empty output. The places make slot allocation and
-mutual exclusion explicit.
+A join has a `free` and a `ready` place for each input, and one `hasdata` place for the node.
+An arriving edge claims its input slot. The node starts after all required slots are ready and
+at least one contains data; otherwise it skips and propagates empty output. The places make
+slot allocation and mutual exclusion explicit.
 
 Several producers targeting one input are an OR-input, not an AND-join. Each data arrival
 may activate the node. Empty-capable producers close a delivery round together, preventing
@@ -110,7 +125,7 @@ The compiler currently lowers the effective budget to one when a workflow contai
 or several producers for one input index. Those shapes need activation lineage before their
 tokens can be paired safely at `k > 1`. The budget-equivalence tests preserve run data at
 budgets 1, 2, 4 and 8 for k-safe workflows without completion-order-sensitive stop
-behaviour. Completion order is intentionally allowed to change above one.
+behaviour. Completion order may change above one, by design.
 
 ## Verification
 
@@ -177,8 +192,8 @@ script records cases whose workflow shape forced the effective budget back to on
 |---|---|
 | n8n execution-engine suite | Legacy: 1,657/1,657. Petri k=1: 1,646/1,657, all 11 regressions classified. |
 | n8n core suite | Legacy: 2,124/2,124. Petri: 2,113/2,124, the same 11 regressions. |
-| n8n workflow package | 9,603 cases pass; the scheduler is not entered there. |
-| n8n CLI package | 20,328 cases pass; the scheduler is registered but not entered there. |
+| n8n workflow package | 9,603 cases pass; the scheduler never runs there. |
+| n8n CLI package | 20,328 cases pass; the scheduler is registered but never runs there. |
 | Differential sweep | 23 fixtures at k=1,2,4: 49 pass, 20 registered divergences, 0 failures. |
 | Broader n8n run | 32,055 cases with no new failure class. |
 
@@ -195,18 +210,18 @@ raw numbers are in [`docs/differential.md`](docs/differential.md).
 
 ## Known limits
 
-- AI-agent `EngineRequest` and `EngineResponse` tool dispatch are not implemented.
+- AI-agent `EngineRequest` and `EngineResponse` tool dispatch is not implemented.
 - Cyclic and multi-producer-input workflows currently run with an effective budget of one.
 - OR-input rounds do not yet carry activation lineage.
 - Completion-order fields such as `lastNodeExecuted`, `waitTill` and the selected fatal error
   can differ when actions complete concurrently.
 - An in-flight sibling may finish after another node halts the execution.
 - Verification does not prove general liveness, value properties, timing or order.
-- Large parallel state spaces may return `unknown`; cyclic searches normally return
-  `bounded` unless another property is violated first.
+- The verifier returns `unknown` on large parallel state spaces, and `bounded` on cyclic
+  searches unless another property is violated first.
 
-These constraints are tracked in [`docs/divergences.md`](docs/divergences.md) and
-[`docs/state-of-the-project.md`](docs/state-of-the-project.md).
+[`docs/divergences.md`](docs/divergences.md) and
+[`docs/state-of-the-project.md`](docs/state-of-the-project.md) track these constraints.
 
 ## Repository map
 

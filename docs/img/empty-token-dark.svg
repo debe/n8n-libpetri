@@ -1,0 +1,219 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 890" width="1240" height="890" role="img"
+     aria-label="An n8n diamond workflow, then three frames of the compiled net running. IF routes data to A and an empty token to B. A runs and B skips, but the skip still delivers an empty to Merge. Both of Merge's input slots are claimed and one carries data, so Merge starts without any stuck-join fallback.">
+  <title>The empty token, and why the join never sticks</title>
+  <!-- PALETTE - the only block that differs between the light and dark variants. -->
+  <style>
+    .bg { fill:#0d1117; } .canvas { fill:#12171e; stroke:#2a313a; } .dot { fill:#262d36; }
+    .frame { fill:#11161d; stroke:#242b34; }
+    .card { fill:#1b222b; stroke:#333c47; } .glyph { stroke:#a9b2bd; fill:none; }
+    .wire { stroke:#4d5661; fill:none; } .wireLit { stroke:#ff6b8b; fill:none; }
+    .ink { fill:#e9eef4; } .muted { fill:#a9b2bd; } .faint { fill:#7d8794; } .accent { fill:#ff6b8b; }
+    .place { fill:#12171e; stroke:#9aa4b1; } .term { fill:#16283d; stroke:#6ea8e8; }
+    .bar { fill:#12171e; stroke:#6e7681; } .barLit { fill:#d8a63a; stroke:#f0cd76; }
+    .tok { fill:#e9eef4; } .tokE { fill:none; stroke:#e9eef4; }
+    .arc { stroke:#39424d; fill:none; } .arcLit { stroke:#9aa4b1; fill:none; }
+    .ahF { fill:#39424d; } .ahLF { fill:#9aa4b1; } .awF { fill:#4d5661; }
+    .panelln { stroke:#2a313a; } .badge { fill:#ff6b8b; } .onacc { fill:#12060a; }
+    text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    .eyebrow { font-size:12.5px; font-weight:700; letter-spacing:1.4px; }
+    .nodelbl { font-size:13px; font-weight:600; }
+    .plbl { font-size:12.5px; } .tlbl { font-size:12.5px; font-weight:600; }
+    .fhead { font-size:17px; font-weight:650; } .fbody { font-size:14px; } .note { font-size:13.5px; }
+  </style>
+  <defs>
+    <marker id="ah"  viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="ahF" d="M0 0 L10 5 L0 10 z"/></marker>
+    <marker id="ahL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="ahLF" d="M0 0 L10 5 L0 10 z"/></marker>
+    <marker id="aw"  viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="awF" d="M0 0 L10 5 L0 10 z"/></marker>
+    <pattern id="grid" width="18" height="18" patternUnits="userSpaceOnUse"><circle class="dot" cx="1.6" cy="1.6" r="1.15"/></pattern>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1240" height="890"/>
+
+  <text class="muted eyebrow" x="36" y="38">THE WORKFLOW YOU DRAW</text>
+  <text class="faint note" x="1204" y="38" text-anchor="end">IF takes one branch &#183; B is never reached &#183; Merge still runs</text>
+  <rect class="canvas" x="36" y="56" width="1168" height="180" rx="12" stroke-width="1.25"/>
+  <rect x="37" y="57" width="1166" height="178" rx="11" fill="url(#grid)"/>
+  <g class="wire" stroke-width="1.75" marker-end="url(#aw)">
+    <path d="M338 137 C360 137 362 137 382 137"/><path d="M446 125 C472 125 476 97 500 97"/>
+    <path d="M564 97 C592 97 596 125 618 125"/><path d="M682 137 C700 137 700 137 718 137"/>
+  </g>
+  <g class="wireLit" stroke-width="1.75" marker-end="url(#aw)">
+    <path d="M446 149 C472 149 476 177 500 177"/><path d="M564 177 C592 177 596 149 618 149"/>
+  </g>
+  <path class="card" stroke-width="1.4" d="M302 109 h28 a6 6 0 0 1 6 6 v44 a6 6 0 0 1 -6 6 h-28 a28 28 0 0 1 0 -56 z"/>
+  <g class="glyph" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M316 123 l-7 12 h6 l-3 10 l8 -12 h-6 z"/></g>
+  <text class="ink nodelbl" x="319" y="183" text-anchor="middle">Trigger</text>
+  <rect class="card" x="386" y="109" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M404 149 h6 l12 -24 h6"/><path d="M404 137 h24"/></g>
+  <text class="ink nodelbl" x="416" y="183" text-anchor="middle">IF</text>
+  <rect class="card" x="504" y="69" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M522 107 l18 -18 l6 6 l-18 18 h-6 z"/></g>
+  <text class="ink nodelbl" x="534" y="143" text-anchor="middle">A</text>
+  <rect class="card" x="504" y="149" width="60" height="56" rx="7" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round" opacity="0.4"><path d="M522 187 l18 -18 l6 6 l-18 18 h-6 z"/></g>
+  <text class="faint nodelbl" x="534" y="223" text-anchor="middle">B &#8212; skipped</text>
+  <rect class="card" x="622" y="109" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M638 125 h10 l8 12 h10"/><path d="M638 149 h10 l8 -12"/></g>
+  <text class="ink nodelbl" x="652" y="183" text-anchor="middle">Merge</text>
+  <rect class="card" x="722" y="109" width="46" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M736 137 l18 -18 l6 6 l-18 18 h-6 z"/></g>
+  <text class="ink nodelbl" x="745" y="183" text-anchor="middle">End</text>
+
+  <rect class="frame" x="36" y="272" width="1168" height="176" rx="12" stroke-width="1.25"/>
+  <circle class="badge" cx="773" cy="316" r="13"/>
+  <text class="onacc" x="773" y="321" text-anchor="middle" font-size="14" font-weight="700">1</text>
+  <text class="ink fhead" x="798" y="321">IF routes every connected output</text>
+  <text class="muted fbody" x="760" y="356">The branch IF did not take emits an <tspan class="accent">empty</tspan> token &#8212;</text>
+  <text class="muted fbody" x="760" y="378">not nothing. Every edge resolves, always.</text>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M114 354 C145.5 354 145.5 318 177 318"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M114 354 C145.5 354 145.5 390 177 390"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M203 318 L244 318"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M264 318 L329 318"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M203 390 L244 390"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M264 390 L329 390"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M355 318 L398 318"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M355 390 L398 390"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M418 318 C448.5 318 448.5 300 479 300"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M418 318 C448.5 318 448.5 336 479 336"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M418 390 L479 390"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M505 300 C537.5 300 537.5 354 570 354"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M505 336 C537.5 336 537.5 354 570 354"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M505 390 C537.5 390 537.5 354 570 354"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M590 354 L639 354"/>
+    <rect class="barLit" x="94" y="335" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="190" cy="318" r="13" stroke-width="1.7"/><circle class="tok" cx="190" cy="318" r="5"/>
+    <rect class="bar" x="244" y="299" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="342" cy="318" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="398" y="299" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="190" cy="390" r="13" stroke-width="1.7"/><circle class="tokE" cx="190" cy="390" r="5" stroke-width="1.7"/>
+    <rect class="bar" x="244" y="371" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="342" cy="390" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="398" y="371" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="492" cy="300" r="13" stroke-width="1.7"/>
+    <circle class="place" cx="492" cy="336" r="13" stroke-width="1.7"/>
+    <circle class="place" cx="492" cy="390" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="570" y="335" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="term" cx="652" cy="354" r="13" stroke-width="1.7"/>
+    <text class="muted tlbl" x="104" y="390" text-anchor="middle">IF/run</text>
+    <text class="muted plbl" x="190" y="296" text-anchor="middle">A/in</text>
+    <text class="muted tlbl" x="254" y="296" text-anchor="middle">A/run</text>
+    <text class="muted plbl" x="342" y="296" text-anchor="middle">in0_e0</text>
+    <text class="muted tlbl" x="408" y="296" text-anchor="middle">arm_e0_data</text>
+    <text class="muted plbl" x="190" y="420" text-anchor="middle">B/in_empty</text>
+    <text class="muted tlbl" x="254" y="420" text-anchor="middle">B/skip</text>
+    <text class="muted plbl" x="342" y="438" text-anchor="middle">in1_e5_empty</text>
+    <text class="muted tlbl" x="408" y="420" text-anchor="middle">arm_e5_empty</text>
+    <text class="muted plbl" x="512" y="304" text-anchor="start">ready_0</text>
+    <text class="muted plbl" x="512" y="340" text-anchor="start">hasdata</text>
+    <text class="muted plbl" x="512" y="394" text-anchor="start">ready_1</text>
+    <text class="muted tlbl" x="580" y="416" text-anchor="middle">Merge/start</text>
+    <text class="muted plbl" x="652" y="416" text-anchor="middle">running</text>
+
+  <rect class="frame" x="36" y="460" width="1168" height="176" rx="12" stroke-width="1.25"/>
+  <circle class="badge" cx="773" cy="504" r="13"/>
+  <text class="onacc" x="773" y="509" text-anchor="middle" font-size="14" font-weight="700">2</text>
+  <text class="ink fhead" x="798" y="509">A runs. B never runs.</text>
+  <text class="muted fbody" x="760" y="544">B&#8217;s skip consumes the empty and passes an empty on.</text>
+  <text class="muted fbody" x="760" y="566">Both of Merge&#8217;s inputs are now accounted for.</text>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M114 542 C145.5 542 145.5 506 177 506"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M114 542 C145.5 542 145.5 578 177 578"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M203 506 L244 506"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M264 506 L329 506"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M203 578 L244 578"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M264 578 L329 578"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M355 506 L398 506"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M355 578 L398 578"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M418 506 C448.5 506 448.5 488 479 488"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M418 506 C448.5 506 448.5 524 479 524"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M418 578 L479 578"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M505 488 C537.5 488 537.5 542 570 542"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M505 524 C537.5 524 537.5 542 570 542"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M505 578 C537.5 578 537.5 542 570 542"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M590 542 L639 542"/>
+    <rect class="bar" x="94" y="523" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="190" cy="506" r="13" stroke-width="1.7"/>
+    <rect class="barLit" x="244" y="487" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="342" cy="506" r="13" stroke-width="1.7"/><circle class="tok" cx="342" cy="506" r="5"/>
+    <rect class="bar" x="398" y="487" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="190" cy="578" r="13" stroke-width="1.7"/>
+    <rect class="barLit" x="244" y="559" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="342" cy="578" r="13" stroke-width="1.7"/><circle class="tokE" cx="342" cy="578" r="5" stroke-width="1.7"/>
+    <rect class="bar" x="398" y="559" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="492" cy="488" r="13" stroke-width="1.7"/>
+    <circle class="place" cx="492" cy="524" r="13" stroke-width="1.7"/>
+    <circle class="place" cx="492" cy="578" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="570" y="523" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="term" cx="652" cy="542" r="13" stroke-width="1.7"/>
+    <text class="muted tlbl" x="104" y="578" text-anchor="middle">IF/run</text>
+    <text class="muted plbl" x="190" y="484" text-anchor="middle">A/in</text>
+    <text class="muted tlbl" x="254" y="484" text-anchor="middle">A/run</text>
+    <text class="muted plbl" x="342" y="484" text-anchor="middle">in0_e0</text>
+    <text class="muted tlbl" x="408" y="484" text-anchor="middle">arm_e0_data</text>
+    <text class="muted plbl" x="190" y="608" text-anchor="middle">B/in_empty</text>
+    <text class="muted tlbl" x="254" y="608" text-anchor="middle">B/skip</text>
+    <text class="muted plbl" x="342" y="626" text-anchor="middle">in1_e5_empty</text>
+    <text class="muted tlbl" x="408" y="608" text-anchor="middle">arm_e5_empty</text>
+    <text class="muted plbl" x="512" y="492" text-anchor="start">ready_0</text>
+    <text class="muted plbl" x="512" y="528" text-anchor="start">hasdata</text>
+    <text class="muted plbl" x="512" y="582" text-anchor="start">ready_1</text>
+    <text class="muted tlbl" x="580" y="604" text-anchor="middle">Merge/start</text>
+    <text class="muted plbl" x="652" y="604" text-anchor="middle">running</text>
+
+  <rect class="frame" x="36" y="648" width="1168" height="176" rx="12" stroke-width="1.25"/>
+  <circle class="badge" cx="773" cy="692" r="13"/>
+  <text class="onacc" x="773" y="697" text-anchor="middle" font-size="14" font-weight="700">3</text>
+  <text class="ink fhead" x="798" y="697">Each arrival claims a slot &#8212; Merge starts</text>
+  <text class="muted fbody" x="760" y="732"><tspan class="accent">arm_e0_data</tspan> raises hasdata. <tspan class="accent">arm_e5_empty</tspan> does not.</text>
+  <text class="muted fbody" x="760" y="754">All slots ready and one holds data, so Merge runs.</text>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M114 730 C145.5 730 145.5 694 177 694"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M114 730 C145.5 730 145.5 766 177 766"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M203 694 L244 694"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M264 694 L329 694"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M203 766 L244 766"/>
+    <path class="arc" stroke-width="1.7" marker-end="url(#ah)" d="M264 766 L329 766"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M355 694 L398 694"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M355 766 L398 766"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M418 694 C448.5 694 448.5 676 479 676"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M418 694 C448.5 694 448.5 712 479 712"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M418 766 L479 766"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M505 676 C537.5 676 537.5 730 570 730"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M505 712 C537.5 712 537.5 730 570 730"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M505 766 C537.5 766 537.5 730 570 730"/>
+    <path class="arcLit" stroke-width="1.7" marker-end="url(#ahL)" d="M590 730 L639 730"/>
+    <rect class="bar" x="94" y="711" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="190" cy="694" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="244" y="675" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="342" cy="694" r="13" stroke-width="1.7"/>
+    <rect class="barLit" x="398" y="675" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="190" cy="766" r="13" stroke-width="1.7"/>
+    <rect class="bar" x="244" y="747" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="342" cy="766" r="13" stroke-width="1.7"/>
+    <rect class="barLit" x="398" y="747" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="place" cx="492" cy="676" r="13" stroke-width="1.7"/><circle class="tok" cx="492" cy="676" r="5"/>
+    <circle class="place" cx="492" cy="712" r="13" stroke-width="1.7"/><circle class="tok" cx="492" cy="712" r="5"/>
+    <circle class="place" cx="492" cy="766" r="13" stroke-width="1.7"/><circle class="tok" cx="492" cy="766" r="5"/>
+    <rect class="barLit" x="570" y="711" width="20" height="38" rx="3" stroke-width="1.4"/>
+    <circle class="term" cx="652" cy="730" r="13" stroke-width="1.7"/><circle class="tok" cx="652" cy="730" r="5"/>
+    <text class="muted tlbl" x="104" y="766" text-anchor="middle">IF/run</text>
+    <text class="muted plbl" x="190" y="672" text-anchor="middle">A/in</text>
+    <text class="muted tlbl" x="254" y="672" text-anchor="middle">A/run</text>
+    <text class="muted plbl" x="342" y="672" text-anchor="middle">in0_e0</text>
+    <text class="muted tlbl" x="408" y="672" text-anchor="middle">arm_e0_data</text>
+    <text class="muted plbl" x="190" y="796" text-anchor="middle">B/in_empty</text>
+    <text class="muted tlbl" x="254" y="796" text-anchor="middle">B/skip</text>
+    <text class="muted plbl" x="342" y="814" text-anchor="middle">in1_e5_empty</text>
+    <text class="muted tlbl" x="408" y="796" text-anchor="middle">arm_e5_empty</text>
+    <text class="muted plbl" x="512" y="680" text-anchor="start">ready_0</text>
+    <text class="muted plbl" x="512" y="716" text-anchor="start">hasdata</text>
+    <text class="muted plbl" x="512" y="770" text-anchor="start">ready_1</text>
+    <text class="muted tlbl" x="580" y="792" text-anchor="middle">Merge/start</text>
+    <text class="muted plbl" x="652" y="792" text-anchor="middle">running</text>
+
+  <line class="panelln" stroke-width="1.25" x1="36" y1="838" x2="1204" y2="838"/>
+  <circle class="place" cx="46" cy="862" r="10" stroke-width="1.6"/><circle class="tok" cx="46" cy="862" r="4"/>
+  <text class="muted note" x="62" y="866">data</text>
+  <circle class="place" cx="126" cy="862" r="10" stroke-width="1.6"/><circle class="tokE" cx="126" cy="862" r="4" stroke-width="1.6"/>
+  <text class="muted note" x="142" y="866">empty</text>
+  <rect class="barLit" x="216" y="852" width="14" height="20" rx="2" stroke-width="1.3"/>
+  <text class="muted note" x="238" y="866">transition that just fired</text>
+  <text class="faint note" x="1204" y="866" text-anchor="end">Names are the compiler&#8217;s own, read off dotExport() of the compiled diamond.</text>
+</svg>
