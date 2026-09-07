@@ -160,6 +160,11 @@ compares the per-node start counts against the counts at the snapshot and drops 
 the snapshot's oldest tokens per start-input place, with a diagnostic. `X_skip` has no such
 counter, because it is a structural transition with no action to count in.
 
+> **Closed in M6, by removal.** There is no halt snapshot any more: `_halt_reap` and its reset
+> arcs are gone, `_halt` is never consumed, and the pending activations rest in the quiescent
+> marking, so a token another transition consumed is simply not there to be re-encoded (ADR
+> 0004, "The reap is gone"). The `X_skip` window this section left open closed with it.
+
 Two targeted experiments failed to reach the `X_skip` window, so it is left open rather than
 fixed blind (a fix would have to bind an action to a structural transition, and nothing here
 could pin it with a failing test):
