@@ -1,5 +1,10 @@
 # n8n-libpetri
 
+[![CI](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%E2%89%A5%2024-5fa04e)](typescript/package.json)
+[![libpetri](https://img.shields.io/badge/libpetri-%5E5.0.0-1f6feb)](https://github.com/debe/libpetri)
+[![License](https://img.shields.io/badge/license-Apache--2.0-1f6feb)](LICENSE)
+
 n8n executes a workflow by running a scheduling loop over an explicit stack of pending nodes.
 The loop is compact and effective, and it carries a complete scheduling model: the states a node
 passes through, the condition under which it may run, the number of nodes that may run at once,
@@ -341,6 +346,10 @@ npm run check
 npm test
 npm run build
 ```
+
+CI runs those four commands on Node 24, with z3 installed, for every push and pull request to
+`main`; the badge above reports that job. The conformance scripts below are not part of it,
+because they need the pinned n8n checkout.
 
 To test against the pinned n8n checkout:
 
