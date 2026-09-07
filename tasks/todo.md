@@ -286,6 +286,15 @@ an upstream ask, or work that was specified and deliberately not built.
 
 ### 5. Harness and CI
 
+- [ ] **CI runs on Node 24 and cannot move up yet.** `n8n-workflow` pulls
+      `@n8n/expression-runtime` -> `isolated-vm@6.2.0`, whose prebuilds stop at abi137 (Node 24);
+      on Node 26 `npm ci` falls through to `node-gyp rebuild` and dies on
+      `PropertyCallbackInfo<Value>` having no `This()` member. Nothing here references isolated-vm
+      — it is transitive, and `engines.node` (`>=24`) still describes the published package
+      correctly, whose only runtime dependency is libpetri. Moving up needs `isolated-vm >= 7.0.1`
+      (it ships abi147) forced in through an `overrides` entry, or an n8n-workflow that has done
+      it upstream. Worth doing deliberately, with the override's effect on
+      `@n8n/expression-runtime` checked rather than assumed
 - [ ] **`caseKeys` (`src/conformance/junit.ts`) pairs duplicate `(file, name)` cases positionally.**
       `packages/workflow` collects its 85 files three times (one vitest project each) and the junit
       carries no project name, so one case that runs in one project and is skipped in the other two
