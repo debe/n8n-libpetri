@@ -1,28 +1,118 @@
 # n8n-libpetri
 
-n8n-libpetri replaces n8n's intra-workflow scheduler with a coloured time Petri net.
-n8n still owns the editor, workflow format, credentials, nodes, persistence, webhooks,
-hooks and queue mode. This project replaces the roughly 490-line execution loop that
-pops `nodeExecutionStack`, calls `runNode()` and coordinates multi-input joins.
+n8n executes a workflow by running a scheduling loop over an explicit stack of pending nodes.
+The loop is compact and effective, and it carries a complete scheduling model: the states a node
+passes through, the condition under which it may run, the number of nodes that may run at once,
+and the conditions under which an execution ends. That model is expressed as control flow and as
+a small number of execution-global fields. It is legible to a reader of the source and available
+to nothing else.
+
+n8n-libpetri restates the same model as a coloured time Petri net. n8n retains the editor, the
+workflow format, credentials, node implementations, persistence, webhooks, hooks and queue mode.
+The scheduling model becomes an object in its own right.
 
 The execution model is a Petri net. Concurrency, cycles, joins, retries, resource limits and
 terminal states therefore have explicit semantics. The scheduler executes that net. The
 verifier analyses the same net.
 
-![An n8n diamond workflow above three frames of its compiled net running. IF routes data to A
-and an empty token to B. B never runs, but its skip still delivers an empty to Merge, so both
-of Merge's input slots are claimed and it starts.](docs/img/empty-token-light.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/workflow-to-net-dark.svg" />
+  <img alt="A six-node n8n canvas beside the Petri net gadget every one of its nodes compiles to:
+  in, idle, running, routed and done places, start, run and done transitions, a shared budget
+  place and a halt place that inhibits the start." src="docs/img/workflow-to-net-light.svg" />
+</picture>
 
-*The `diamond` fixture and its compiled net. `IF` takes one branch, so `B` never runs. The branch
-it did not take still emits an `empty` token, `B`'s skip passes that empty on, and `Merge` starts:
-both slots claimed, one holding data. n8n needs a stuck-join fallback here. This run never has two
-nodes in flight — the guarantee is about semantics, not throughput.*
+*What the compiler does. Circles are places, bars are transitions, and a token sits in a place.
+Every node on the canvas becomes the same gadget, wired to the shared `_budget` and `_halt` places.
+`run` is the only transition that calls into n8n.*
 
-The integration targets n8n commit
-`441970b211d13a3ce547916b2b8ee93677b620e9`. The pinned checkout lives in the ignored
-`.n8n/` directory and receives two small, rebasable patches. This repository carries no n8n fork.
+## Contents
 
-## What changes
+1. [The scheduler in n8n today](#the-scheduler-in-n8n-today)
+2. [What formalisation provides](#what-formalisation-provides)
+3. [Principles](#principles)
+4. [Scope](#scope)
+5. [Execution model](#execution-model)
+6. [Verification](#verification)
+7. [Evidence](#evidence)
+8. [Known limits](#known-limits)
+9. [Building and testing](#building-and-testing)
+10. [Repository map](#repository-map)
+
+## The scheduler in n8n today
+
+`WorkflowExecute.processRunExecutionData()` runs a loop of roughly 490 lines over an array of
+pending entries, plus a side table holding the partly arrived inputs of multi-input nodes. Each
+iteration takes one entry, runs that node, and appends the successors of every output that
+produced items, sorted by canvas position.
+
+Two conditions make it work, and the loop satisfies both by construction. A successor is
+enqueued only when its output carried data, so a recovery pass completes any node still waiting
+once the stack drains. Exactly one node runs at a time, which keeps the execution-global fields
+safe.
+
+## What formalisation provides
+
+Restating the model changes nothing about the work n8n performs. It changes what can be said
+about that work before it runs. Three conditions the loop holds implicitly become objects in the
+net, and analysability follows from having them.
+
+**Waiting becomes a place.** A join in the net holds one slot per input and fires when the last
+slot is claimed. An edge with no data for this activation claims its slot with an `empty` token,
+so "produced nothing" arrives as a fact. n8n has no such fact to send, so a waiting join needs a
+recovery pass after the stack drains; the net needs none.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/empty-token-dark.svg" />
+  <img alt="An n8n workflow that splits at IF and rejoins at Merge, above three frames of its
+  compiled net running. IF routes data to A and an empty token to B. B never runs, but its skip
+  still delivers an empty to Merge, so both of Merge's input slots are claimed and it starts."
+  src="docs/img/empty-token-light.svg" />
+</picture>
+
+*The same six nodes, now running. `IF` takes one branch, so `B` never runs. The untaken branch
+still emits an `empty` token, `B`'s skip passes that empty on, and `Merge` starts with both slots
+claimed and one holding data.*
+
+**The bound becomes a number.** One node at a time is what keeps `executionError`, `waitTill`
+and `lastNodeExecuted` correct, and nothing declares it. The net declares it as `_budget`, k
+tokens in one place, and the `budget` property checks the law that follows. Two independent
+500 ms branches take 1,006 ms today and 507 ms at k = 2.
+
+**Execution state becomes data.** Progress is the marking, and `MarkingCodec` writes it into
+n8n's own `nodeExecutionStack` and `waitingExecution`. Wait, resume and queue-mode handoff
+therefore move a marking with a defined encoding, and nothing new is persisted.
+
+**The model becomes analysable.** Whether a join can be left permanently unsatisfied is a
+question about reachable states, which control flow alone cannot answer. `proper-completion`
+decides it on the state-class graph: `violated` on `ifBothOutputs` in 15 ms, with the firing
+sequence named in nodes.
+
+Petri nets are a standard formalism for concurrent and distributed systems, with an established
+body of analysis to draw on. What ships today is one process with a configurable k. Raising k, or
+moving an execution between workers, is a change to the budget and the marking.
+
+The costs: about 16 µs of scheduler overhead per node; 9 of the 44 cases that drive the scheduler
+regressed, all classified; cyclic and multi-producer-input workflows pinned to k = 1; `bounded` on
+cycles and `unknown` on large parallel shapes.
+
+## Principles
+
+1. **Every transition carries a real `Out` spec**, never `null`, never `skipOutputValidation`.
+   The executor validates it and the verifier reads it: that is how one net serves both. The
+   only null-spec transitions are genuine sinks (libpetri CORE-043 AC4).
+2. **The net decides what runs.** Enablement follows from tokens, guards, inhibitors, read arcs,
+   priorities and timed transitions. Nothing dispatches from the host: no queue, no permit
+   gating, no policy object. Retries, mutual exclusion, concurrency limits and halts are places
+   and arcs.
+3. **Behaviour that follows from the stack discipline is a candidate for abandonment, not a
+   requirement.** The net models the workflow's semantics, and
+   [`docs/divergences.md`](docs/divergences.md) records every difference.
+4. **Report only the direction the encoding licenses.** The verification abstraction is priority-
+   and value-blind, so a witness stays a witness and never becomes a proof. No check claims more
+   than its query asks.
+
+## Scope
 
 | n8n keeps | n8n-libpetri provides |
 |---|---|
@@ -40,18 +130,15 @@ One workflow execution creates one net. Each n8n node becomes a `SubnetDef` with
 transitions for start, run, completion, skipping, retry and exhaustion. Shared places model
 the concurrency budget, halt and pause state.
 
-The net decides what may run. There is no second dispatch queue or host-side permit system.
-Enablement follows from tokens, guards, inhibitors, read arcs, priorities and timed
-transitions.
+### Emission rule
 
-### Edges and empty output
+An `empty` token on an acyclic edge asserts that the edge produced no data for this activation
+of its producer. That assertion is what lets an AND-join complete or skip on its own.
 
-An explicit `empty` token means an acyclic edge produced no data for this activation.
-That information matters at joins: every required input eventually contributes data or
-empty, so an acyclic AND-join can complete or skip without n8n's stuck-join fallback.
-
-Cycles need different rules because an empty token must not circulate forever. The compiler
-first finds strongly connected components, then emits:
+Cycles need a different rule, because an empty token must not circulate forever. A node skipped
+on an empty input would emit `empty` on its back edge, re-activating its predecessor's skip,
+which emits `empty` again, without end. The compiler therefore decomposes the main-connection
+graph into strongly connected components before emitting:
 
 | Edge | Producer returned data | Producer skipped |
 |---|---|---|
@@ -59,10 +146,10 @@ first finds strongly connected components, then emits:
 | Edge leaving a cyclic producer | `data` or local `nil` | `empty` |
 | Edge inside a cycle | `data` or local `nil` | nothing |
 
-A local sink consumes `nil`. It records that an output was not selected without
-inventing traffic on a cycle.
+A local sink consumes `nil`. It records that an output was not selected without inventing
+traffic on a cycle. [ADR 0002](docs/adr/0002-emission-rule.md) records the decision.
 
-### Node lifecycle
+### Per-node gadget
 
 The normal path is:
 
@@ -70,62 +157,97 @@ The normal path is:
 input + idle + budget -> running -> routed -> done + budget
 ```
 
-![One n8n node and the Petri net gadget it compiles to: in, idle, running, routed and done
-places, start, run and done transitions, a shared budget place and a halt place that inhibits
-the start.](docs/img/workflow-to-net-light.svg)
-
-*Every node on the canvas becomes this gadget. Nothing consumes `_halt`, so it inhibits every
-start; `X_done` refunds `_budget` one scheduling cycle after the edge tokens.*
-
-`start` acquires one `_budget` token. `run` calls n8n's existing `runNode()` and routes the
-result. `done` refunds the token one scheduler cycle later. The split models duration and
-makes the budget a structural property of the net:
+In the gadget pictured at the top of this file, `start` acquires one `_budget` token. `run` calls
+n8n's existing `runNode()` and routes the result. `done` refunds the token one scheduler cycle
+later. The split models duration and makes the budget a structural property of the net:
 
 ```text
 _budget + running + retry + in-flight routing = k
 ```
 
-Each node also has an `idle` token, giving the invariant `idle + running = 1`. Retries hold
-the budget while waiting, as n8n's retry loop does. A fatal error deposits `_halt`; all new
-starts and routing transitions inhibit on it. In-flight actions may finish; the marking codec then
-writes pending activations back to n8n's resumable state. Wait and destination-node
-stops use `_pause` in the same way.
+Each node also has an `idle` token, giving the invariant `idle + running = 1`.
 
 Nodes with up to three connected outputs route directly from `run`. Wider fan-outs use one
-routing transition per output. This avoids the `2^k` flattening cost of an `and` containing
-many `xor` branches.
+routing transition per output. This avoids flattening an `and` of `n` `xor`s into `2^n`
+branches.
 
-### Joins and OR-inputs
+Transition priority is DAG depth, so at k = 1 the net walks a workflow depth-first, as n8n's
+loop does. [ADR 0004](docs/adr/0004-two-phase-budget.md) records the two-phase split.
+
+### Retries, halt, cancellation
+
+Retries hold the budget while they wait, as n8n's retry loop does. A fatal error deposits
+`_halt`, and every new start and routing transition inhibits on it. Actions already in flight
+may finish, and the marking codec then writes the pending activations back to n8n's resumable
+state. Wait nodes and destination-node stops deposit `_pause` and are handled the same way.
+
+### Join gadget and OR-inputs
 
 A join has a `free` and a `ready` place for each input, and one `hasdata` place for the node.
-An arriving edge claims its input slot. The node starts after all required slots are ready and
-at least one contains data; otherwise it skips and propagates empty output. The places make
-slot allocation and mutual exclusion explicit.
+An arriving edge claims its input slot. The node starts once all required slots are ready and at
+least one holds data; otherwise it skips and propagates empty output. The places make slot
+allocation and mutual exclusion explicit.
 
-Several producers targeting one input are an OR-input, not an AND-join. Each data arrival
-may activate the node. Empty-capable producers close a delivery round together, preventing
-one empty edge from prematurely skipping downstream work. The current round model is
-positional. Interleaved arrivals can expose the known FIFO/LIFO divergence documented in
-[`docs/divergences.md`](docs/divergences.md).
+Several producers targeting one input form an OR-input, not an AND-join. Each data arrival may
+activate the node. Empty-capable producers close a delivery round together, which keeps one
+empty edge from prematurely skipping downstream work. The current round model is positional, and
+interleaved arrivals can expose the FIFO/LIFO divergence recorded in
+[`docs/divergences.md`](docs/divergences.md). [ADR 0003](docs/adr/0003-join-gadget.md) records
+the gadget.
 
-### Expressions
+### Expression references
 
 References such as `$('Y')` become read arcs on `Y/done` when `Y` is a valid upstream
 dependency. A skipped or unreachable dependency produces n8n's unexecuted-node error under
 the node's configured error policy. Self-, downstream- and loop-back references remain
 runtime expression errors.
 
-### Concurrency
+### Concurrency budget and its safety condition
 
-The initial `_budget` marking is the maximum number of node actions that may be in flight.
-Independent enabled transitions can therefore run concurrently. This is a consequence of
-the model, not the model's main claim.
+The initial `_budget` marking is the maximum number of node actions that may be in flight. A
+retry holds its unit while it waits, so concurrent runs are bounded by the budget and need not
+reach it.
+Independent enabled transitions can therefore run concurrently. The budget is a declared
+invariant first and a throughput control second.
 
-The compiler currently lowers the effective budget to one when a workflow contains a cycle
-or several producers for one input index. Those shapes need activation lineage before their
-tokens can be paired safely at `k > 1`. The budget-equivalence tests preserve run data at
-budgets 1, 2, 4 and 8 for k-safe workflows without completion-order-sensitive stop
-behaviour. Completion order may change above one, by design.
+Above k = 1 one rule falls on node authors: **a node's input items are read-only**. n8n already
+shares the producer's `INodeExecutionData` objects across every connection, so a node that
+mutates its input `json` in place corrupts its sibling's input today. Concurrency makes the
+result nondeterministic.
+
+The compiler currently lowers the effective budget to one when a workflow contains a cycle or
+several producers for one input index. Those shapes need activation lineage before their tokens
+can be paired safely at `k > 1`. The budget-equivalence tests preserve run data at budgets 1, 2,
+4 and 8 for k-safe workflows without completion-order-sensitive stop behaviour. Completion order
+may change above one, by design. [ADR 0006](docs/adr/0006-concurrency.md) records the condition.
+
+### Initial marking and the marking codec
+
+The initial marking of one execution is `_budget` × k, one `X/idle` per node, one `X/free_i` per
+join input whose slot is not pre-filled, `X/tries` per retry node, one `empty` token on the
+`ready` place of every join input fed only by nodes unreachable from the start node, `Y/skipped`
+for every referenced node unreachable from the start node, and the trigger items on the start
+node's `in` place. Seeding unreachable inputs with `empty` performs n8n's recovery substitution
+once, at decode time.
+
+A running execution's progress is the marking, and n8n remains the system of record. Nothing of
+the net is persisted. `MarkingCodec` encodes a quiescent marking into n8n's own
+`nodeExecutionStack`, `waitingExecution` and `waitingExecutionSource`, and decodes them back by
+layering them over the execution-independent part of the initial marking:
+
+| n8n | marking |
+|---|---|
+| Stack entry | the entry on the consumer's `in` place, or on its edge place, in FIFO order |
+| `waitingExecution[X][k].main[i]` holding items | a `data` token on `X/ready_i` |
+| `waitingExecution[X][k].main[i] = []` | an `empty` token on `X/ready_i` |
+| `waitingExecution[X][k].main[i] = null` | nothing; the input has not arrived |
+| `runData[Y]` non-empty | `Y/done` |
+
+Encoding runs only at quiescence, so nothing in flight is ever serialised. The encoder omits
+`_budget`, `X/idle`, `X/free_i` and `X/tries`; the decoder re-seeds them, and rebuilds the `done`
+and `skipped` markers from `runData`. Wait, resume and queue-mode handoff therefore work
+with an unmodified `IRunExecutionData`, and the patches never touch persistence.
+[ADR 0005](docs/adr/0005-marking-codec.md) records the mapping.
 
 ## Verification
 
@@ -161,46 +283,27 @@ Counterexamples are node paths through the production net. The verifier models c
 flow, not item values, timing or total execution order. Independent branches can make the
 state space grow combinatorially; productive cycles make it infinite. See
 [`docs/verification.md`](docs/verification.md) for the exact guarantees, limits and
-measurements.
+measurements, and [ADR 0007](docs/adr/0007-verification.md) for the decision.
 
-## Build and test
-
-The TypeScript package requires Node 24 or newer.
-
-```bash
-cd typescript
-npm ci
-npm run check
-npm test
-npm run build
-```
-
-To test against the pinned n8n checkout:
-
-```bash
-scripts/bootstrap-n8n.sh
-scripts/run-conformance.sh --engines=legacy,libpetri
-scripts/verify-patch.sh
-```
-
-Use `scripts/run-conformance.sh --engines=libpetri --budget=2` for a wider budget. The
-script records cases whose workflow shape forced the effective budget back to one.
-
-## Current evidence
+## Evidence
 
 | Surface | Result |
 |---|---|
-| n8n execution-engine suite | Legacy: 1,657/1,657. Petri k=1: 1,646/1,657, all 11 regressions classified. |
-| n8n core suite | Legacy: 2,124/2,124. Petri: 2,113/2,124, the same 11 regressions. |
-| n8n workflow package | 9,603 cases pass; the scheduler never runs there. |
+| Execution-engine suite, loop-driving | Legacy 44/44. Petri k=1: 35/44, or 35/38 excluding out-of-scope AI-agent dispatch. |
+| Execution-engine suite, helpers | Legacy 1,613/1,613. Petri k=1: 1,611/1,613. |
+| Core suite | The same 44 loop-driving cases at 35/44, with 2,078/2,080 helpers, across 2,124 cases. |
+| n8n workflow package | 9,603 cases, identical to the unpatched baseline; the scheduler never runs there. |
 | n8n CLI package | 20,328 cases pass; the scheduler is registered but never runs there. |
 | Differential sweep | 23 fixtures at k=1,2,4: 49 pass, 20 registered divergences, 0 failures. |
-| Broader n8n run | 32,055 cases with no new failure class. |
 
-Eight of the 11 execution-engine regressions exercise AI-agent `EngineRequest` dispatch,
-which is outside the current scheduler scope. The other three are documented semantic
-differences: stuck-join handling and OR/join ordering. The exact cases and evidence are in
-[`docs/conformance-final.md`](docs/conformance-final.md).
+The classifier marks 44 of the execution-engine suite's 1,657 cases as loop-driving, so those 44
+measure the engine; the remaining 1,613 are helpers and guard the seam against perturbation. Of
+the eleven regressions,
+nine are loop-driving and two are helpers. Six of the nine exercise AI-agent `EngineRequest`
+dispatch, which is out of scope by decision; the remaining three are documented semantic
+differences in stuck-join handling and OR/join ordering. Widening to `packages/workflow` and
+`packages/cli` added 29,931 further cases with no new failure class. The exact cases and
+evidence are in [`docs/conformance-final.md`](docs/conformance-final.md).
 
 The benchmark is useful as a cost check, not as an architectural argument. A warm 100-node
 zero-work chain adds about 16 µs of scheduler overhead per node over n8n's loop on the
@@ -222,6 +325,33 @@ raw numbers are in [`docs/differential.md`](docs/differential.md).
 
 [`docs/divergences.md`](docs/divergences.md) and
 [`docs/state-of-the-project.md`](docs/state-of-the-project.md) track these constraints.
+
+## Building and testing
+
+The integration targets n8n commit `441970b211d13a3ce547916b2b8ee93677b620e9`. The pinned
+checkout lives in the ignored `.n8n/` directory and receives two small, rebasable patches. This
+repository carries no n8n fork.
+
+The TypeScript package requires Node 24 or newer.
+
+```bash
+cd typescript
+npm ci
+npm run check
+npm test
+npm run build
+```
+
+To test against the pinned n8n checkout:
+
+```bash
+scripts/bootstrap-n8n.sh
+scripts/run-conformance.sh --engines=legacy,libpetri
+scripts/verify-patch.sh
+```
+
+Use `scripts/run-conformance.sh --engines=libpetri --budget=2` for a wider budget. The
+script records cases whose workflow shape forced the effective budget back to one.
 
 ## Repository map
 

@@ -1,5 +1,6 @@
 /**
- * The evidence for the project's central claim (README "Why", milestone M3): *n8n completes
+ * The evidence for the project's central claim (README "What formalisation provides",
+ * milestone M3): *n8n completes
  * one branch before starting the next, so two independent 500 ms HTTP calls take ~1 s; under
  * a net both transitions are enabled at once.*
  *

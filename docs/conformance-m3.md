@@ -66,7 +66,7 @@ its junit can never say whether the *data* still matches. The differ can.
 Neither is a defect. The rule this milestone is held to — *a data difference at k > 1 that is
 not present at k = 1 is always a defect, never a divergence* — has one carve-out, the
 registered abandonments, and row #17 is one: `EXEC-040`, in the register since M2's design pass
-and stated normatively in the README's "The pause claim". It is the only k > 1 behaviour change
+and stated normatively in the README's "Known limits". It is the only k > 1 behaviour change
 a user can observe. **Keep k = 1 for a workflow whose correctness depends on one node's failure
 suppressing a sibling that was ready to run.**
 

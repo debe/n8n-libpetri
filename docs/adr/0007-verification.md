@@ -3,7 +3,7 @@
 Status: accepted (2026-09-06), **amended 2026-09-06 (M5): the routes are inverted**.
 Milestone M4, amended by M5. Builds on [ADR 0004](0004-two-phase-budget.md) (the two-phase
 gadget is what makes the budget and the exclusion questions expressible at all) and on the
-README's "The model".
+README's "Execution model".
 
 > **M5 amendment, in one paragraph.** M4 asked every question of libpetri's `SmtVerifier`
 > and measured the headline one — proper completion — as `unknown` at 30 s, 60 s and 600 s,
@@ -23,7 +23,7 @@ README's "The model".
 
 ## Context
 
-The second reason the project exists (README "Why") is analysability: once a workflow *is* a
+The second reason the project exists (README "What formalisation provides") is analysability: once a workflow *is* a
 net, `SmtVerifier` should prove properties of it before activation and hand back
 counterexamples that are literal node paths through the same semantics production runs.
 M4 turns that claim into a measured surface.

@@ -6,8 +6,8 @@ scheduler actually does on that fixture. Re-run after changing either.
 """
 import io
 
-W, H = 1240, 890
-FX, FW, FH, GAP, FY0 = 36, 1168, 176, 12, 272
+W, H = 1240, 1012
+FX, FW, FH, GAP, FY0 = 36, 1168, 176, 12, 348
 CY_OFF, CAP_X = 82, 760
 XS = dict(if_run=104, a_in=190, a_run=254, m_in0=342, arm0=408, slot=492,
           b_inE=190, b_skip=254, m_in1E=342, arm1=408, m_start=580, m_run=652)
@@ -56,30 +56,29 @@ def stage(cy, T, L):
           place(XS['slot'], cy+R0, T.get('ready_0')), place(XS['slot'], cy+HD, T.get('hasdata')),
           place(XS['slot'], d, T.get('ready_1')),
           bar(XS['m_start'], cy, 'start' in L), place(XS['m_run'], cy, T.get('m_running'), term=True)]
-    g += [lbl(XS['if_run'], cy+36, 'IF/run', 'tlbl'),
-          lbl(XS['a_in'], u-22, 'A/in'), lbl(XS['a_run'], u-22, 'A/run', 'tlbl'),
-          lbl(XS['m_in0'], u-22, 'in0_e0'), lbl(XS['arm0'], u-22, 'arm_e0_data', 'tlbl'),
-          lbl(XS['b_inE'], d+30, 'B/in_empty'), lbl(XS['b_skip'], d+30, 'B/skip', 'tlbl'),
-          # staggered: `in1_e5_empty` and `arm_e5_empty` overlap on one row
-          lbl(XS['m_in1E'], d+48, 'in1_e5_empty'), lbl(XS['arm1'], d+30, 'arm_e5_empty', 'tlbl'),
-          lbl(XS['slot']+20, cy+R0+4, 'ready_0', 'plbl', 'start'),
-          lbl(XS['slot']+20, cy+HD+4, 'hasdata', 'plbl', 'start'),
-          lbl(XS['slot']+20, d+4, 'ready_1', 'plbl', 'start'),
+    g += [lbl(XS['if_run'], cy+36, 'IF runs', 'tlbl'),
+          lbl(XS['a_in'], u-22, 'to A'), lbl(XS['a_run'], u-22, 'A runs', 'tlbl'),
+          lbl(XS['m_in0'], u-22, 'from A'), lbl(XS['arm0'], u-22, 'claim slot 0', 'tlbl'),
+          lbl(XS['b_inE'], d+30, 'to B'), lbl(XS['b_skip'], d+30, 'B skips', 'tlbl'),
+          lbl(XS['m_in1E'], d+30, 'from B'), lbl(XS['arm1'], d+30, 'claim slot 1', 'tlbl'),
+          lbl(XS['slot']+20, cy+R0+4, 'slot 0 ready', 'plbl', 'start'),
+          lbl(XS['slot']+20, cy+HD+4, 'has data', 'plbl', 'start'),
+          lbl(XS['slot']+20, d+4, 'slot 1 ready', 'plbl', 'start'),
           # dropped below the slot column, which it used to sit on
-          lbl(XS['m_start'], cy+62, 'Merge/start', 'tlbl'), lbl(XS['m_run'], cy+62, 'running')]
+          lbl(XS['m_start'], cy+62, 'Merge starts', 'tlbl'), lbl(XS['m_run'], cy+62, 'running')]
     return '\n    '.join(g)
 
 FRAMES = [
     dict(n='1', head='IF routes every connected output',
-         b1='The branch IF did not take emits an <tspan class="accent">empty</tspan> token &#8212;',
+         b1='The branch IF did not take emits an <tspan class="accent">empty</tspan> token,',
          b2='not nothing. Every edge resolves, always.',
          tok={'a_in': 'data', 'b_inE': 'empty'}, lit={'if'}),
     dict(n='2', head='A runs. B never runs.',
          b1='B&#8217;s skip consumes the empty and passes an empty on.',
          b2='Both of Merge&#8217;s inputs are now accounted for.',
          tok={'m_in0': 'data', 'm_in1E': 'empty'}, lit={'a', 'b'}),
-    dict(n='3', head='Each arrival claims a slot &#8212; Merge starts',
-         b1='<tspan class="accent">arm_e0_data</tspan> raises hasdata. <tspan class="accent">arm_e5_empty</tspan> does not.',
+    dict(n='3', head='Each arrival claims a slot, then Merge starts',
+         b1='The data arrival raises <tspan class="accent">has data</tspan>. The empty one does not.',
          b2='All slots ready and one holds data, so Merge runs.',
          tok={'ready_0': 'data', 'hasdata': 'data', 'ready_1': 'data', 'm_running': 'data'},
          lit={'arm', 'start'}),
@@ -112,7 +111,7 @@ PALETTE_DARK = """    .bg { fill:#0d1117; } .canvas { fill:#12171e; stroke:#2a31
 
 def build(palette):
     o = [f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img"
-     aria-label="An n8n diamond workflow, then three frames of the compiled net running. IF routes data to A and an empty token to B. A runs and B skips, but the skip still delivers an empty to Merge. Both of Merge's input slots are claimed and one carries data, so Merge starts without any stuck-join fallback.">
+     aria-label="An n8n workflow that splits at IF and rejoins at Merge, then three frames of the compiled net running. IF routes data to A and an empty token to B. A runs and B skips, but the skip still delivers an empty to Merge. Both of Merge's input slots are claimed and one carries data, so Merge starts without any stuck-join fallback.">
   <title>The empty token, and why the join never sticks</title>
   <!-- PALETTE - the only block that differs between the light and dark variants. -->
   <style>
@@ -132,33 +131,33 @@ def build(palette):
 
   <text class="muted eyebrow" x="36" y="38">THE WORKFLOW YOU DRAW</text>
   <text class="faint note" x="1204" y="38" text-anchor="end">IF takes one branch &#183; B is never reached &#183; Merge still runs</text>
-  <rect class="canvas" x="36" y="56" width="1168" height="180" rx="12" stroke-width="1.25"/>
-  <rect x="37" y="57" width="1166" height="178" rx="11" fill="url(#grid)"/>
+  <rect class="canvas" x="36" y="56" width="1168" height="256" rx="12" stroke-width="1.25"/>
+  <rect x="37" y="57" width="1166" height="254" rx="11" fill="url(#grid)"/>
   <g class="wire" stroke-width="1.75" marker-end="url(#aw)">
-    <path d="M338 137 C360 137 362 137 382 137"/><path d="M446 125 C472 125 476 97 500 97"/>
-    <path d="M564 97 C592 97 596 125 618 125"/><path d="M682 137 C700 137 700 137 718 137"/>
+    <path d="M338 173 C360 173 362 173 382 173"/><path d="M446 161 C472 161 476 103 500 103"/>
+    <path d="M564 103 C592 103 596 161 618 161"/><path d="M682 173 C700 173 700 173 718 173"/>
   </g>
   <g class="wireLit" stroke-width="1.75" marker-end="url(#aw)">
-    <path d="M446 149 C472 149 476 177 500 177"/><path d="M564 177 C592 177 596 149 618 149"/>
+    <path d="M446 185 C472 185 476 243 500 243"/><path d="M564 243 C592 243 596 185 618 185"/>
   </g>
-  <path class="card" stroke-width="1.4" d="M302 109 h28 a6 6 0 0 1 6 6 v44 a6 6 0 0 1 -6 6 h-28 a28 28 0 0 1 0 -56 z"/>
-  <g class="glyph" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M316 123 l-7 12 h6 l-3 10 l8 -12 h-6 z"/></g>
-  <text class="ink nodelbl" x="319" y="183" text-anchor="middle">Trigger</text>
-  <rect class="card" x="386" y="109" width="60" height="56" rx="7" stroke-width="1.4"/>
-  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M404 149 h6 l12 -24 h6"/><path d="M404 137 h24"/></g>
-  <text class="ink nodelbl" x="416" y="183" text-anchor="middle">IF</text>
-  <rect class="card" x="504" y="69" width="60" height="56" rx="7" stroke-width="1.4"/>
-  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M522 107 l18 -18 l6 6 l-18 18 h-6 z"/></g>
-  <text class="ink nodelbl" x="534" y="143" text-anchor="middle">A</text>
-  <rect class="card" x="504" y="149" width="60" height="56" rx="7" stroke-width="1.4" stroke-dasharray="4 3"/>
-  <g class="glyph" stroke-width="1.6" stroke-linecap="round" opacity="0.4"><path d="M522 187 l18 -18 l6 6 l-18 18 h-6 z"/></g>
-  <text class="faint nodelbl" x="534" y="223" text-anchor="middle">B &#8212; skipped</text>
-  <rect class="card" x="622" y="109" width="60" height="56" rx="7" stroke-width="1.4"/>
-  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M638 125 h10 l8 12 h10"/><path d="M638 149 h10 l8 -12"/></g>
-  <text class="ink nodelbl" x="652" y="183" text-anchor="middle">Merge</text>
-  <rect class="card" x="722" y="109" width="46" height="56" rx="7" stroke-width="1.4"/>
-  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M736 137 l18 -18 l6 6 l-18 18 h-6 z"/></g>
-  <text class="ink nodelbl" x="745" y="183" text-anchor="middle">End</text>''']
+  <path class="card" stroke-width="1.4" d="M302 145 h28 a6 6 0 0 1 6 6 v44 a6 6 0 0 1 -6 6 h-28 a28 28 0 0 1 0 -56 z"/>
+  <g class="glyph" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M316 159 l-7 12 h6 l-3 10 l8 -12 h-6 z"/></g>
+  <text class="ink nodelbl" x="319" y="219" text-anchor="middle">Trigger</text>
+  <rect class="card" x="386" y="145" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M404 185 h6 l12 -24 h6"/><path d="M404 173 h24"/></g>
+  <text class="ink nodelbl" x="416" y="219" text-anchor="middle">IF</text>
+  <rect class="card" x="504" y="75" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M522 113 l18 -18 l6 6 l-18 18 h-6 z"/></g>
+  <text class="ink nodelbl" x="534" y="149" text-anchor="middle">A</text>
+  <rect class="card" x="504" y="215" width="60" height="56" rx="7" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round" opacity="0.4"><path d="M522 253 l18 -18 l6 6 l-18 18 h-6 z"/></g>
+  <text class="faint nodelbl" x="534" y="289" text-anchor="middle">B (skipped)</text>
+  <rect class="card" x="622" y="145" width="60" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M638 161 h10 l8 12 h10"/><path d="M638 185 h10 l8 -12"/></g>
+  <text class="ink nodelbl" x="652" y="219" text-anchor="middle">Merge</text>
+  <rect class="card" x="722" y="145" width="46" height="56" rx="7" stroke-width="1.4"/>
+  <g class="glyph" stroke-width="1.6" stroke-linecap="round"><path d="M736 173 l18 -18 l6 6 l-18 18 h-6 z"/></g>
+  <text class="ink nodelbl" x="745" y="219" text-anchor="middle">End</text>''']
 
     for i, f in enumerate(FRAMES):
         fy = FY0 + i * (FH + GAP)
@@ -173,14 +172,19 @@ def build(palette):
     {stage(cy, f['tok'], f['lit'])}''')
 
     o.append(f'''
-  <line class="panelln" stroke-width="1.25" x1="36" y1="838" x2="1204" y2="838"/>
-  <circle class="place" cx="46" cy="862" r="10" stroke-width="1.6"/><circle class="tok" cx="46" cy="862" r="4"/>
-  <text class="muted note" x="62" y="866">data</text>
-  <circle class="place" cx="126" cy="862" r="10" stroke-width="1.6"/><circle class="tokE" cx="126" cy="862" r="4" stroke-width="1.6"/>
-  <text class="muted note" x="142" y="866">empty</text>
-  <rect class="barLit" x="216" y="852" width="14" height="20" rx="2" stroke-width="1.3"/>
-  <text class="muted note" x="238" y="866">transition that just fired</text>
-  <text class="faint note" x="1204" y="866" text-anchor="end">Names are the compiler&#8217;s own, read off dotExport() of the compiled diamond.</text>
+  <line class="panelln" stroke-width="1.25" x1="36" y1="914" x2="1204" y2="914"/>
+  <circle class="place" cx="46" cy="940" r="10" stroke-width="1.6"/>
+  <text class="muted note" x="62" y="944">place: holds tokens</text>
+  <rect class="bar" x="216" y="930" width="14" height="20" rx="2" stroke-width="1.3"/>
+  <text class="muted note" x="238" y="944">transition: fires, moving tokens</text>
+  <rect class="barLit" x="452" y="930" width="14" height="20" rx="2" stroke-width="1.3"/>
+  <text class="muted note" x="474" y="944">just fired</text>
+  <circle class="place" cx="576" cy="940" r="10" stroke-width="1.6"/><circle class="tok" cx="576" cy="940" r="4"/>
+  <text class="muted note" x="592" y="944">data token</text>
+  <circle class="place" cx="686" cy="940" r="10" stroke-width="1.6"/><circle class="tokE" cx="686" cy="940" r="4" stroke-width="1.6"/>
+  <text class="muted note" x="702" y="944">empty token</text>
+  <text class="faint note" x="36" y="972">to A: A/in &#183; to B: B/in_empty &#183; from A: in0_e0 &#183; from B: in1_e5_empty &#183; claim slot 0: arm_e0_data &#183; claim slot 1: arm_e5_empty</text>
+  <text class="faint note" x="36" y="994">slot i ready: ready_i &#183; has data: hasdata &#183; running: Merge/running. Compiler names, read off dotExport() of the compiled diamond fixture.</text>
 </svg>''')
     return '\n'.join(o)
 
