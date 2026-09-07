@@ -343,6 +343,17 @@ an upstream ask, or work that was specified and deliberately not built.
       timeout for the same reason. Two load-sensitive flakes were observed once each and were not
       reproducible in isolation (`tests/spikes/emission-cycle.test.ts` "empty storm", and one
       `packages/cli` template test during a legacy leg)
+- [x] **Two more load-sensitive failures, both root-caused and closed** while getting CI green on
+      the 5.0.0 lockfile. Neither was the engine. (a) `collapsed-outcome.test.ts`'s twenty-output
+      case costs ~2.6 s alone and ~7.5 s with the other 47 files on the same cores — it walks the
+      `2^20` expansion to the stack limit and then builds a second twenty-output net — so vitest's
+      5 s default was never a bound on it; it carries `60_000` now. (b) `dataOf` compared
+      `error.stack` verbatim and V8 only splices `node:internal` frames (`runNextTicks`,
+      `processTimers`) into a stack when the throw unwound through them, so the k > 1 vs k = 1
+      data-equivalence assertion in `execution-error.test.ts` failed about one run in seven;
+      `dataOf` drops `node:` frames now and keeps every project frame. 15 consecutive full-suite
+      runs green, against a first failure at run 7 before. **The general rule this leaves:** a
+      comparison helper must strip what the *runtime* decides, not only what the clock decides
 
 ### 7. Housekeeping
 

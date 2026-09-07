@@ -85,11 +85,27 @@ export async function execute(
 }
 
 /**
+ * A recorded stack with the runtime's own frames dropped.
+ *
+ * `FakeHost.reportNodeExecutionError` keeps `e.stack` (`harness.ts:392`), and V8 splices its
+ * internal frames — `at runNextTicks (node:internal/process/task_queues)`, `at processTimers
+ * (node:internal/timers)` — into a stack only when the throw happened to unwind through them.
+ * Whether a node that throws after an `await sleep()` was resumed from the timer queue or from
+ * an already-draining microtask checkpoint is a fact about that tick, not about the run, so the
+ * frames appear or not between two runs of the same script. Only `node:` frames are dropped:
+ * the project frames are what makes the comparison worth anything.
+ */
+function stackAsData(stack: string): string {
+  return stack.split('\n').filter((line) => !/^\s*at .*\bnode:/.test(line)).join('\n');
+}
+
+/**
  * `runData` with the fields that are clocks or scheduling order removed, so two runs at
  * different budgets can be compared for **data** equivalence: `startTime` and
- * `executionTime` are clocks, and `executionIndex` is the order
+ * `executionTime` are clocks, `executionIndex` is the order
  * (`additionalData.currentNodeExecutionIndex++`), which is exactly what concurrency
- * reorders (divergences #5 / #12). Node keys are sorted, so the record order does not count.
+ * reorders (divergences #5 / #12), and an error's runtime frames are neither (`stackAsData`).
+ * Node keys are sorted, so the record order does not count.
  */
 export function dataOf(runData: IRunData): Record<string, unknown[]> {
   const out: Record<string, unknown[]> = {};
@@ -97,7 +113,9 @@ export function dataOf(runData: IRunData): Record<string, unknown[]> {
     out[node] = runData[node]!.map((task) => {
       const { startTime: _s, executionTime: _e, executionIndex: _i, ...rest } =
         task as typeof task & { executionIndex?: number };
-      return rest;
+      const error = rest.error as { stack?: unknown } | undefined;
+      if (error === undefined || typeof error.stack !== 'string') return rest;
+      return { ...rest, error: { ...error, stack: stackAsData(error.stack) } };
     });
   }
   return out;

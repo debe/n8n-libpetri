@@ -286,3 +286,27 @@ All notable changes to this project are documented here. The format follows
   each; the flatteners get cheaper. *Half superseded by M6*: the refund is still `X_done`
   and the phase is unchanged, but `SPLIT_ROUTING_ABOVE` is 3 again, so "every node with a
   connected output routes per output" no longer holds.
+
+### Fixed
+- **The lockfile still resolved libpetri 4.1.0**, so `npm ci` — CI's install step, and the only
+  one that reads `package-lock.json` as authoritative — refused every build with
+  `Invalid: lock file's libpetri@4.1.0 does not satisfy libpetri@5.0.0`. M6 had already moved
+  the model to 5.0.0 and `package.json` asked for `^5.0.0`; only the lock was left behind, which
+  is why a local `npm install` tree stayed green while CI could not install at all. No source
+  change: the lock now pins `libpetri@5.0.0` and the suite is 815/815 on it.
+- **Two load-sensitive test failures that only appear when the whole suite shares the cores**,
+  both artefacts of the harness rather than the engine:
+  - `tests/spikes/collapsed-outcome.test.ts`, the twenty-output case, drives `enumerateBranches`
+    through the `2^20` expansion until the stack gives out and then builds a second twenty-output
+    net for the `route` leg: ~2.6 s alone, ~7.5 s with the other 47 files running. vitest's 5 s
+    default was never a bound on it, so the case carries an explicit `60_000` (the convention
+    `tests/conformance/budget-equivalence.test.ts:71` already uses).
+  - `dataOf` (`tests/scheduler/support.ts`) compared `error.stack` verbatim, and V8 splices
+    `at runNextTicks (node:internal/…)` / `at processTimers (node:internal/…)` into a stack only
+    when the throw happened to unwind through them. A node that throws after an `await sleep()`
+    therefore produced two different stacks for the same script depending on how that tick's
+    timer drained, failing the k > 1 vs k = 1 data-equivalence assertion in
+    `execution-error.test.ts` about one run in seven. `dataOf` now drops `node:` frames — the
+    same category as the clocks and `executionIndex` it already dropped — and keeps every project
+    frame, so a real difference in the throw path still fails. 15 consecutive full-suite runs
+    green, against a first failure at run 7 before the change.

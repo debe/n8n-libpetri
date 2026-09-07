@@ -246,5 +246,8 @@ describe('spike: IO-016 flattening is what fixes SPLIT_ROUTING_ABOVE at 3', () =
     };
     expect(() => enumerateBranches(build(s).runSpec)).toThrow(RangeError);
     expect(flat('route', 20)).toBe(45);
-  });
+    // Reaching the overflow means walking the 2^20 expansion until the stack gives out, and the
+    // `route` leg builds a second 20-output net: ~2.6 s alone, ~7.5 s with the rest of the suite on
+    // the same cores, so vitest's 5 s default is not a bound on this one (tasks/todo.md § 6).
+  }, 60_000);
 });
