@@ -310,3 +310,24 @@ All notable changes to this project are documented here. The format follows
     same category as the clocks and `executionIndex` it already dropped — and keeps every project
     frame, so a real difference in the throw path still fails. 15 consecutive full-suite runs
     green, against a first failure at run 7 before the change.
+- **CI had been red on every commit since n8n-workflow entered the dev tree** (2026-09-05); only
+  the two scaffold commits before it were ever green. Three independent causes, all outside the
+  engine:
+  - The job asked for Node 26, set in the scaffold commit when the dev tree was pure TypeScript.
+    `n8n-workflow` pulls `@n8n/expression-runtime` -> `isolated-vm@6.2.0`, whose prebuilds stop at
+    abi137 (Node 24), so `npm ci` fell through to `node-gyp rebuild` and died on
+    `PropertyCallbackInfo<Value>` having no `This()` member. The runner is pinned to Node 24 —
+    `engines.node`'s floor, the version every number in the repo was measured on, and the newest
+    the tree installs on. Moving up needs `isolated-vm >= 7.0.1` (it ships abi147) forced through
+    an `overrides` entry, which is a deliberate change rather than part of getting CI green.
+  - `properties.test.ts` pinned `stateSpace.maxClasses` to the literal `200_000`, but that field
+    is the cap *after* `effectiveMaxClasses` lowers it to what the heap can hold — only a memory
+    bound stops a V8 heap exhaustion from aborting the process. A runner's ~2.35 GB heap reports
+    140 928, so the assertion pinned the runner's memory. It now compares against
+    `effectiveMaxClasses(DEFAULT_MAX_CLASSES)` and asserts the cap is above the 330 classes the
+    graph actually closed at; `state-class.test.ts` still covers the lowering at fixed heap sizes.
+  - `concurrency.test.ts`'s "four rounds collapse to two" bounded wall-clock at `< 3 x NODE_MS`,
+    which cannot tell a slow round from an extra one: under a 2 GB heap two rounds measured
+    180.78 ms against the 180 ms bound. It now measures against k = 1 in the same conditions,
+    where a per-round overhead `o` cancels in `(2n + 2o) / (4n + 4o)` — two rounds sit at ~0.5
+    however loaded the runner is, three would sit at ~0.75, and the bound is 0.7.

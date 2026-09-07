@@ -89,16 +89,23 @@ describe('independent branches overlap', () => {
   });
 
   it('k = 2 and k = 4 both collapse the four sequential rounds to two', { timeout: 20_000 }, async () => {
+    const one = await timed(1);
     const two = await timed(2);
     const four = await timed(4);
     expect(two.r.scheduler.compiled!.effectiveBudget).toBe(2);
     expect(four.r.scheduler.compiled!.effectiveBudget).toBe(4);
     expect(two.r.scheduler.maxInFlight).toBe(2);
     expect(four.r.scheduler.maxInFlight).toBe(3); // only three nodes are ever ready at once
+    expect(one.elapsedMs).toBeGreaterThanOrEqual(4 * NODE_MS * 0.9); // the denominator is four rounds
     // k = 2: A+B, then C+D. k = 4: A+B+C, then D. Both are two rounds of node work; a
     // fourth unit buys nothing here because `D` cannot start before `B` has finished.
     for (const { elapsedMs } of [two, four]) {
-      expect(elapsedMs).toBeLessThan(3 * NODE_MS);
+      // Measured against k = 1 in the same conditions rather than an absolute multiple of
+      // NODE_MS: a per-round overhead `o` cancels in (2n + 2o) / (4n + 4o), so the ratio stays
+      // at ~0.5 however loaded the runner is, where `< 3 x NODE_MS` cannot tell a slow round
+      // from an extra one — under a 2 GB heap two rounds measured 180.78 ms against that
+      // 180 ms bound. Three rounds would sit at ~0.75, so 0.7 separates them.
+      expect(elapsedMs / one.elapsedMs).toBeLessThan(0.7);
       expect(elapsedMs).toBeGreaterThanOrEqual(2 * NODE_MS * 0.9);
     }
   });

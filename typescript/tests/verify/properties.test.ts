@@ -21,7 +21,9 @@ import { compile } from '../../src/compiler/index.js';
 import {
   conn, diamond, fanOut, linear, loopOverItems, multiProducer, node, switch20, twoTriggers, workflow,
 } from '../fixtures/workflows.js';
-import { alternativeEntryReach, producersOf, verify, verifyCompiled } from '../../src/verify/index.js';
+import {
+  DEFAULT_MAX_CLASSES, alternativeEntryReach, effectiveMaxClasses, producersOf, verify, verifyCompiled,
+} from '../../src/verify/index.js';
 import type { PropertyCheck } from '../../src/verify/index.js';
 import {
   CASE_TIMEOUT_MS, TEST_TIMEOUT_MS, checksOf, describeZ3, digest, liveSampleNode, orphanBranch,
@@ -432,7 +434,15 @@ describeZ3('verify: properties', () => {
       // Re-measured with the collapsed outcome (ADR 0004): 393 with X/ok + X_route per node.
       expect(report.stateSpace.classes).toBe(330);
       expect(report.stateSpace.complete).toBe(true);
-      expect(report.stateSpace.maxClasses).toBe(200_000);
+      // `requestedMaxClasses` is the constant the caller did not override; `maxClasses` is that
+      // lowered to what *this* heap can hold, because only a memory bound stops a V8 heap
+      // exhaustion from aborting the process (`effectiveMaxClasses`). Pinning it to 200 000
+      // pins the runner's memory: a GitHub runner's ~2.35 GB heap reports 140 928, and the
+      // graph still closes at 330 well inside it. The lowering itself is covered at fixed heap
+      // sizes in `state-class.test.ts`.
+      expect(report.stateSpace.requestedMaxClasses).toBe(DEFAULT_MAX_CLASSES);
+      expect(report.stateSpace.maxClasses).toBe(effectiveMaxClasses(DEFAULT_MAX_CLASSES));
+      expect(report.stateSpace.maxClasses).toBeGreaterThan(report.stateSpace.classes);
       expect(report.stateSpace.strandedPlaces).toBe(0);
       expect(report.stateSpace.error).toBeNull();
     });
