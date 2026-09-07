@@ -105,8 +105,8 @@ markings with pending work. It does not prove that a productive cycle terminates
 ### `dead-nodes`
 
 Checks whether `X/running` is unreachable for each node. An unreachable node is a finding.
-A reachable witness does not prove liveness under all executions, so the positive direction
-is reported conservatively rather than promoted to a general liveness claim.
+A reachable witness does not prove liveness under all executions, so the report states the positive
+direction conservatively rather than promoting it to a liveness claim.
 
 ### `no-double-activation`
 
@@ -145,8 +145,7 @@ from that graph are proofs, and violations include a shortest discovered firing 
 The graph ignores transition priority. That creates a superset of scheduler behaviour:
 lower-priority transitions may appear earlier than the executor would choose them. For
 safety proofs this is conservative. A property proved over the larger set also holds for the
-priority-respecting execution. Counterexamples may need validation against the executor when
-priority is relevant.
+priority-respecting execution. Validate a counterexample against the executor when priority matters.
 
 State-space cost depends more on shape than node count:
 

@@ -3,8 +3,10 @@
 Produced by `scripts/run-conformance.sh` on the pinned n8n clone (`441970b`, patches 0001 and
 0002 applied). Raw artefacts stay in the gitignored `conformance-results/`
 (`<label>.junit.xml`, `<label>.matrix.md`, `<label>.test.log`, `<label>.diagnostics.txt`,
-`<label>.budget.txt`). [`docs/conformance-m2.md`](conformance-m2.md) is the k = 1 report and
-still stands unchanged; this one is about what raising the budget does to it.
+`<label>.budget.txt`). [`docs/conformance-m2.md`](conformance-m2.md) is the k = 1 report;
+this one is about what raising the budget does to it. (M4 later widened its denominator from
+36 to 44 and re-attributed its #12 rows to #20 — see
+[`conformance-final.md`](conformance-final.md).)
 
 M3 is the milestone where the engine stops being n8n-sequential. At k = 1 the `_budget` place
 holds one token and the net is a re-derivation of n8n's loop, which is what M2 proved. Above 1
@@ -71,8 +73,7 @@ suppressing a sibling that was ready to run.**
 At k = 4 one case that fails at k = 1 passes: `v1 execution order > should run complicated multi
 node workflow where multiple Merge-Node have missing data and complex dependency structure`.
 That is coincidence, not a fix — the wider budget happens to line the net's start order up with
-n8n's total order for that graph. It is reported as `fixed` in the matrix and should not be read
-as one.
+n8n's total order for that graph. The matrix reports it as `fixed`; do not read it as one.
 
 ### Nothing else changed character
 
@@ -165,8 +166,8 @@ counter, because it is a structural transition with no action to count in.
 > marking, so a token another transition consumed is simply not there to be re-encoded (ADR
 > 0004, "The reap is gone"). The `X_skip` window this section left open closed with it.
 
-Two targeted experiments failed to reach the `X_skip` window, so it is left open rather than
-fixed blind (a fix would have to bind an action to a structural transition, and nothing here
+Two targeted experiments failed to reach the `X_skip` window, so M3 left it open rather than
+fixing it blind (a fix would have to bind an action to a structural transition, and nothing here
 could pin it with a failing test):
 
 - A join fed by two siblings that both emit an empty output while a third sibling halts,

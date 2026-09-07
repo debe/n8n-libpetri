@@ -76,7 +76,9 @@ the verifier flags it statically and the runtime reports it (divergence #2).
 - A join fires exactly once per slot and never loses data; the R3 overwrite cannot happen
   because the arm waits on `free_i` instead of allocating a run index.
 - Proper completion is `joinedOrDeadLettered(X/ready_i)` with **no sinks declared**, per join
-  input. The query on the *edge* place is not enough: the arm drains an edge into `ready_i` as
+  input. (Since M5 the state-class graph answers this question and the whole-net fallback
+  replaces the per-place query — ADR 0007 §9. It is still asked per join input.) The query
+  on the *edge* place is not enough: the arm drains an edge into `ready_i` as
   soon as `free_i` returns, so the stranded token lives one place downstream of the edge. M4
   must run the property on every `ready_i` (and on edge places for single-input nodes).
 - `X_start` for a k-input node consumes k + 3 places; the arms are microsecond structural

@@ -24,9 +24,9 @@ The data gate compares:
 - scheduler outcome and errors;
 - the observable scheduler contract.
 
-Objects are compared structurally without treating unrelated class instances as equal.
-`lastNodeExecuted` is excluded from the data gate because it describes total completion
-order. It is reported with ordering differences.
+The harness compares objects structurally and never treats unrelated class instances as
+equal. The data gate excludes `lastNodeExecuted` because it describes total completion
+order; the harness reports it with the ordering differences.
 
 Any data difference must match a registered semantic divergence. A row about run count may
 explain a missing run or downstream activation, but never different fields inside a run.
@@ -123,8 +123,8 @@ The divergent fixtures exercise these cases:
 | `haltInFlight` | 2,4 | Sibling completed inside the halt window |
 | `webhookRespond` | 2,4 | Respond node was already in flight |
 
-`multiProducer`, `destinationStop`, `ifBothOutputs`, `loopOverItems` and `userCycle` are
-lowered to an effective budget of one by the compiler's current k-safety rule. Their presence
+`multiProducer`, `destinationStop`, `ifBothOutputs`, `loopOverItems` and `userCycle` are lowered
+to an effective budget of one by the compiler's current k-safety rule. Their presence
 in wider-budget legs checks that the lowering remains stable.
 
 The result is evidence for these fixtures and this host. It is not a compatibility claim for
@@ -169,7 +169,7 @@ Recorded on an Apple M1 Pro, Node 26.8.1:
 | 8 branches | 4021 ms | 4023 ms | 2009 ms | 1006 ms |
 
 The useful assertion is `maxInFlight === min(k, width)`. Wall-clock time merely confirms
-that the actions actually overlap.
+that the actions overlap.
 
 ### Scheduler cost
 

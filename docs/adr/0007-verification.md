@@ -175,7 +175,7 @@ is the property the proofs rest on; that is not implemented.
   state-class graph expands every base-enabled transition (its only priority mode is
   `'none'`). So nothing about n8n's depth-first walk, `executionIndex`, or any ordering row of
   `docs/divergences.md` is provable here. The divergence register's ordering claims rest on
-  the differ (`docs/differential.md`), not on this.
+  the differ (`docs/differential.md`), not on the verifier.
 - **Values.** Both routes are value-blind. Every `xor` branch of a routing transition is
   explored, so "the IF sends data left" and "the IF sends data right" are both reachable —
   which is sound (it over-approximates), is why mutual exclusion of two IF branches is
@@ -208,7 +208,7 @@ not quite the workflow, and neither the terminal output nor the JSON is silent a
 
 The exit codes are the CI contract, and there are four rather than three: 0 clean, 1 a
 finding, 2 usage — and **3 when no usable z3 resolved**, because a run in which no query ran
-must not be indistinguishable from a clean one at the exit code, which is the only thing a CI
+must look different from a clean one at the exit code, which is the only thing a CI
 job reads. `--strict` additionally turns any `unknown` into exit 1, for a gate that wants the
 proofs to stay proofs; without it an `unknown` is reported in its own section and does not
 fail the run.
@@ -301,9 +301,9 @@ The fallback is **one** whole-net `deadlockFree` query per report, not M4's one
 is *quiescent ∧ some marked place is not a declared sink*, which is literally workflow-net
 proper completion. §2's objection to it — "a successful run quiesces holding a great many
 tokens, so the whole-net question is violated by every clean run" — was right about the
-*symptom* and wrong about the conclusion: the tokens a clean run holds are exactly the
-places whose `PlaceRole` is residue, and that set is derivable, so declaring it is not
-"draining the question of content", it is *stating* the question. What actually defeats the
+*symptom* and wrong about the conclusion: the tokens a clean run holds sit exactly on the
+places whose `PlaceRole` is residue, and that set is derivable, so declaring it does not
+drain the question of content — it states the question. What actually defeats the
 SMT form is §10.
 
 ### 10. The pause filter is a classification, not a query — and it widens by codec mode
@@ -326,7 +326,8 @@ than a query to be posed. `state-class.ts` puts every quiescent class in one of 
 1. **resting** — every token is on a place whose role is in `REST_ROLES` (`idle`, `done`,
    `skipped`, `free`, `tries`, `budget`, `halt`, `pause`, `waiting`, `stopped`, `ran`,
    `nil`). A completed run.
-2. **a designed terminal** — it holds `_pause` / `_halt` / `X/waiting` / `X/stopped`. Here the rest set widens, and **which** widening applies is decided by the
+2. **a designed terminal** — it holds `_pause` / `_halt` / `X/waiting` / `X/stopped`. Here
+   the rest set widens, and **which** widening applies is decided by the
    codec mode the scheduler encodes that terminal with (`petri-scheduler.ts`):
    - a **paused** class (mode `pause`) widens by `in-data`, `ready`, `hasdata`, `retry` —
      `PAUSE_REST_ROLES`, exactly what `encodeMarking` pushes back onto `nodeExecutionStack`
@@ -358,7 +359,8 @@ occur in a designed-terminal quiescent class are `in-data`, `ready`, `hasdata` a
 under a pause, and those plus `in-empty`, `edge-data`, `edge-empty` under a halt. Four of
 those seven appear only at k ≥ 2, where a second branch is in flight when the halt lands or
 while a node sits in its retry wait — which is why the earlier k = 1-only sweep concluded
-"only `in-data`, `ready` and `hasdata` ever appear" and why that sentence was wrong. Every role that occurs is in the set its own terminal widens
+"only `in-data`, `ready` and `hasdata` ever appear" and why that sentence was wrong. Every
+role that occurs is in the set its own terminal widens
 to, so the split changes no verdict on any fixture; what it changes is what the classification
 *rests* on.
 
@@ -607,7 +609,8 @@ structural boundedness, does.
 - `tests/verify/measure-graph.ts` → [`docs/verification.md`](../verification.md): the
   solver-free table, the bound table, the proper-completion fallback table (the
   nought-for-ten measurement above) and the whole-report routing table — the last of which is
-  where the `switch20` row shows the *bound* fallbacks proving 23 of that report's 24 checks. `tests/verify/measure.ts` keeps the SMT sampler for the
+  where the `switch20` row shows the *bound* fallbacks proving 23 of that report's 24
+  checks. `tests/verify/measure.ts` keeps the SMT sampler for the
   fallback and the pipeline cost, with its proper-completion sample switched to the whole-net
   `deadlockFree` the fallback actually asks. Its `[live]` dead-node sample is the last
   *reachable* node, not the last node — picking the latter reported a deadness proof under a

@@ -67,7 +67,7 @@ The alternatives, and why they lose:
 - **(b) a dedicated token so the net serialises the lineage step** — a place and an arc per
   node, provable with `placeBound`. It protects nothing. `addPairedItemLineage` and
   `assignPairedItems` are both *synchronous*, so in a single-threaded event loop they are
-  already atomic; the hazard was never "two lineage steps interleaving", it is "one
+  already atomic; the hazard was never "two lineage steps interleaving" — it is "one
   activation writes an object another activation reads later, across an await". A mutex on
   the write does not help — not sharing the written object does. It would also cost two
   transitions' worth of firing per node and would serialise a step that is 19 ns per item.

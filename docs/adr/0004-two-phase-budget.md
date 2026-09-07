@@ -284,8 +284,8 @@ design decision rather than a leftover:
   be recorded differently — a data difference, which is always a defect here.
 - `run(ms, 'close')` **rejects**, so it returns no quiescent marking. `finish()` needs one to
   write `IRunExecutionData` back, and the only other source is
-  `PrecompiledNetExecutor.getMarking()`, which caches on its first call — the scheduler
-  already depends on taking exactly one snapshot, inside the halting action.
+  `PrecompiledNetExecutor.getMarking()`, which caches on its first call — and since M6 the
+  scheduler takes exactly one, at quiescence in `finish()`.
 - The hard deadline n8n actually enforces reaches us as `host.abortSignal` (n8n's
   `setupCancellation` → `PCancelable.cancel()`), and that is already wired to
   `executor.close()`.

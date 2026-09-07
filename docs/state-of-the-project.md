@@ -6,7 +6,7 @@ conformance reports, and history in the [changelog](../CHANGELOG.md).
 
 ## Status
 
-The planned scheduler milestones are implemented:
+Every scheduler milestone is complete:
 
 - n8n workflows compile to libpetri Coloured Time Petri Nets.
 - `PetriScheduler` implements n8n's `WorkflowScheduler` interface for execution order v1.
@@ -85,7 +85,7 @@ and the generated 21-node five-diamond workflow at budget one. It produces liter
 counterexamples for violations. The `ifBothOutputs` fixture, for example, exposes an
 improper terminal marking in about 15 ms on the recorded machine.
 
-Productive cycles do not have a finite reachability graph. They return a `bounded` verdict
+Productive cycles have an infinite reachability graph. They return a `bounded` verdict
 with the exact explored cyclic-node-run prefix unless another property is violated first.
 Large independent fan-outs can exhaust the state limit and return `unknown`.
 
@@ -135,8 +135,8 @@ The following behaviour is intentional or currently constrained:
 - Acyclic joins receive explicit empty tokens. The scheduler therefore removes the cause of
   n8n's stuck-join fallback and does not reproduce that fallback.
 - OR-input delivery is FIFO in the net where n8n's stack can produce LIFO order.
-- Cyclic workflows and workflows with several producers for one input index are lowered to
-  an effective budget of one.
+- The compiler lowers cyclic workflows, and workflows with several producers for one input
+  index, to an effective budget of one.
 - Execution order v0 and AI-agent engine requests are outside the current scope.
 - The verifier checks control flow. It does not model item values, wall-clock timing, total
   order or arbitrary liveness.

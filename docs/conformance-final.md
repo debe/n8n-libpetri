@@ -74,7 +74,6 @@ The 5 are exactly the five `packages/core` test files that call `WorkflowExecute
 what it says. Everything the engine is measured on comes from those files; the other 70 files
 of the scope, and all 1104 of `packages/cli`, are the cases that must not change *around* it.
 
-
 The `workflow` scope's 85 files are collected three times, once per vitest project the
 package declares, so its junit has 255 suites. That has one measured consequence, and it is
 the only known soft spot in this report's method. Cases pair positionally between two reports
@@ -411,7 +410,8 @@ failures reproduce with `N8N_EXECUTION_ENGINE=legacy` under the same config.
   model change), and **#8** (the query it names, `placeBound(ready_i, n)`, was measured in M4
   and does not close on a compiled net; the join-slot form that does close cannot fail).
 
-Of the 21, **7 apply only above k = 1** (#15–#19, #21, and #17's widening) and **1 is v0 only**
+Of the 21, **6 bite above k = 1** (#15–#19 and #21; of those only #16 can also bite at
+k = 1) and **1 is v0 only**
 (#3). At k = 1 on a v1 workflow the register that can bite is: #2, #5, #8, #9, #10, #11, #12,
 #13, #14 — arrival order, join arrival counts and stop semantics, all of them ordering or
 join-strandedness, none of them a silent data corruption.
@@ -461,7 +461,7 @@ scripts/verify-patch.sh --restore
 scripts/bootstrap-n8n.sh --skip-install --scope=cli   # BUILD_TARGET switches to n8n
 
 # every scope at k = 1, patches re-applied by the script.
-# NOTE: this exits 1 today — not because of the engine, but because the `workflow` leg's
+# NOTE: as of M4 this exits 1 — not because of the engine, but because the `workflow` leg's
 # matrix carries the positional-pairing artefact described under Scopes (1 spurious
 # regression + 1 spurious fixed). Read the per-leg lines, or run the scopes separately,
 # until `caseKeys` pairs duplicate groups by status multiset.
