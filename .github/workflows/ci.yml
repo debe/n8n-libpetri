@@ -22,9 +22,17 @@ jobs:
         working-directory: typescript
     steps:
       - uses: actions/checkout@v7
+      # Node 24 is `engines.node`'s floor and the version every number in the repo was
+      # measured on. It is also the newest the dev tree installs on: `n8n-workflow` pulls
+      # `@n8n/expression-runtime` -> `isolated-vm@6.2.0`, whose prebuilds stop at abi137
+      # (Node 24), so on Node 26 `npm ci` falls through to `node-gyp rebuild` and dies on
+      # `PropertyCallbackInfo<Value>` having no `This()` member. This job ran on '26' from
+      # the scaffold commit, which was green only because n8n-workflow was not a dependency
+      # yet; it has been red since. Moving up needs isolated-vm >= 7.0.1 (it ships abi147)
+      # forced in through an `overrides` entry, which is a change to make deliberately.
       - uses: actions/setup-node@v5
         with:
-          node-version: '26'
+          node-version: '24'
           cache: npm
           cache-dependency-path: typescript/package-lock.json
       # libpetri shells out to the z3 executable (VER-013). Without it every
