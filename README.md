@@ -41,9 +41,10 @@ transition that calls `runNode()`.*
 5. [Execution model](#execution-model)
 6. [Verification](#verification)
 7. [Evidence](#evidence)
-8. [Known limits](#known-limits)
-9. [Building and testing](#building-and-testing)
-10. [Repository map](#repository-map)
+8. [In a real n8n](#in-a-real-n8n)
+9. [Known limits](#known-limits)
+10. [Building and testing](#building-and-testing)
+11. [Repository map](#repository-map)
 
 ## The scheduler in n8n today
 
@@ -327,6 +328,68 @@ measured machine. A 185-node workflow compiles to a cached `PrecompiledNet` in u
 Independent 500 ms branches fill the configured budget as expected. Full methodology and
 raw numbers are in [`docs/differential.md`](docs/differential.md).
 
+## In a real n8n
+
+Every number above is measured against `FakeHost`, a structural mirror of the patched host. It
+runs n8n's own execution-engine cases, and it is deliberately not n8n:
+[`docs/conformance-final.md`](docs/conformance-final.md) records the `cli` scope as *registered,
+never entered*. Until the testbed, the engine had never been constructed by the process n8n ships.
+
+`scripts/testbed/` boots that process — the real `packages/cli`, with the editor, node types, task
+runner, credentials and persistence around it — and installs `PetriScheduler` into it through an
+`--import` preload, then seeds two workflows so there is something to press.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/fanout-dark.svg" />
+  <img alt="A timeline of the same thirteen-node n8n workflow run twice in a live server. Under
+  n8n's stack loop the four 1.2 s Code nodes run one after another and the run takes 4,944 ms. On
+  the Petri net at k = 4 the same four run side by side and the run takes 1,284 ms, with identical
+  run data." src="docs/img/fanout-light.svg" />
+</picture>
+
+*One workflow, run twice in that server through the editor's own manual-run endpoint. Four Code
+nodes sleep 1.2 s each on independent branches, and `Route` sends the other branch to `Skipped`,
+so twelve of the thirteen nodes activate. n8n's loop takes one stack entry at a time. The net runs
+whatever the marking says may run, which at k = 4 is all four legs. The bars are n8n's own
+per-task clock, at 1:1.*
+
+Besides the clock, the order is what changed — and it is the feature, not a defect:
+
+```
+n8n             Fan → Fetch A → Fetch B → Merge AB → Fetch C  → Fetch D → Merge CD → Merge All → …
+libpetri k = 4  Fan → Fetch A → Fetch B → Fetch C  → Fetch D  → Merge AB → Merge CD → Merge All → …
+```
+
+n8n enqueues `Merge AB` as soon as both its inputs have arrived, and runs it before it starts
+`Fetch C`. The net starts all four legs, because nothing in the net orders them. Every node still
+runs exactly once on the same input, and every realised dependency edge still holds.
+
+| Workflow | Leg | Wall clock | Data vs n8n | Happens-before | Order |
+|---|---|---|---|---|---|
+| Concurrency Showcase, 13 nodes | n8n's loop | 4,944 ms | reference | 14 edges ok | reference |
+| | net, k = 1 | 4,944 ms | identical | 14 edges ok | same |
+| | net, k = 4 | **1,284 ms** | identical | 14 edges ok | reordered |
+| Agent · Two Tools, 6 nodes | n8n's loop | 131 ms | reference | 2 edges ok | reference |
+| | net, k = 1 | 129 ms | identical | 2 edges ok | same |
+| | net, k = 4 | 130 ms | identical | 2 edges ok | same |
+
+The second workflow is an AI Agent with two tools on `ai_tool` connections, driven by a local stub
+model, so the dispatch round of [ADR 0008](docs/adr/0008-agent-tool-dispatch.md) is exercised by
+n8n's own agent node rather than by a fixture.
+
+<img alt="The n8n editor showing the Concurrency Showcase workflow after a successful run: every
+node carries a green check and n8n's own toast reads workflow executed successfully."
+  src="docs/img/testbed-canvas.png" width="960" />
+
+*The k = 4 execution in the editor, after `scripts/testbed/browser-check.sh` signed in, pressed
+Execute workflow and waited for n8n's own success toast.*
+
+The testbed is an integration harness, not a conformance measurement: `scripts/run-conformance.sh`
+stays the authority on case counts, and neither seeded workflow reaches divergence #17, the one
+k > 1 behaviour change with a user-visible shape. A green table here is not a licence to raise `k`
+everywhere. How the engine gets into the process, what the three columns above decide, and what
+the harness cannot see are in [`docs/testbed.md`](docs/testbed.md).
+
 ## Known limits
 
 - An `EngineRequest` action naming a node with no `ai_tool` connection to its agent cannot be
@@ -385,6 +448,16 @@ scripts/verify-patch.sh
 Use `scripts/run-conformance.sh --engines=libpetri --budget=2` for a wider budget. The
 script records cases whose workflow shape forced the effective budget back to one.
 
+To run the actual n8n editor on the net rather than a test suite:
+
+```bash
+scripts/testbed/n8n-testbed.sh          # http://127.0.0.1:5678, two seeded demo workflows
+scripts/testbed/diff-engines.sh         # both engines in a live server, compared
+```
+
+That is the leg [In a real n8n](#in-a-real-n8n) reports, and
+[`docs/testbed.md`](docs/testbed.md) records in full.
+
 ## Repository map
 
 | Path | Contents |
@@ -398,10 +471,12 @@ script records cases whose workflow shape forced the effective budget back to on
 | `spec/` | Executable requirements and traceability |
 | `docs/adr/` | Architectural decisions and amendments |
 | `docs/conformance-*.md` | Recorded n8n suite evidence |
+| `scripts/testbed/` | A live n8n editor running on the net, and the two-engine comparison in it |
 
 Start with the [project state](docs/state-of-the-project.md), then use
 [verification](docs/verification.md), [differential testing](docs/differential.md),
-[patching](patches/n8n/README.md) and [scripts](scripts/README.md) for the relevant task.
+[patching](patches/n8n/README.md), [scripts](scripts/README.md) and the
+[live testbed](docs/testbed.md) for the relevant task.
 Milestone history belongs in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License

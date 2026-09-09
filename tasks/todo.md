@@ -185,6 +185,10 @@
       `tests/testbed/compare-run.ts` reuses `firstDifference`, `dependencyEdges`, `activationKey`
       and `executionOrder` from `src/conformance/differ.ts`; it lives under `tests/` so
       `npm run check` typechecks it and vitest does not collect it
+- [x] `docs/img/gen-fanout.py` draws the README's animated fan-out timeline straight from those
+      captures — every bar, total, ratio and caption derived, nothing typed — as a CSS animation at
+      1:1 whose base state is the finished chart, so a reader with `prefers-reduced-motion` or no
+      animation at all sees the whole picture rather than an empty one
 - [x] `browser-check.sh` drives the editor with `agent-browser` — sign in, execute, wait for
       n8n's own success toast, screenshot the canvas — and fails if nothing entered the engine
 - [x] `docs/testbed.md` records what it demonstrates and what it does not: it is an integration
