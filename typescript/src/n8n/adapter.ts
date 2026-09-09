@@ -27,10 +27,12 @@
  *   already ran.
  */
 import type {
-  INode, IRunExecutionData, Workflow, WorkflowExecuteMode, INodeInputConfiguration, INodeOutputConfiguration,
-  NodeConnectionType,
+  IConnection, INode, IRunExecutionData, Workflow, WorkflowExecuteMode, INodeInputConfiguration,
+  INodeOutputConfiguration, NodeConnectionType,
 } from 'n8n-workflow';
-import type { MainConnection, NodeDescription, NodeTypeShape, WorkflowDescription } from '../compiler/index.js';
+import type {
+  MainConnection, NodeDescription, NodeTypeShape, ToolConnection, WorkflowDescription,
+} from '../compiler/index.js';
 import type { NodeHelpersLike } from './host.js';
 
 /** Node types compiled as Loop Over Items (informational, carried into `NetMap`). */
@@ -99,6 +101,56 @@ export function mainConnectionsOf(workflow: Workflow): MainConnection[] {
     });
   }
   return out;
+}
+
+/**
+ * `workflow.connectionsBySourceNode[*].ai_tool` as compiler tool connections: n8n wires these
+ * from the tool node into the agent, which is the direction {@link ToolConnection} keeps.
+ *
+ * This is the only non-`main` connection type the scheduler ever sees. Every other `ai_*` type
+ * is resolved by `supplyData` inside `runNode` (`get-input-connection-data.ts`) and never
+ * reaches a scheduler, so reading only this one is the whole story, not an approximation.
+ */
+export function toolConnectionsOf(workflow: Workflow): ToolConnection[] {
+  const out: ToolConnection[] = [];
+  for (const [from, byType] of Object.entries(workflow.connectionsBySourceNode)) {
+    if (!Object.hasOwn(workflow.nodes, from)) continue;
+    const byAiTool = (byType as Record<string, Array<IConnection[] | null> | undefined>)?.ai_tool ?? [];
+    for (const connections of byAiTool) {
+      for (const c of connections ?? []) {
+        if (c.type !== 'ai_tool' || !Object.hasOwn(workflow.nodes, c.node)) continue;
+        out.push({ agent: c.node, tool: from });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * An agent's `options.maxIterations` when it is a literal number in the workflow JSON — the
+ * bound n8n's own `checkMaxIterations` enforces (`V3/helpers/executeBatch.ts`, default 10).
+ *
+ * Only a literal counts. n8n allows an expression on any parameter and resolves it per item at
+ * execution time, so a compiled seed taken from one would be a guess; `undefined` then lets the
+ * compiler fall back and mark the agent unbounded for verification rather than claim a bound.
+ */
+export function maxRoundsOf(node: INode): number | undefined {
+  const options = (node.parameters as Record<string, unknown> | undefined)?.['options'];
+  if (typeof options !== 'object' || options === null) return undefined;
+  const raw = (options as Record<string, unknown>)['maxIterations'];
+  return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined;
+}
+
+/**
+ * An agent's `options.maxToolCalls` when a workflow declares one as a literal. n8n's agent has
+ * no such parameter, so this is forward-compatible plumbing for the scheduler's own bound: a
+ * workflow that sets it gets that budget, one that does not gets `maxAgentToolCalls`.
+ */
+export function maxToolCallsOf(node: INode): number | undefined {
+  const options = (node.parameters as Record<string, unknown> | undefined)?.['options'];
+  if (typeof options !== 'object' || options === null) return undefined;
+  const raw = (options as Record<string, unknown>)['maxToolCalls'];
+  return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined;
 }
 
 /**
@@ -188,6 +240,8 @@ export function describeWorkflow(
       ...(node.retryOnFail === undefined ? {} : { retryOnFail: node.retryOnFail }),
       ...(node.maxTries === undefined ? {} : { maxTries: node.maxTries }),
       ...(node.waitBetweenTries === undefined ? {} : { waitBetweenTries: node.waitBetweenTries }),
+      ...(maxRoundsOf(node) === undefined ? {} : { maxRounds: maxRoundsOf(node) }),
+      ...(maxToolCallsOf(node) === undefined ? {} : { maxToolCalls: maxToolCallsOf(node) }),
     };
   });
   const startNodes = startNodesOf(runExecutionData);
@@ -196,6 +250,7 @@ export function describeWorkflow(
     ...(workflow.name === undefined ? {} : { name: workflow.name }),
     nodes,
     connections: mainConnectionsOf(workflow),
+    toolConnections: toolConnectionsOf(workflow),
     startNodes,
     nodeTypes: (n) => shapes.get(n.name)!,
     expressionReferences: (n) => references.get(n.name) ?? [],

@@ -119,9 +119,11 @@ export function renderStateSpace(report: VerificationReport): string {
   }
   const why = space.truncation === 'cycle'
     ? 'the workflow has a cycle, so its state space is unbounded'
-    : space.truncation === 'parallelism'
-      ? 'independent parallel branches (NU-053: no partial-order reduction)'
-      : 'the class cap is below what this workflow needs (no cycle, no branching node)';
+    : space.truncation === 'tool-calls'
+      ? agentBudgets(space.agents)
+      : space.truncation === 'parallelism'
+        ? 'independent parallel branches (NU-053: no partial-order reduction)'
+        : 'the class cap is below what this workflow needs (no cycle, no branching node)';
   const lowered = space.maxClasses < space.requestedMaxClasses
     ? ` (lowered from ${space.requestedMaxClasses} to fit the heap)`
     : '';
@@ -134,6 +136,21 @@ export function renderStateSpace(report: VerificationReport): string {
     : `; ${space.expanded} classes expanded, closing every run of at most ` +
       `${space.boundedCyclicRuns} cyclic-node run(s) across ${space.loopSteps} cyclic node(s)`;
   return `${size}, TRUNCATED at the ${space.maxClasses}-class cap${lowered} — ${why}${bound}`;
+}
+
+/**
+ * The one truncation with a knob. The graph explores every round size up to an agent's
+ * tool-call budget — a product of per-tool and per-round counters, polynomial in both — so the fix is a smaller declared
+ * budget, and the message says which agent, what it has now, and whether that number was the
+ * workflow's or the scheduler's runtime default.
+ */
+function agentBudgets(agents: VerificationReport['stateSpace']['agents']): string {
+  const each = agents.map((a) =>
+    `'${a.node}' may make ${a.maxToolCalls} tool call(s) across ${a.tools} tool(s)` +
+    (a.assumed ? ' (the scheduler default — nothing declared)' : ' (declared)'));
+  return `an agent's tool-call budget: ${each.join('; ')}. The graph explores every round size up to ` +
+    'the budget, so declare a small options.maxToolCalls on the agent for a complete graph — a ' +
+    'declared budget is both the runtime cap and the width of the claim';
 }
 
 /**

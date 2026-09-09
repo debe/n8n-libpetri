@@ -12,6 +12,8 @@ Every scheduler milestone is complete:
 - `PetriScheduler` implements n8n's `WorkflowScheduler` interface for execution order v1.
 - Markings encode and restore n8n resumable execution state.
 - A concurrency budget limits in-flight node actions structurally.
+- AI Agent `ai_tool` dispatch compiles to a round in the net, bounded by the agent's own
+  `options.maxIterations` and by a per-agent tool-call budget the graph explores up to.
 - The verifier analyses the production net through a state-class graph, with an optional
   Z3/Spacer fallback.
 - Differential and patched-n8n conformance harnesses classify known divergences.
@@ -51,25 +53,26 @@ Commit: `441970b211d13a3ce547916b2b8ee93677b620e9`.
 
 | Surface | Legacy | Petri | Interpretation |
 |---|---:|---:|---|
-| execution-engine | 1,657/1,657 | 1,646/1,657 | 11 classified regressions |
-| core | 2,124/2,124 | 2,113/2,124 | Same 11 regressions |
+| execution-engine | 1,657/1,657 | 1,653/1,657 | 4 classified regressions |
+| core | 2,124/2,124 | 2,120/2,124 | Same 4 regressions |
 | workflow | 9,603/9,603 | Patch-neutral | Scheduler is not entered |
 | cli | 20,328/20,328 | 20,328/20,328 | Registered, never entered |
 
-Eight regressions are AI-agent `EngineRequest` cases, which the current scheduler does not
-implement. Three exercise recorded semantic differences: stuck-join handling and OR/join
-ordering. The broader run covered 32,055 cases without finding another failure class.
+Three exercise recorded semantic differences: stuck-join handling and OR/join ordering. The
+fourth is an `EngineRequest` naming a node with no `ai_tool` connection to its agent
+(divergence #22), which only a hand-built request can produce. The broader run covered 32,055
+cases without finding another failure class.
 
 The exact case matrix is in [`conformance-final.md`](conformance-final.md). Do not infer
 full n8n compatibility from the summary table.
 
 ### Differential harness
 
-The current sweep runs 23 fixtures at budgets 1, 2 and 4:
+The current sweep runs 25 fixtures at budgets 1, 2 and 4:
 
 | Result | Runs |
 |---|---:|
-| Exact pass | 49 |
+| Exact pass | 55 |
 | Registered divergence | 20 |
 | Failure | 0 |
 
@@ -124,6 +127,15 @@ Every verdict is unchanged: proper completion proven on `linear`, `diamond`, `fa
 `multiProducer`, `chooseBranch`, `chain40` and `wide8`; violated on `ifBothOutputs`
 (naming `Merge/hasdata` and `Merge/ready_0`); bounded on `loopOverItems`.
 
+Two later changes moved figures in that table without moving a verdict, so read it as the M6
+measurement it is. libpetri's state-class key became canonical on 2026-09-09 — one marking is
+now one class, where the clock order used to split it — which lowered the counts on exactly the
+fixtures whose branches interleave: `diamond` **306**, `multiProducer` **211**,
+`ifBothOutputs` **697**; `linear`, `fanOut`, `chain40` and `wide8` are unchanged. And
+`loopOverItems` is `bounded` **on the graph route**, which is what this table measures; the SMT
+fallback proves it outright in 0.5 s since the same day, so a full report on it reads `proven`
+(ADR 0007 §13).
+
 ## Compatibility boundary
 
 The following behaviour is intentional or currently constrained:
@@ -137,7 +149,9 @@ The following behaviour is intentional or currently constrained:
 - OR-input delivery is FIFO in the net where n8n's stack can produce LIFO order.
 - The compiler lowers cyclic workflows, and workflows with several producers for one input
   index, to an effective budget of one.
-- Execution order v0 and AI-agent engine requests are outside the current scope.
+- Execution order v0 is outside the current scope.
+- An agent's tool calls run concurrently under the budget, where n8n runs them one at a time;
+  tool *starts* still follow request order, and run data is identical at every budget.
 - The verifier checks control flow. It does not model item values, wall-clock timing, total
   order or arbitrary liveness.
 

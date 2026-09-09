@@ -14,7 +14,7 @@ import type { INodeExecutionData } from 'n8n-workflow';
 import type { DifferFixture } from '../../src/conformance/index.js';
 import { items, passThrough, sleep, type NodeScript } from '../../src/conformance/index.js';
 import type { WorkflowDescription } from '../../src/compiler/index.js';
-import { ALL, SHAPES, conn, node, workflow, type ShapeName } from '../fixtures/workflows.js';
+import { ALL, SHAPES, agentTwoTools, conn, node, workflow, type ShapeName } from '../fixtures/workflows.js';
 
 /** Two items, so a router can put one on each of two outputs. */
 export const START = items({ i: 0 }, { i: 1 });
@@ -179,6 +179,30 @@ const OVERRIDES: Readonly<Record<string, Readonly<Record<string, NodeScript>>>> 
   userCycle: { B: twoRounds },
 };
 
+/**
+ * An agent that asks for `tools` for `rounds` rounds and answers after that.
+ *
+ * **Stateless on purpose.** The differ runs one fixture on both engines, so a closure counter
+ * would let the first run starve the second. It reads the round off the `EngineResponse` the
+ * engine hands it — which is what a real agent does too: `checkMaxIterations` counts
+ * `response.metadata.iterationCount`, and that metadata round-trips through
+ * `subNodeExecutionData` exactly so the node can.
+ */
+function agentAsking(tools: readonly string[], rounds = 1): NodeScript {
+  return ({ response }) => {
+    const done = (response?.metadata as { round?: number } | undefined)?.round ?? 0;
+    if (done >= rounds) return { data: [items({ answer: 'done' })] };
+    const round = done + 1;
+    return {
+      actions: tools.map((nodeName, i) => ({
+        actionType: 'ExecutionNodeAction' as const, nodeName, input: { q: nodeName }, type: 'ai_tool' as const,
+        id: `call_${round}_${i}`, metadata: {},
+      })),
+      metadata: { round },
+    };
+  };
+}
+
 export const DIFFER_FIXTURES: readonly DifferFixture[] = [
   ...Object.entries(ALL).map(([name, description]) => ({
     name,
@@ -186,6 +210,29 @@ export const DIFFER_FIXTURES: readonly DifferFixture[] = [
     scripts: { ...scriptsFor(description), ...(OVERRIDES[name] ?? {}) },
     options: { startItems: START },
   })),
+  {
+    // Agent tool dispatch: `Agent` asks for both tools, they run, it answers. n8n pushes them
+    // onto one stack and runs them in request order; the net dispatches them into a round. At
+    // k = 1 both engines run the same activations in the same order, which is what this pins.
+    name: 'agentRound',
+    workflow: agentTwoTools,
+    scripts: {
+      ...scriptsFor(agentTwoTools),
+      Agent: agentAsking(['Calculator', 'Search']),
+    },
+    options: { startItems: START },
+  },
+  {
+    // One tool, two rounds: the agent asks again after the first answer, so the round loop runs
+    // twice and `A/rounds` is spent down to its last token.
+    name: 'agentTwoRounds',
+    workflow: agentTwoTools,
+    scripts: {
+      ...scriptsFor(agentTwoTools),
+      Agent: agentAsking(['Calculator'], 2),
+    },
+    options: { startItems: START },
+  },
   {
     name: 'parallelBranches',
     workflow: parallelBranches,

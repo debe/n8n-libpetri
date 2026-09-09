@@ -91,7 +91,9 @@ export const LOOP_DRIVING_PATTERNS: readonly LoopDrivingPattern[] = [
     rationale:
       "Resuming a waiting execution (`waitTill`, the marking codec's job) and the " +
       '`waiting tools` engine-request round trip that re-queues an agent after its tools ' +
-      'ran. Whole-block match, so the `prepareWaitingToExecution` helper suite does not count.',
+      'ran. Whole-block match, so the `prepareWaitingToExecution` helper suite does not count. ' +
+      'Since M7 these are engine results like any other — agent tool dispatch is implemented ' +
+      '(ADR 0008) — so no headline needs an "excluding out-of-scope" restatement.',
   },
   {
     id: 'partial',

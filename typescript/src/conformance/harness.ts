@@ -14,13 +14,13 @@
  * Not a runtime dependency on n8n: every `n8n-workflow` import here is type-only.
  */
 import type {
-  EngineRequest, EngineResponse, ExecutionBaseError, IConnection, IExecuteData, INode, INodeExecutionData,
-  INodeParameters, IPairedItemData, IPinData, IRunData, IRunExecutionData, IRunNodeResponse, ITaskData,
-  ITaskDataConnections, ITaskMetadata, ITaskStartedData, IWorkflowExecuteAdditionalData, Workflow,
-  WorkflowExecuteMode,
+  EngineRequest, EngineResponse, ExecutionBaseError, IConnection, IDataObject, IExecuteData, INode,
+  INodeExecutionData, INodeParameters, IPairedItemData, IPinData, IRunData, IRunExecutionData,
+  IRunNodeResponse, ITaskData, ITaskDataConnections, ITaskMetadata, ITaskStartedData,
+  IWorkflowExecuteAdditionalData, Workflow, WorkflowExecuteMode,
 } from 'n8n-workflow';
 import type { NodeDescription, WorkflowDescription } from '../compiler/index.js';
-import type { NodeHelpersLike, SchedulerHooks, SchedulerHost } from '../n8n/host.js';
+import type { NodeHelpersLike, PlannedNode, SchedulerHooks, SchedulerHost } from '../n8n/host.js';
 
 // ==================== fake Workflow ====================
 
@@ -41,7 +41,18 @@ export function toINode(n: NodeDescription, options: FakeWorkflowOptions = {}): 
     type: n.type,
     typeVersion: n.typeVersion,
     position: [n.position[0], n.position[1]],
-    parameters: options.parameters?.[n.name] ?? {},
+    // An agent's round budget lives where n8n keeps it — `options.maxIterations` in the node's
+    // parameters — so a fixture's `maxRounds` survives the round-trip back through
+    // `describeWorkflow`, which is the only path the scheduler ever reads it by.
+    parameters: {
+      ...(n.maxRounds === undefined && n.maxToolCalls === undefined ? {} : {
+        options: {
+          ...(n.maxRounds === undefined ? {} : { maxIterations: n.maxRounds }),
+          ...(n.maxToolCalls === undefined ? {} : { maxToolCalls: n.maxToolCalls }),
+        },
+      }),
+      ...(options.parameters?.[n.name] ?? {}),
+    },
     ...(n.disabled === undefined ? {} : { disabled: n.disabled }),
     ...(n.onError === undefined ? {} : { onError: n.onError }),
     ...(n.retryOnFail === undefined ? {} : { retryOnFail: n.retryOnFail }),
@@ -55,8 +66,9 @@ export function toINode(n: NodeDescription, options: FakeWorkflowOptions = {}): 
 export function fakeWorkflow(desc: WorkflowDescription, options: FakeWorkflowOptions = {}): Workflow {
   const nodes: Record<string, INode> = {};
   for (const n of desc.nodes) nodes[n.name] = toINode(n, options);
-  const bySource: Record<string, { main: Array<IConnection[] | null> }> = {};
-  const byDestination: Record<string, { main: Array<IConnection[] | null> }> = {};
+  type ConnectionMap = { main: Array<IConnection[] | null>; ai_tool?: Array<IConnection[] | null> };
+  const bySource: Record<string, ConnectionMap> = {};
+  const byDestination: Record<string, ConnectionMap> = {};
   for (const c of desc.connections) {
     const s = (bySource[c.from] ??= { main: [] });
     while (s.main.length <= c.outputIndex) s.main.push([]);
@@ -64,6 +76,14 @@ export function fakeWorkflow(desc: WorkflowDescription, options: FakeWorkflowOpt
     const d = (byDestination[c.to] ??= { main: [] });
     while (d.main.length <= c.inputIndex) d.main.push([]);
     d.main[c.inputIndex]!.push({ node: c.from, type: 'main', index: c.outputIndex });
+  }
+  // `ai_tool` sits on the same maps as `main`, keyed from the tool into the agent, which is how
+  // n8n stores it — and why `mainConnectionsOf` has to filter by type rather than by key.
+  for (const c of desc.toolConnections ?? []) {
+    const s = (bySource[c.tool] ??= { main: [] });
+    (s.ai_tool ??= [[]])[0]!.push({ node: c.agent, type: 'ai_tool', index: 0 });
+    const d = (byDestination[c.agent] ??= { main: [] });
+    (d.ai_tool ??= [[]])[0]!.push({ node: c.tool, type: 'ai_tool', index: 0 });
   }
   const descriptions = new Map<string, unknown>();
   for (const n of desc.nodes) {
@@ -188,6 +208,13 @@ export interface ScriptContext {
   readonly host: FakeHost;
   /** How many times this node's `runNode` was called before (attempts across retries). */
   readonly call: number;
+  /**
+   * The `EngineResponse` the engine handed this activation — `execute(this, response)`'s second
+   * argument. An agent script reads its own tool results here, which is what lets it decide
+   * whether to ask again *without* keeping state in a closure: the differ runs one fixture on
+   * both engines, so a stateful script would let the first run starve the second.
+   */
+  readonly response: EngineResponse | undefined;
 }
 
 /** A canned node: returns the `runNode` response (or throws, or returns an `EngineRequest`). */
@@ -289,6 +316,74 @@ export class FakeHost implements SchedulerHost {
     this.record('handleEngineRequest', args.currentNode.name);
   }
 
+  /**
+   * `handleRequest` (`requests-response.ts:238`) without the stack push, mirrored the way the
+   * rest of this host mirrors `WorkflowExecute`: reserve a `runData` slot per action, tag
+   * `rewireOutputLogTo`, build the agent's re-entry with `nodeWasResumed` and
+   * `subNodeExecutionData`, and — under v1 — reverse the actions so a LIFO stack would run
+   * them in request order. The agent's own entry comes first, as `unshift` puts it.
+   */
+  planEngineRequest(args: {
+    workflow: Workflow;
+    currentNode: INode;
+    request: EngineRequest;
+    runIndex: number;
+    executionData: IExecuteData;
+    runData: IRunData;
+  }): PlannedNode[] {
+    this.record('planEngineRequest', args.currentNode.name);
+    const { currentNode, request, runIndex, executionData, runData } = args;
+    const parentSource = executionData.source?.main?.[0];
+    // `prepareRequestingNodeForResuming`: no parent, no round (`requests-response.ts:186`).
+    if (parentSource?.previousNode === undefined) return [];
+    const parentOutputIndex = parentSource.previousNodeOutput ?? 0;
+    const parentRunIndex = parentSource.previousNodeRun ?? 0;
+
+    const actions: Array<{ action: unknown; nodeName: string; runIndex: number }> = [];
+    const tools: PlannedNode[] = [];
+    for (const action of request.actions as Array<{
+      nodeName: string; input?: IDataObject; type: IConnection['type']; id: string;
+    }>) {
+      const node = args.workflow.nodes[action.nodeName];
+      if (node === undefined) throw new Error(`Workflow does not contain a node with the name of "${action.nodeName}".`);
+      (node as INode & { rewireOutputLogTo?: string }).rewireOutputLogTo = action.type;
+      const agentInput = executionData.data.main?.[0]?.[0];
+      const json = { ...(agentInput?.json ?? {}), ...(action.input ?? {}), toolCallId: action.id };
+      const display = { ...(action.input ?? {}) };
+      // `initializeNodeRunData`: the slot is reserved *before* the tool runs, which is why
+      // running the tools concurrently cannot scramble which slot each one writes.
+      const nodeRunData = (runData[action.nodeName] ??= []);
+      const nodeRunIndex = nodeRunData.length;
+      nodeRunData.push({
+        inputOverride: { ai_tool: [[{ json: display }]] },
+        source: [{ previousNode: currentNode.name, previousNodeOutput: parentOutputIndex, previousNodeRun: runIndex }],
+        executionIndex: 0, executionTime: 0, startTime: 0,
+      } as unknown as ITaskData);
+      tools.push({
+        inputConnectionData: { type: action.type, node: action.nodeName, index: 0 },
+        parentOutputIndex: 0,
+        parentNode: currentNode.name,
+        parentOutputData: [[{ json, pairedItem: { item: parentRunIndex, input: parentOutputIndex } }]],
+        runIndex,
+        nodeRunIndex,
+      });
+      actions.push({ action, nodeName: action.nodeName, runIndex: nodeRunIndex });
+    }
+    if (args.workflow.settings.executionOrder === 'v1') tools.reverse();
+    return [{
+      inputConnectionData: { type: 'ai_tool', node: currentNode.name, index: 0 } as IConnection,
+      parentOutputIndex: 0,
+      parentNode: parentSource.previousNode,
+      parentOutputData: executionData.data.main as INodeExecutionData[][],
+      runIndex,
+      nodeRunIndex: runIndex,
+      metadata: {
+        nodeWasResumed: true,
+        subNodeExecutionData: { actions, metadata: request.metadata },
+      } as unknown as ITaskMetadata,
+    }, ...tools];
+  }
+
   // ---- per-node machinery, mirroring workflow-execute.ts ----
 
   shouldStopExecuting(): boolean {
@@ -359,8 +454,31 @@ export class FakeHost implements SchedulerHost {
     return [pinData[node.name]!];
   }
 
-  collectSubNodeResults(executionData: IExecuteData, _results: EngineResponse): void {
+  /**
+   * `collectSubNodeResults` (`workflow-execute.ts:1833-1850`): fill the `EngineResponse` a
+   * resumed agent is handed from the `runData` its round's tools wrote.
+   *
+   * It mutates the object it is given, as n8n's does — both schedulers create one per
+   * activation and pass it into `runNode`. Reading `runData` by the *reserved* index is what
+   * makes concurrent tools safe: `initializeNodeRunData` fixed each tool's slot at plan time,
+   * so which result lands where is decided by the request and not by the finishing order.
+   *
+   * This was a no-op stub until the agent round landed, which meant no agent in this harness
+   * ever saw its own tool results — the differ could not run one, and a fixture agent had to
+   * keep a closure counter to know it had already asked.
+   */
+  collectSubNodeResults(executionData: IExecuteData, subNodeExecutionResults: EngineResponse): void {
     this.record('collectSubNodeResults', executionData.node.name);
+    const subNodeExecutionData = executionData.metadata?.subNodeExecutionData;
+    if (subNodeExecutionData === undefined) return;
+    subNodeExecutionResults.metadata = subNodeExecutionData.metadata;
+    for (const subNode of subNodeExecutionData.actions) {
+      const nodeRunData = this.runExecutionData.resultData.runData[subNode.nodeName];
+      const run = nodeRunData?.[subNode.runIndex];
+      if (run !== undefined) {
+        subNodeExecutionResults.actionResponses.push({ data: run, action: subNode.action } as never);
+      }
+    }
   }
 
   async runNode(
@@ -373,9 +491,12 @@ export class FakeHost implements SchedulerHost {
     this.runNodeCalls.push({ node: name, runIndex, main: executionData.data.main!, engineResponse: subNodeExecutionResults !== undefined });
     const call = this.counts.get(name) ?? 0;
     this.counts.set(name, call + 1);
-    if (executionData.node.disabled === true) return passThrough({ executionData, runIndex, runExecutionData, host: this, call });
+    const ctx: ScriptContext = {
+      executionData, runIndex, runExecutionData, host: this, call, response: subNodeExecutionResults,
+    };
+    if (executionData.node.disabled === true) return passThrough(ctx);
     const script = this.scripts[name] ?? passThrough;
-    return await script({ executionData, runIndex, runExecutionData, host: this, call });
+    return await script(ctx);
   }
 
   async processNodeOutput(

@@ -36,7 +36,7 @@ const STRANDED_PLACE = 'stranded/place';
  * factory above the imports and only allows a factory to close over such a name; it is read
  * inside `verify()`, long after initialisation.
  */
-const mockWitness = { place: STRANDED_PLACE };
+const mockWitness = { place: STRANDED_PLACE, also: [] as string[], bug: false };
 
 vi.mock('libpetri/verification', async (importOriginal) => {
   const real = await importOriginal<typeof import('libpetri/verification')>();
@@ -47,12 +47,21 @@ vi.mock('libpetri/verification', async (importOriginal) => {
     timeout(): this { return this; }
     property(): this { return this; }
     sinkPlaces(): this { return this; }
+    sinkPlacesWhen(): this { return this; }
+    stateEquation(): this { return this; }
+    enumerationMaxClasses(): this { return this; }
     async verify(): Promise<SmtVerificationResult> {
-      const marking = real.MarkingState.builder()
-        .tokens({ name: mockWitness.place } as never, 1)
-        .build();
+      // A programming error inside the query path — the shape a version skew takes, where a
+      // method the verifier calls is missing from the installed library.
+      if (mockWitness.bug) throw new TypeError('verifier.somethingNew is not a function');
+      const builder = real.MarkingState.builder().tokens({ name: mockWitness.place } as never, 1);
+      for (const extra of mockWitness.also) builder.tokens({ name: extra } as never, 1);
+      const marking = builder.build();
       return {
         verdict: { type: 'violated' },
+        // The fake models an answer from the solver, which is the route that computes invariants
+        // and the one this branch exists to exercise.
+        route: 'smt',
         report: 'fake',
         invariants: [],
         discoveredInvariants: [],
@@ -75,6 +84,51 @@ vi.mock('libpetri/verification', async (importOriginal) => {
 describe('a fallback violation the pause filter does not excuse is a finding', () => {
   beforeEach(() => {
     mockWitness.place = STRANDED_PLACE;
+    mockWitness.also = [];
+    mockWitness.bug = false;
+  });
+
+  it('a programming error inside a query is never a verdict: it propagates', { timeout: CASE_TIMEOUT_MS }, async () => {
+    // The catch in `query()` turns a failed verification into `unknown` with a reason, which is
+    // right for a solver that died and wrong for a bug. Left broad, a `TypeError` — the shape a
+    // missing library method takes — becomes `unknown` on every query: the report stays
+    // well-formed, every proof quietly disappears and nothing fails. That is how this project's
+    // own dependency skew would present, so it must be loud.
+    mockWitness.bug = true;
+    await expect(verify(unbalancedJoin, {
+      properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
+    })).rejects.toThrow(TypeError);
+  });
+
+  it('a stranding that also holds a pause marker is still a finding', { timeout: CASE_TIMEOUT_MS }, async () => {
+    // The witness is a paused run that ALSO strands something the pause does not excuse — a
+    // workflow that pauses on one branch and leaves another pending. Since the pause / halt
+    // widenings are declared to the solver as conditional sinks (VER-014), everything the
+    // marker excuses is already excused, so what is left over is real. The old rule was
+    // "does the witness hold any terminal role", which discarded exactly this finding.
+    mockWitness.also = ['_pause'];
+    const report = await verify(unbalancedJoin, {
+      properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
+    });
+    const whole = wholeNet(report);
+    expect(whole.verdict, digest(report)).toBe('violated');
+    expect(whole.counterexample!.stuckMarking.some((p) => p.place === STRANDED_PLACE)).toBe(true);
+    expect(report.ok).toBe(false);
+  });
+
+  it('a witness the graph would call a designed terminal is a declaration mismatch, not a finding', { timeout: CASE_TIMEOUT_MS }, async () => {
+    // Nothing outside the pause rest set is marked, so `terminalKindOf` classifies this as a
+    // designed terminal and the conditional sinks should have excused it. That the solver
+    // returned it anyway means the SMT declaration and the graph's classification disagree —
+    // reported as that, and never as a defect in the workflow.
+    mockWitness.place = '_pause';
+    mockWitness.also = ['id:A/in'];
+    const report = await verify(unbalancedJoin, {
+      properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
+    });
+    const whole = wholeNet(report);
+    expect(whole.verdict, digest(report)).toBe('unknown');
+    expect(whole.reason).toContain('disagree');
   });
 
   it('the whole-net row reports it instead of downgrading it to unknown', { timeout: CASE_TIMEOUT_MS }, async () => {

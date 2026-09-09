@@ -6,7 +6,7 @@
  * Node ids are derived from names (`id:<name>`); they must not contain `/` (MOD-010).
  */
 import type {
-  MainConnection, NodeDescription, NodeTypeShape, WorkflowDescription,
+  MainConnection, NodeDescription, NodeTypeShape, ToolConnection, WorkflowDescription,
 } from '../../src/compiler/index.js';
 
 export const SHAPES = {
@@ -23,6 +23,14 @@ export const SHAPES = {
   switch4: { inputCount: 1, outputCount: 4 },
   /** Merge v3 chooseBranch with `numberInputs: 3`: `requiredInputs` stays `[0, 1]`. */
   merge3Choose: { inputCount: 3, outputCount: 1, requiredInputs: [0, 1] },
+  /**
+   * An AI Agent: one `main` in, one `main` out. Its `ai_tool` inputs are connections, not
+   * shape — `NodeHelpers.getNodeInputs` is filtered to `main` before the compiler sees it,
+   * exactly as the adapter filters it.
+   */
+  agent: { inputCount: 1, outputCount: 1 },
+  /** A tool node: no `main` port at either end; it is reached only over `ai_tool`. */
+  tool: { inputCount: 0, outputCount: 0 },
 } as const satisfies Record<string, NodeTypeShape>;
 
 export type ShapeName = keyof typeof SHAPES;
@@ -44,9 +52,15 @@ export function conn(from: string, outputIndex: number, to: string, inputIndex: 
   return { from, outputIndex, to, inputIndex };
 }
 
+/** An `ai_tool` connection, named the way n8n wires it: from the tool, into the agent. */
+export function tool(toolNode: string, agent: string): ToolConnection {
+  return { agent, tool: toolNode };
+}
+
 export interface FixtureOptions {
   readonly references?: Readonly<Record<string, readonly string[]>>;
   readonly shapes?: Readonly<Record<string, NodeTypeShape>>;
+  readonly toolConnections?: readonly ToolConnection[];
 }
 
 export function workflow(
@@ -60,6 +74,7 @@ export function workflow(
     name,
     nodes,
     connections,
+    toolConnections: options.toolConnections,
     startNode,
     nodeTypes: (n) => options.shapes?.[n.name] ?? SHAPES[n.type as ShapeName],
     expressionReferences: options.references === undefined
@@ -265,6 +280,56 @@ export const partialRequired = workflow('partial-required', [
   conn('A', 0, 'M', 0), conn('B', 0, 'M', 1), conn('Cc', 0, 'M', 2),
   conn('M', 0, 'End', 0),
 ], 'T');
+
+// ==================== Agent tool dispatch ====================
+
+// The agent fixtures declare a small `maxToolCalls`: the verifier explores every round size up
+// to it (the count is a path through `A_dispatch`), so a budget is the width of the claim and
+// the cost of the graph — four here keeps every agent fixture complete in milliseconds. The
+// runtime default is 64, which no fixture relies on.
+
+/** Trigger → Agent → End, with one tool wired in over `ai_tool`. The smallest round there is. */
+export const agentOneTool = workflow('agentOneTool', [
+  node('Trigger', 'trigger', [0, 0]),
+  node('Agent', 'agent', [200, 0], { maxRounds: 3, maxToolCalls: 4 }),
+  node('End', 'set', [400, 0]),
+  node('Calculator', 'tool', [200, 200]),
+], [
+  conn('Trigger', 0, 'Agent', 0), conn('Agent', 0, 'End', 0),
+], 'Trigger', { toolConnections: [tool('Calculator', 'Agent')] });
+
+/** Two tools on one agent: `A_dispatch`'s `xor` has two arms, and a round may call either or both. */
+export const agentTwoTools = workflow('agentTwoTools', [
+  node('Trigger', 'trigger', [0, 0]),
+  node('Agent', 'agent', [200, 0], { maxRounds: 2, maxToolCalls: 4 }),
+  node('End', 'set', [400, 0]),
+  node('Calculator', 'tool', [200, 200]),
+  node('Search', 'tool', [200, 400]),
+], [
+  conn('Trigger', 0, 'Agent', 0), conn('Agent', 0, 'End', 0),
+], 'Trigger', { toolConnections: [tool('Calculator', 'Agent'), tool('Search', 'Agent')] });
+
+/** One tool shared by two agents: `T/idle` serialises it, and `T_run`'s outcome is an `xor`. */
+export const agentSharedTool = workflow('agentSharedTool', [
+  node('Trigger', 'trigger', [0, 0]),
+  node('A1', 'agent', [200, 0], { maxRounds: 2, maxToolCalls: 4 }),
+  node('A2', 'agent', [400, 0], { maxRounds: 2, maxToolCalls: 4 }),
+  node('End', 'set', [600, 0]),
+  node('Calculator', 'tool', [300, 200]),
+], [
+  conn('Trigger', 0, 'A1', 0), conn('A1', 0, 'A2', 0), conn('A2', 0, 'End', 0),
+], 'Trigger', { toolConnections: [tool('Calculator', 'A1'), tool('Calculator', 'A2')] });
+
+/** An agent whose `maxIterations` was an expression: the compiler falls back and says so. */
+export const agentAssumedRounds = workflow('agentAssumedRounds', [
+  node('Trigger', 'trigger', [0, 0]),
+  node('Agent', 'agent', [200, 0]),
+  node('Calculator', 'tool', [200, 200]),
+], [
+  conn('Trigger', 0, 'Agent', 0),
+], 'Trigger', { toolConnections: [tool('Calculator', 'Agent')] });
+
+export const AGENTS = { agentOneTool, agentTwoTools, agentSharedTool, agentAssumedRounds } as const;
 
 export const ALL = {
   linear, fanOut, diamond, switch20, chooseBranch, multiProducer, loopOverItems, userCycle,

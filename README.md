@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2024-5fa04e)](typescript/package.json)
-[![libpetri](https://img.shields.io/badge/libpetri-%5E5.0.0-1f6feb)](https://github.com/debe/libpetri)
+[![libpetri](https://img.shields.io/badge/libpetri-%5E5.1.0-1f6feb)](https://github.com/debe/libpetri)
 [![License](https://img.shields.io/badge/license-Apache--2.0-1f6feb)](LICENSE)
 
 n8n executes a workflow by running a scheduling loop over an explicit stack of pending nodes.
@@ -91,16 +91,17 @@ therefore move a marking with a defined encoding, and nothing new is persisted.
 
 **The model becomes analysable.** Whether a join can be left permanently unsatisfied is a
 question about reachable states, which control flow alone cannot answer. `proper-completion`
-decides it on the state-class graph: `violated` on `ifBothOutputs` in 15 ms, with the firing
+decides it on the state-class graph: `violated` on `ifBothOutputs` in 42 ms, with the firing
 sequence named in nodes.
 
 Petri nets are a standard formalism for concurrent and distributed systems, with an established
 body of analysis to draw on. What ships today is one process with a configurable k. Raising k, or
 moving an execution between workers, is a change to the budget and the marking.
 
-The costs: about 16 µs of scheduler overhead per node; 9 of the 44 cases that drive the scheduler
-regressed, all classified; cyclic and multi-producer-input workflows pinned to k = 1; `bounded` on
-cycles and `unknown` on large parallel shapes.
+The costs: about 16 µs of scheduler overhead per node; 4 of the 44 cases that drive the scheduler
+regressed, all classified; cyclic and multi-producer-input workflows pinned to k = 1; `unknown`
+on large parallel shapes, and `bounded` on cycles where the SMT fallback does not close them
+(it proves the Loop Over Items fixture in half a second).
 
 ## Principles
 
@@ -129,6 +130,14 @@ cycles and `unknown` on large parallel shapes.
 | Execution-engine interface | Scheduler registration behind that interface |
 
 n8n-libpetri supports v1 execution order only, and deliberately leaves v0 on n8n's scheduler.
+
+An AI Agent's tool calls are part of the scope, and they are the one place the model changes what
+a user sees rather than only what can be said about it. `AgentV3` returns an `EngineRequest`
+instead of data when its model wants a tool; the compiler turns each `ai_tool` connection into a
+dispatch arm, so a round of tool calls is a marking — bounded by the agent's own
+`options.maxIterations`, resumable if the execution pauses inside it, and run `k`-wide where n8n
+runs it one call at a time ([ADR 0008](docs/adr/0008-agent-tool-dispatch.md)). Every other `ai_*`
+connection is resolved by `supplyData` inside `runNode` and never reaches a scheduler.
 
 ## Execution model
 
@@ -295,19 +304,20 @@ measurements, and [ADR 0007](docs/adr/0007-verification.md) for the decision.
 
 | Surface | Result |
 |---|---|
-| Execution-engine suite, loop-driving | Legacy 44/44. Petri k=1: 35/44, or 35/38 excluding out-of-scope AI-agent dispatch. |
-| Execution-engine suite, helpers | Legacy 1,613/1,613. Petri k=1: 1,611/1,613. |
-| Core suite | The same 44 loop-driving cases at 35/44, with 2,078/2,080 helpers, across 2,124 cases. |
+| Execution-engine suite, loop-driving | Legacy 44/44. Petri k=1: 40/44 — no restatement, agent dispatch is in scope. |
+| Execution-engine suite, helpers | Legacy 1,613/1,613. Petri k=1: 1,613/1,613. |
+| Core suite | The same 44 loop-driving cases at 40/44, with 2,080/2,080 helpers, across 2,124 cases. |
 | n8n workflow package | 9,603 cases, identical to the unpatched baseline; the scheduler never runs there. |
 | n8n CLI package | 20,328 cases pass; the scheduler is registered but never runs there. |
-| Differential sweep | 23 fixtures at k=1,2,4: 49 pass, 20 registered divergences, 0 failures. |
+| Differential sweep | 25 fixtures at k=1,2,4: 55 pass, 20 registered divergences, 0 failures. |
 
 The classifier marks 44 of the execution-engine suite's 1,657 cases as loop-driving, so those 44
-measure the engine; the remaining 1,613 are helpers and guard the seam against perturbation. Of
-the eleven regressions,
-nine are loop-driving and two are helpers. Six of the nine exercise AI-agent `EngineRequest`
-dispatch, which is out of scope by decision; the remaining three are documented semantic
-differences in stuck-join handling and OR/join ordering. Widening to `packages/workflow` and
+measure the engine; the remaining 1,613 are helpers and guard the seam against perturbation. All
+four remaining regressions are loop-driving, and every one is a registered divergence: three are
+the documented semantic differences in stuck-join handling and OR/join ordering (#2, #11, #12),
+and the fourth is an `EngineRequest` naming a node the workflow never wired to its agent (#22) —
+a shape a real agent cannot emit, since its actions come from the same connections. M7 took this
+from 35/44 with an eight-case restatement to 40/44 with none. Widening to `packages/workflow` and
 `packages/cli` added 29,931 further cases with no new failure class. The exact cases and
 evidence are in [`docs/conformance-final.md`](docs/conformance-final.md).
 
@@ -319,7 +329,12 @@ raw numbers are in [`docs/differential.md`](docs/differential.md).
 
 ## Known limits
 
-- AI-agent `EngineRequest` and `EngineResponse` tool dispatch is not implemented.
+- An `EngineRequest` action naming a node with no `ai_tool` connection to its agent cannot be
+  routed and fails by name (divergence #22). No real agent emits one.
+- An agent may make at most `options.maxToolCalls` tool calls per execution, 64 unless declared;
+  n8n has no such bound (divergence #25). Verification explores every round size up to that
+  budget, so an agent that declares none verifies as truncated, and the report says which value
+  to declare.
 - Cyclic and multi-producer-input workflows currently run with an effective budget of one.
 - OR-input rounds do not yet carry activation lineage.
 - Completion-order fields such as `lastNodeExecuted`, `waitTill` and the selected fatal error
@@ -327,7 +342,8 @@ raw numbers are in [`docs/differential.md`](docs/differential.md).
 - An in-flight sibling may finish after another node halts the execution.
 - Verification does not prove general liveness, value properties, timing or order.
 - The verifier returns `unknown` on large parallel state spaces, and `bounded` on cyclic
-  searches unless another property is violated first.
+  searches the SMT fallback does not close — the graph alone can only bound a cycle; the
+  fallback proves the Loop Over Items fixture and is what a `proven` there rests on.
 
 [`docs/divergences.md`](docs/divergences.md) and
 [`docs/state-of-the-project.md`](docs/state-of-the-project.md) track these constraints.

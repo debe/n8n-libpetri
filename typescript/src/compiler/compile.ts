@@ -70,7 +70,9 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   if (!Number.isInteger(requested) || requested < 1) {
     throw new Error(`compile: budget must be a positive integer, got ${requested}`);
   }
-  const analysis = analyse(workflow);
+  const analysis = analyse(workflow, {
+    maxAgentRounds: options.maxAgentRounds, maxAgentToolCalls: options.maxAgentToolCalls,
+  });
   const hash = structuralHash(analysis);
   const restriction = kSafety(analysis);
   const effectiveBudget = restriction === null ? requested : 1;
@@ -88,6 +90,9 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   const syntheticIn = new Map<string, Place<unknown>>();
   for (const a of analysis.nodes) {
     const incoming = analysis.incoming.get(a.node.name)!;
+    // A tool node has no main producer *and* no synthetic in: an agent's `A_dispatch` writes
+    // its `T/in_tool` instead, so a synthetic `X/in` would be an orphan nothing ever seeds.
+    if (a.isTool) continue;
     if (incoming.length === 0) {
       syntheticIn.set(a.node.name, place<unknown>(`${a.node.id}/in`));
       continue;
@@ -127,6 +132,12 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
     for (const r of b.refPorts) {
       const host = r.marker === 'skipped' ? hostSkipped.get(r.node) : undefined;
       ports.set(r.port, host ?? instanceByNode.get(r.node)!.port<unknown>(r.marker));
+    }
+    // Agent tool dispatch: the agent's `tool_k` port binds to the tool's own `in_tool` place,
+    // and the tool's `resp_k` port to its agent's `response` place. Same mechanism as a
+    // reference port — the owner exposes it, the writer binds to it.
+    for (const t of b.toolPorts) {
+      ports.set(t.port, instanceByNode.get(t.node)!.port<unknown>(t.marker));
     }
     builder.compose(instances[i]!, ports);
   });
@@ -258,6 +269,16 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
     for (const g of this.netMap.nodes) {
       put(g.idle, units(1));
       if (g.tries !== null && g.maxTries !== null) put(g.tries, units(g.maxTries - 1));
+      // The agent's round budget: one token per tool-call round its own `options.maxIterations`
+      // permits. It bounds the `queue → dispatched → running → queue` cycle structurally, which
+      // is what lets the reachability graph close on an agent workflow at all. It never enforces
+      // — the node's own `checkMaxIterations` throws first — so seeding exactly `maxRounds`
+      // keeps `A/rounds` from binding before n8n does.
+      if (g.rounds !== null && g.maxRounds !== null) put(g.rounds, units(g.maxRounds));
+      // The tool-call budget: one unit per call the agent may dispatch in this execution,
+      // consumed by `A_dispatch` and refunded by nothing. The seed is what the graph explores
+      // up to, so it is the width of the claim a `proven` makes about this agent.
+      if (g.calls !== null && g.maxToolCalls !== null) put(g.calls, units(g.maxToolCalls));
       if (g.form === 'or') {
         // An OR input has no slots: every unreachable tree producer is one empty delivery of
         // the first round (the start node's producers are all unreachable, so its round is
@@ -285,6 +306,15 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
     const marking = this.sharedMarking();
     const units = (n: number): Token<unknown>[] => Array.from({ length: n }, () => unitToken() as Token<unknown>);
     const g = this.netMap.node(this.startNode);
+    // A tool node has no input side of its own — an agent's `A_dispatch` writes its `T/in_tool`
+    // — so there is nowhere to put the trigger data. Seeding nothing would leave a net that
+    // quiesces immediately and looks like a workflow that did nothing; say so instead. A resumed
+    // execution reaches a tool through `decodeExecutionData`, never through here.
+    if (g.form === 'tool') {
+      throw new Error(
+        `compile: start node '${g.node}' is an ai_tool node; a tool is reached only by its ` +
+        "agent's dispatch, so it cannot be where an execution starts");
+    }
     if (g.form === 'direct') {
       marking.set(g.in!, [tokenOf<unknown>(triggerItems)]);
     } else if (g.form === 'or') {

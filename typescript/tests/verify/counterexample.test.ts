@@ -20,6 +20,9 @@ const map = compiled.netMap;
 function fakeResult(partial: Partial<SmtVerificationResult>): SmtVerificationResult {
   return {
     verdict: { type: 'violated' },
+    // The decoder's subject is a solver counterexample; `route` names which route produced
+    // the result (libpetri VER-003) and only `smt` computes invariants.
+    route: 'smt',
     report: '',
     invariants: [],
     discoveredInvariants: [],

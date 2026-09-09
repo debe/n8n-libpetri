@@ -670,11 +670,25 @@ export interface DependencyEdge {
  * The dependency edges of one run, read off the `source` n8n stamps on every `ITaskData`
  * (`previousNode` / `previousNodeRun`). This is the *realised* dependency graph, not the
  * workflow's static one: it names the exact activations that fed each other.
+ *
+ * **A dispatched `ai_tool` activation is not one of these.** n8n stamps the agent as its
+ * `previousNode`, but the agent did not *feed* it — it *asked* for it, and then waited. The
+ * agent activation that asked and the one that answers share a run index (`handleRequest` sets
+ * `nodeRunIndex: runIndex`), so `finish(agent) < start(tool)` is false in n8n itself, and
+ * reading the edge as a data dependency reports a violation against every engine including the
+ * reference one. `initializeNodeRunData` marks exactly these runs with an `inputOverride` on a
+ * non-`main` connection, which is n8n's own way of saying the same thing.
  */
+function isDispatched(task: ITaskData): boolean {
+  const override = (task as { inputOverride?: Record<string, unknown> }).inputOverride;
+  return override !== undefined && Object.keys(override).some((k) => k !== 'main');
+}
+
 export function dependencyEdges(runData: IRunData): DependencyEdge[] {
   const edges: DependencyEdge[] = [];
   for (const [node, runs] of Object.entries(runData)) {
     runs.forEach((task, runIndex) => {
+      if (isDispatched(task)) return;
       const sources = (task.source ?? []) as Array<ISourceData | null>;
       sources.forEach((source, inputIndex) => {
         if (source === null || source === undefined) return;

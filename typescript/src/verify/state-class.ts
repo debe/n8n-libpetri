@@ -167,7 +167,30 @@ export const MAX_WITNESSES = 8;
  */
 export const REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
   'idle', 'done', 'skipped', 'free', 'tries', 'budget', 'halt', 'pause', 'waiting', 'stopped', 'ran', 'nil',
+  // `rounds` and `calls` are budgets, the agent's `tries`: an execution that finishes without
+  // spending every round or every tool call it was allowed leaves the rest there, and that is
+  // a completed run, not a stranding. Every other agent-round place is pending work — a round
+  // in flight — and widens only inside a designed terminal, where the codec writes it back.
+  'rounds', 'calls',
 ]);
+
+/**
+ * Re-throws a **programming** error rather than letting it become a weaker verdict.
+ *
+ * The catches in this surface convert a failure into "undecided" — the route could not answer,
+ * the solver died, the graph could not be built. That is right for a real condition and wrong
+ * for a bug in this codebase or a mismatch with libpetri, and once both arrive as "undecided"
+ * they are indistinguishable: the report stays well-formed, the proofs quietly disappear, and
+ * nothing fails. A `TypeError` is how a library method this code calls but the installed
+ * version does not have presents itself, so that instance would turn a version skew into a
+ * silently weaker suite (`tasks/todo.md`).
+ *
+ * `TypeError` and `ReferenceError` are never verdicts. `RangeError` is deliberately excluded:
+ * a stack overflow on a deep net is a capacity limit, which is what "undecided" is for.
+ */
+export function rethrowIfBug(e: unknown): void {
+  if (e instanceof TypeError || e instanceof ReferenceError) throw e;
+}
 
 /** A marking holding one of these is a *designed* terminal: a paused or halted run. */
 export const TERMINAL_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
@@ -194,6 +217,12 @@ export type TerminalKind = 'none' | 'pause' | 'halt';
  */
 export const PAUSE_REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
   ...REST_ROLES, 'in-data', 'ready', 'hasdata', 'retry',
+  // An agent round the pause caught mid-flight: the tool calls not yet dispatched (`queue`) or
+  // the mark that there are none (`drained`), the one dispatched but not yet started
+  // (`in-tool`), the ones still out (`outstanding`) and the agent's own re-entry
+  // (`dispatched`). `encodeMarking` writes every one of them back onto `nodeExecutionStack` in
+  // n8n's own shape, so they rest by design — exactly the argument `retry` is in this set for.
+  'in-tool', 'queue', 'drained', 'outstanding', 'dispatched',
 ]);
 
 /**
@@ -246,7 +275,7 @@ export function terminalKindOf(roles: Iterable<PlaceRole | null>): TerminalKind 
  * - `'off'` — the caller passed `maxClasses <= 0`, which turns the solver-free route off
  *   (the M4 surface). Not a limit of anything.
  */
-export type TruncationCause = 'cycle' | 'parallelism' | 'cap' | 'off';
+export type TruncationCause = 'cycle' | 'tool-calls' | 'parallelism' | 'cap' | 'off';
 
 /** What the *workflow* looks like, for {@link StateSpace.truncationCause}. */
 export interface TruncationShape {
@@ -254,6 +283,22 @@ export interface TruncationShape {
   readonly hasCycle: boolean;
   /** Some node has two or more distinct successors: branches that interleave. */
   readonly independentBranches: boolean;
+  /**
+   * Every agent, with its tool-call budget. The graph explores every round size up to the
+   * budget — a product of per-tool and per-round counters, polynomial in K and in the tool
+   * count — so this is the one truncation cause with
+   * a knob the user can turn: a declared `options.maxToolCalls` is both the runtime cap and the
+   * width of the claim, and an assumed one is the scheduler's runtime default, sized for
+   * production and far too wide for a graph.
+   */
+  readonly agents: readonly AgentBudget[];
+}
+
+export interface AgentBudget {
+  readonly node: string;
+  readonly tools: number;
+  readonly maxToolCalls: number;
+  readonly assumed: boolean;
 }
 
 /**
@@ -400,11 +445,12 @@ export class StateSpace {
    * Quiescent classes marking at least one place **outside {@link REST_ROLES}**, whatever
    * they hold — strandings and designed terminals alike.
    *
-   * It is not a defect count; it is the exact error condition of the SMT fallback
-   * (`deadlockFree` with {@link REST_ROLES} as the declared sinks, VER-002: *quiescent ∧ some
-   * marked place is not a declared sink*). One such class is a reachable witness, so on that
-   * net the query is **false** and can never come back `proven` — which is what
-   * `verify.ts` reads it for.
+   * It is not a defect count. It was the exact error condition of the SMT fallback while
+   * that query could declare only the plain rest set (VER-002: *quiescent ∧ some marked place
+   * is not a declared sink*), and `verify.ts` skipped the query wherever it was non-zero.
+   * Since the pause / halt widenings are declared as conditional sinks (libpetri VER-014) the
+   * query excuses the same terminals the graph does, and this is a statistic: how many
+   * quiescent classes the unwidened question would have called strandings.
    */
   readonly outsideSinkClasses: number;
   /** How many classes the BFS expanded: the prefix a bounded claim may be made over. */
@@ -484,9 +530,8 @@ export class StateSpace {
       quiescent++;
       const kind = terminalKindOf(marked.map((p) => this.roleOf(p)));
       if (kind !== 'none') terminal++;
-      // Outside REST_ROLES *whatever* the class holds: this is the SMT fallback's error
-      // condition (VER-002 with REST_ROLES as sinks), so one such class makes that query
-      // false on this net and its `proven` direction unreachable ({@link outsideSinkClasses}).
+      // Outside REST_ROLES *whatever* the class holds — the unwidened VER-002 question's
+      // error condition, kept as a statistic ({@link outsideSinkClasses}).
       if (marked.some((p) => !REST_ROLES.has(this.roleOf(p)))) outsideSinks++;
       const rest = restRolesFor(kind);
       const pending = marked.filter((p) => !rest.has(this.roleOf(p)));
@@ -532,9 +577,30 @@ export class StateSpace {
     // the class count, and only this bounds the memory (see {@link effectiveMaxClasses}).
     const cap = effectiveMaxClasses(maxClasses);
     try {
+      // `StateClassGraph` never reads a transition's `matchSpec`: its enablement is the
+      // structural token counts, so it explores a ν-join as an uncorrelated one. That is
+      // libpetri's **over-approximation fallback**, and the fallback is sound for reachability
+      // safety but *not* for quiescence — "a `Proven` on a quiescence property never comes from
+      // the fallback" (`nu-nets.md` §8). `SmtVerifier` routes around this; building the graph
+      // directly, as this module does, does not. Nothing here compiles a `matchSpec` today
+      // (ADR 0008 records why the agent round does not use one), so this is a tripwire for
+      // whoever adds the first: it must not silently start answering with a coarser abstraction.
+      for (const t of net.transitions) {
+        if ((t as { matchSpec?: unknown }).matchSpec != null) {
+          throw new Error(
+            `transition '${t.name}' carries a ν-net matchSpec; the state-class graph is match-blind, ` +
+            'so its quiescence verdicts would come from an over-approximation that is not sound for ' +
+            'them (nu-nets.md §8). Route this net through SmtVerifier with budgetPlaces declared.');
+        }
+      }
       const graph = StateClassGraph.build(net, initialMarking, cap);
       return new StateSpace(graph, map, cap, maxClasses, performance.now() - started, null, loops);
     } catch (e) {
+      // A graph that could not be built is a route that cannot answer, and every family falls
+      // back — which is right for "the net is outside the fragment" or "the build ran out of
+      // room", and wrong for a defect in this module, where it would delete the solver-free
+      // route from every report while leaving the report well-formed and merely weaker.
+      rethrowIfBug(e);
       const message = e instanceof Error ? e.message : String(e);
       return new StateSpace(null, map, cap, maxClasses, performance.now() - started, message, loops);
     }
@@ -556,6 +622,11 @@ export class StateSpace {
     if (this.complete || this.graph === null) return null;
     if (this.maxClasses <= 0) return 'off';
     if (shape.hasCycle) return 'cycle';
+    // An agent's budget is named before parallelism because it is the cause with a knob: the
+    // branching an agent workflow shows is its own round, and lowering `maxToolCalls` is what
+    // closes the graph, where nothing closes an independent fan-out but a reduction libpetri
+    // does not have (NU-053).
+    if (shape.agents.length > 0) return 'tool-calls';
     return shape.independentBranches ? 'parallelism' : 'cap';
   }
 

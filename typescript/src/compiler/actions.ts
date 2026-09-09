@@ -80,7 +80,15 @@ function startUnmetAction(g: NodeGadget, info: TransitionInfo): TransitionAction
  * Writes the success outcome: the routing of every connected output plus `X/routed`, or —
  * under per-output routing — one `X/ok_o` per output for `X_route_o` to route.
  */
-function succeed(ctx: TransitionContext, g: NodeGadget, policy: RoutingPolicy, value: unknown): void {
+function succeed(ctx: TransitionContext, g: NodeGadget, policy: RoutingPolicy, value: unknown, map: NetMapView): void {
+  if (g.form === 'tool') {
+    // A tool's output is its agent's `A/response`, not a main edge. Several agents can share a
+    // tool, so the outcome is an `xor` over them; the placeholder takes the first branch, and
+    // the scheduler's action reads the agent off the dispatch token.
+    ctx.output(map.node(g.agents[0]!).response!, value);
+    ctx.output(g.routed!, null);
+    return;
+  }
   if (g.splitRouting) {
     for (const out of g.outputs) ctx.output(out.ok!, value);
     return;
@@ -89,9 +97,9 @@ function succeed(ctx: TransitionContext, g: NodeGadget, policy: RoutingPolicy, v
   ctx.output(g.routed!, null);
 }
 
-function runAction(g: NodeGadget, policy: RoutingPolicy): TransitionAction {
+function runAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView): TransitionAction {
   return async (ctx) => {
-    succeed(ctx, g, policy, ctx.input(g.running));
+    succeed(ctx, g, policy, ctx.input(g.running), map);
     ctx.output(g.idle, null);
   };
 }
@@ -112,9 +120,9 @@ function doneAction(g: NodeGadget, map: NetMapView): TransitionAction {
   };
 }
 
-function exhaustedAction(g: NodeGadget, policy: RoutingPolicy): TransitionAction {
+function exhaustedAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView): TransitionAction {
   return async (ctx) => {
-    succeed(ctx, g, policy, ctx.input(g.retry!));
+    succeed(ctx, g, policy, ctx.input(g.retry!), map);
   };
 }
 
@@ -150,6 +158,60 @@ function armAction(g: NodeGadget, info: TransitionInfo): TransitionAction {
   };
 }
 
+/**
+ * `A_done_req`: refunds the budget one cycle after `X_run` marked `A/routed_req` (the phase
+ * `X_done` keeps for every other node, ADR 0004) and opens the round.
+ *
+ * The placeholder takes the **empty-request** branch, so a placeholder round dispatches nothing
+ * and `A_resume` fires in the next cycle. That keeps every structural net terminating, which is
+ * the placeholders' whole job; the scheduler's own action puts the queue up when there is one.
+ */
+function doneRequestAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  return async (ctx) => {
+    const value = ctx.input(g.routedRequest!);
+    ctx.output(map.shared.budget, null);
+    ctx.output(g.drained!, value);
+    ctx.output(g.dispatched!, value);
+  };
+}
+
+/**
+ * `A_dispatch`: one action off `A/queue` onto one tool's `T/in_tool`, one unit onto
+ * `A/outstanding`, one unit of `A/calls` consumed, and either the queue back or `A/drained`.
+ * The placeholder takes the first tool and calls the round drained; the scheduler's action
+ * takes the tool the action names and knows whether the queue has more.
+ */
+function dispatchAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  return async (ctx) => {
+    const value = ctx.input(g.queue!);
+    ctx.output(map.node(g.tools[0]!).inTool!, value);
+    ctx.output(g.drained!, value);
+    ctx.output(g.outstanding!, null);
+  };
+}
+
+/** `A_calls_out`: the budget is spent with calls queued, so the agent re-enters to fail. */
+function callsOutAction(g: NodeGadget): TransitionAction {
+  return async (ctx) => {
+    ctx.output(g.running, ctx.input(g.dispatched!));
+  };
+}
+
+/** `A_resume`: the round is complete, so the agent re-enters `X_run` with its resume entry. */
+function resumeAction(g: NodeGadget): TransitionAction {
+  return async (ctx) => {
+    ctx.output(g.running, ctx.input(g.dispatched!));
+  };
+}
+
+/** `A_rounds_out`: the budget is spent, so the open round becomes a designed pause. */
+function roundsOutAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  return async (ctx) => {
+    ctx.output(g.stopped, ctx.input(g.dispatched!));
+    ctx.output(map.shared.pause, null);
+  };
+}
+
 function retryWaitAction(g: NodeGadget): TransitionAction {
   return async (ctx) => {
     ctx.output(g.running, ctx.input(g.retry!));
@@ -159,18 +221,26 @@ function retryWaitAction(g: NodeGadget): TransitionAction {
 /** Binds a structural action for every role that declares an `Out` spec; sinks and `clear` keep passthrough. */
 export function structuralActions(policy: RoutingPolicy): ActionBinder {
   return (info, map) => {
-    if (info.role === 'sink' || info.role === 'clear') return null;
+    // `clear` and `collect` close a round and produce nothing: genuine sinks (CORE-043 AC4),
+    // so they keep libpetri's passthrough rather than a placeholder that would have to invent
+    // an output.
+    if (info.role === 'sink' || info.role === 'clear' || info.role === 'collect') return null;
     const g = map.node(info.node!);
     switch (info.role) {
       case 'start': return startAction(g);
       case 'start-unmet': return startUnmetAction(g, info);
-      case 'run': return runAction(g, policy);
+      case 'run': return runAction(g, policy, map);
       case 'route': return routeAction(g, info, policy);
       case 'done': return doneAction(g, map);
-      case 'exhausted': return exhaustedAction(g, policy);
+      case 'exhausted': return exhaustedAction(g, policy, map);
       case 'skip': return skipAction(g);
       case 'arm': return armAction(g, info);
       case 'retry': return retryWaitAction(g);
+      case 'done-request': return doneRequestAction(g, map);
+      case 'dispatch': return dispatchAction(g, map);
+      case 'resume': return resumeAction(g);
+      case 'rounds-out': return roundsOutAction(g, map);
+      case 'calls-out': return callsOutAction(g);
     }
   };
 }

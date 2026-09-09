@@ -23,8 +23,13 @@ export function structuralHash(analysis: WorkflowAnalysis): string {
     // SPLIT_ROUTING_ABOVE (3) connected outputs — X/ok and X_route are gone there and
     // X_done consumes a single X/routed; 7: no `_halted` and no `_halt_reap` — `_halt` is
     // the halted run's terminal marker, never consumed, and the pending activations rest
-    // where they were delivered
-    v: 7,
+    // where they were delivered; 8: agent tool dispatch — the `ai_tool` edges decide which
+    // dispatch arms exist and which nodes compile in the `tool` form, and `maxRounds` seeds
+    // `A/rounds`. Neither is derivable from the main graph, so two workflows differing only in
+    // their tool wiring would otherwise share a cached net and an agent would dispatch through
+    // the wrong one; 9: the tool-call budget `A/calls` replaces the `A/pending` count, and its
+    // seed `maxToolCalls` is part of the marking
+    v: 9,
     start: analysis.startNode,
     starts: [...analysis.startNodes],
     nodes: analysis.nodes.map((a) => ({
@@ -47,8 +52,17 @@ export function structuralHash(analysis: WorkflowAnalysis): string {
       loopNode: a.shape.loopNode === true,
       outputNames: a.shape.outputNames === undefined ? null : [...a.shape.outputNames],
       references: a.references.map((r) => [r.node, r.kind]),
+      // The resolved seed of `A/rounds`, plus whether it came from the workflow or from the
+      // compiler's fallback: the two mark the net identically but do not license the same
+      // verification claim, and the fallback is a compile option, so the same workflow under a
+      // different cap must not reuse the same entry.
+      maxRounds: a.maxRounds,
+      roundsAssumed: a.roundsAssumed,
+      maxToolCalls: a.maxToolCalls,
+      toolCallsAssumed: a.toolCallsAssumed,
     })),
     edges: analysis.edges.map((e) => [e.from, e.outputIndex, e.to, e.inputIndex]),
+    toolEdges: analysis.toolConnections.map((c) => [c.tool, c.agent]),
   };
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }

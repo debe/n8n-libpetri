@@ -165,12 +165,27 @@ export interface ReferencePort {
   readonly marker: 'done' | 'skipped';
 }
 
+/**
+ * A port bound to a place another node owns, for agent tool dispatch. Same mechanism as
+ * {@link ReferencePort} — the owner exposes the place as a port and `compile()` binds this one
+ * to `instance.port(marker)` — but the two directions are writes, not read arcs:
+ * `in_tool` is the agent writing the tool's dispatch place, `response` the tool writing the
+ * agent's response place.
+ */
+export interface ToolPort {
+  readonly port: string;
+  readonly node: string;
+  readonly marker: 'in_tool' | 'response';
+}
+
 export interface GadgetBuild {
   readonly def: SubnetDef<void>;
   readonly prefix: string;
   /** Original port name → host place, for `compose(instance, ports)`. Reference ports excluded. */
   readonly ports: ReadonlyMap<string, Place<unknown>>;
   readonly refPorts: readonly ReferencePort[];
+  /** Ports bound to another node's `in_tool` / `response` place (agent tool dispatch). */
+  readonly toolPorts: readonly ToolPort[];
   /**
    * Whether the subnet exposes a `skipped` output port (it has a skip transition). A
    * referenced node without one gets its `skipped` marker as a host-level place bound
@@ -267,9 +282,16 @@ export function buildNodeGadget(
   const stopWorkflow = a.onError === 'stopWorkflow';
   const required = new Set<number>(a.requiredInputs ?? []);
 
+  // Agent tool dispatch (README "Agent tool dispatch"). `tools` is non-empty exactly on an
+  // agent; `agents` exactly on a tool, whose form is `'tool'`.
+  const tools = a.tools;
+  const isAgent = tools.length > 0;
+  const agents = analysis.agentsOf.get(name) ?? [];
+
   const portDecls: PortDecl[] = [];
   const ports = new Map<string, Place<unknown>>();
   const refPorts: ReferencePort[] = [];
+  const toolPorts: ToolPort[] = [];
   const pending: PendingPlace[] = [];
   const transitions: TransitionInfo[] = [];
   const body: Transition[] = [];
@@ -313,7 +335,18 @@ export function buildNodeGadget(
   let inEmptyFinal: string | null = null;
   const inputs: LocalInput[] = [];
 
-  if (form === 'direct') {
+  // `T/in_tool`: the tool's only input, written by every agent that can dispatch it. The tool
+  // owns the place and exposes it; each agent binds an output port to it, the way a referencing
+  // node binds a read port to `Y/done`.
+  let inToolLocal: Place<unknown> | null = null;
+  if (form === 'tool') {
+    inToolLocal = internal('in_tool', 'in-tool', null);
+    portDecls.push({ name: 'in_tool', local: inToolLocal, direction: 'input' });
+  }
+
+  if (form === 'tool') {
+    // No main producer, so no edge places and no join slots: the input side is `in_tool`.
+  } else if (form === 'direct') {
     const edge = incoming[0];
     inLocal = place<unknown>('in');
     if (edge !== undefined) {
@@ -392,7 +425,8 @@ export function buildNodeGadget(
   const hasdata = form === 'join' ? internal('hasdata', 'hasdata', null) : null;
 
   // ---- skip exists iff an empty token can arrive where it decides the activation ----
-  const hasSkip = form === 'direct' ? inEmptyLocal !== null
+  const hasSkip = form === 'tool' ? false
+    : form === 'direct' ? inEmptyLocal !== null
     : form === 'or' ? true
     : form === 'join' ? inputs.some((i) => i.emptyCapable)
     : inputs.some((i) => i.required && i.emptyCapable);
@@ -462,6 +496,51 @@ export function buildNodeGadget(
   const retry = a.retryOnFail ? internal('retry', 'retry', null) : null;
   const tries = a.retryOnFail ? internal('tries', 'tries', null) : null;
 
+  // ---- agent round places (patterns.md §5, "fan-out and join with pending markers") ----
+  // `routed_req` phases the budget refund exactly as `routed` does for every other outcome;
+  // `queue` carries the undispatched actions and `drained` marks that there are none;
+  // `outstanding` is the pattern's `JOB_PENDING`; `dispatched` its `ROUTING_DONE`; `rounds`
+  // is the round budget, seeded from the agent's own `options.maxIterations`; `calls` is the
+  // tool-call budget, the scheduler's own, consumed one unit per dispatch and never refunded.
+  //
+  // Why a budget and not a count. The number of tool calls in a round is decided at run time,
+  // and an `Out` branch cannot carry a number — IO-015 validates the *set* of places a firing
+  // writes. A count deposited as tokens is therefore invisible to the state-class graph, which
+  // fires the branch as one token and explores one call in flight where the executor reaches
+  // many: an under-approximation, the direction that yields a false `proven` on a safety
+  // property. Consumed one unit per firing of `A_dispatch`, the count becomes a path length
+  // instead, and the graph explores every round size up to the budget (`peak(A/outstanding)`
+  // equals the budget, `tests/spikes/agent-round.test.ts`). Never refunding it is what keeps
+  // that finite: a refund at the join lets a round dispatch without bound and `T/done`
+  // accumulates — measured, the graph truncates. This is NU-040's decidability lever, the
+  // budget place, without ν-names because one round is live per agent (`A/idle`).
+  const routedRequest = isAgent ? internal('routed_req', 'routed-request', null) : null;
+  const queue = isAgent ? internal('queue', 'queue', null) : null;
+  const calls = isAgent ? internal('calls', 'calls', null) : null;
+  const drained = isAgent ? internal('drained', 'drained', null) : null;
+  const outstanding = isAgent ? internal('outstanding', 'outstanding', null) : null;
+  const dispatched = isAgent ? internal('dispatched', 'dispatched', null) : null;
+  const rounds = isAgent ? internal('rounds', 'rounds', null) : null;
+  // Owned by the agent, written by every tool it dispatches — exposed like `done` and bound
+  // by each tool's own output port.
+  const response = isAgent ? internal('response', 'response', null) : null;
+  if (response !== null) portDecls.push({ name: 'response', local: response, direction: 'output' });
+
+  // An agent's write port into each of its tools' `in_tool`, and a tool's write port into each
+  // of its agents' `response`. Both are cross-node, so both are bound in `compile()`.
+  const toolInPorts = tools.map((toolName, k) => {
+    const local = place<unknown>(`tool_${k}`);
+    portDecls.push({ name: `tool_${k}`, local, direction: 'output' });
+    toolPorts.push({ port: `tool_${k}`, node: toolName, marker: 'in_tool' });
+    return local;
+  });
+  const agentResponsePorts = agents.map((agentName, k) => {
+    const local = place<unknown>(`resp_${k}`);
+    portDecls.push({ name: `resp_${k}`, local, direction: 'output' });
+    toolPorts.push({ port: `resp_${k}`, node: agentName, marker: 'response' });
+    return local;
+  });
+
   // ---- Out spec builders ----
   const routingOf = (out: LocalOutput): Out => xor(
     andOf(out.edges.map((e) => outPlace(e.data))),
@@ -472,9 +551,15 @@ export function buildNodeGadget(
   // enclosing `xor` is fine, IO-015 searches for an exact explanation
   // (`tests/spikes/out-spec.test.ts`, `tests/spikes/collapsed-outcome.test.ts`). Split: one
   // `X/ok_o` per output, each routed by its own `X_route_o`.
-  const success: Out = split
-    ? andOf(outputs.map((o) => outPlace(o.ok!)))
-    : andOf([...outputs.map(routingOf), outPlace(routed!)]);
+  // A tool's output is not a main edge: it is its agent's `A/response`. Several agents can
+  // share one tool, so the branch is an `xor` over them and the action picks the agent the
+  // dispatch token names. `X/routed` still marks the outcome for `X_done` to refund the budget
+  // one cycle later, so the phase and the P-semiflow are the ordinary ones (ADR 0004).
+  const success: Out = form === 'tool'
+    ? and(xorOf(agentResponsePorts.map((r) => outPlace(r))), outPlace(routed!))
+    : split
+      ? andOf(outputs.map((o) => outPlace(o.ok!)))
+      : andOf([...outputs.map(routingOf), outPlace(routed!)]);
   const haltBranch = and(outPlace(halt), outPlace(budget));
   // The two pause outcomes: the budget is refunded here since nothing routes afterwards.
   const waitingBranch = and(outPlace(waiting), outPlace(pause), outPlace(budget));
@@ -485,7 +570,9 @@ export function buildNodeGadget(
   // ---- X_start and its start_unmet twins ----
   const startBuilder = (local: string, priority: number) => {
     const b = Transition.builder(local).priority(priority).inhibitors(halt, pause);
-    if (form === 'direct') {
+    if (form === 'tool') {
+      b.inputs(one(inToolLocal!), one(budget), one(idle)).outputs(outPlace(running));
+    } else if (form === 'direct') {
       b.inputs(one(inLocal!), one(budget), one(idle)).outputs(outPlace(running));
     } else if (form === 'or') {
       const i = inputs[0]!;
@@ -510,12 +597,18 @@ export function buildNodeGadget(
   });
 
   // ---- X_run: the outcome ----
+  // An agent has one more: the node returned an `EngineRequest` instead of data. It is phased
+  // like the success outcome — `A/routed_req` here, the budget refunded by `A_done_req` one
+  // cycle later — so `_budget + Σ(running + retry + routed) = k` still holds with `routed_req`
+  // counted among the in-flight markers.
+  const requestBranch = isAgent ? [outPlace(routedRequest!)] : [];
   const outcome = xorOf([
     success,
     ...(retry !== null ? [outPlace(retry)] : []),
     ...(stopWorkflow ? [haltBranch] : []),
     waitingBranch,
     stoppedBranch,
+    ...requestBranch,
   ]);
   body.push(Transition.builder('run')
     .inputs(one(running))
@@ -542,6 +635,110 @@ export function buildNodeGadget(
     .priority(depth + 1).build());
   tinfo('done', 'done');
   const doneName = F('done');
+
+  // ---- the agent round: done_req, dispatch, collect, resume ----
+  let doneRequestName: string | null = null;
+  let dispatchName: string | null = null;
+  let collectName: string | null = null;
+  let resumeName: string | null = null;
+  let roundsOutName: string | null = null;
+  let callsOutName: string | null = null;
+  if (isAgent) {
+    // `A_done_req`: the round opens with something to dispatch, or — an empty request — with
+    // nothing, in which case it is already drained and `A_resume` fires next.
+    body.push(Transition.builder('done_req')
+      .inputs(one(routedRequest!))
+      .outputs(xor(
+        and(outPlace(budget), outPlace(queue!), outPlace(dispatched!)),
+        and(outPlace(budget), outPlace(drained!), outPlace(dispatched!)),
+      ))
+      .priority(depth + 1).build());
+    tinfo('done_req', 'done-request');
+    doneRequestName = F('done_req');
+
+    // `A_dispatch`: one action per firing, one budget unit per firing. `A/queue` holds a single
+    // token, so dispatch is serialised and pops in the order the model requested — which is
+    // what n8n's own "executes requested tools in the order the actions were requested"
+    // asserts — while the tools themselves then run at whatever width `_budget` allows. The
+    // action says whether more remain (the queue goes back) or that was the last (`drained`).
+    //
+    // That last choice is the one `patterns.md` warns about — "never decide 'is this the last
+    // one' inside an action and expose it as an Xor" — and here it is safe, because of what
+    // each spurious branch leads to in the graph. Taking `drained` early is a smaller round, a
+    // subset. Taking the queue past the real end spends budget until `A/calls` is empty, and
+    // `A_calls_out` then re-enters the agent: a designed exit, not the stranded batch the
+    // warning is about. Both directions are explored, so the graph is an over-approximation of
+    // the executor — the sound direction for a safety property.
+    body.push(Transition.builder('dispatch')
+      .inputs(one(queue!), one(calls!))
+      .inhibitors(halt, pause)
+      .outputs(and(
+        xorOf(toolInPorts.map((t) => outPlace(t))),
+        outPlace(outstanding!),
+        xor(outPlace(queue!), outPlace(drained!)),
+      ))
+      .priority(depth + 1).build());
+    tinfo('dispatch', 'dispatch');
+    dispatchName = F('dispatch');
+
+    // `A_collect`: pairs one arrived response with one outstanding dispatch and produces
+    // nothing — a genuine sink (CORE-043 AC4), the same category as the OR form's `X_clear`.
+    // An accumulator drained by `A_resume` would race: `collect` consumes `A/outstanding` when
+    // it fires but would deposit on completion, and `A_resume` — no longer inhibited — can fire
+    // inside that window and leak a marker into the next round. High priority, because the
+    // pattern's order is store before resolve.
+    body.push(Transition.builder('collect')
+      .inputs(one(outstanding!), one(response!))
+      .priority(depth + 2).build());
+    tinfo('collect', 'collect');
+    collectName = F('collect');
+
+    // `A_resume`: the round is complete — nothing left to dispatch, nothing still out — so the
+    // agent re-enters `X_run` with the resume entry `A/dispatched` carries. It takes a budget
+    // unit and a round unit; when `A/rounds` is empty the loop stops, which is what makes the
+    // whole cycle structurally bounded.
+    body.push(Transition.builder('resume')
+      .inputs(one(dispatched!), one(drained!), one(rounds!), one(idle))
+      .inhibitors(outstanding!, halt, pause)
+      .inputs(one(budget))
+      .outputs(outPlace(running))
+      .priority(depth).build());
+    tinfo('resume', 'resume');
+    resumeName = F('resume');
+
+    // `A_calls_out`: the tool-call budget is spent and the queue still holds actions. The agent
+    // re-enters `X_run` — taking its budget unit as any start does — carrying the fact, and
+    // that run fails with `toolCallBudgetExceeded` under the node's own `onError` policy: the
+    // same shape as `maxIterations` throwing inside n8n's node, and it is what gives the
+    // graph's spurious "more remain" path an exit that is not a stranding. Below `A_resume` in
+    // priority, though the two are structurally exclusive: one needs `drained`, this one needs
+    // the queue.
+    body.push(Transition.builder('calls_out')
+      .inputs(one(dispatched!), one(queue!), one(idle), one(budget))
+      .inhibitors(calls!, outstanding!, halt, pause)
+      .outputs(outPlace(running))
+      .priority(depth - 1).build());
+    tinfo('calls_out', 'calls-out');
+    callsOutName = F('calls_out');
+
+    // `A_rounds_out`: the round budget is spent and a round is still open, so the agent can
+    // never resume. Rather than let the net quiesce holding work nothing will ever take, this
+    // makes it a **designed terminal**: `_pause` marks the stop, and the agent's re-entry goes
+    // back through `A/stopped` (`ran: false`) the way any un-run activation does, so the codec
+    // writes it — and the tool calls still on `A/queue` — onto `nodeExecutionStack`.
+    //
+    // Only a mock reaches it. A real agent counts its own `iterationCount` and throws "Max
+    // iterations reached" first, which is why `A/rounds` is seeded with exactly that number.
+    // The verifier cannot know that, so without this transition every agent workflow reports a
+    // stranding — measured, `tests/verify/measure-graph.ts`.
+    body.push(Transition.builder('rounds_out')
+      .inputs(one(dispatched!), one(drained!))
+      .inhibitors(outstanding!, rounds!, halt)
+      .outputs(and(outPlace(stopped), outPlace(pause)))
+      .priority(depth - 1).build());
+    tinfo('rounds_out', 'rounds-out');
+    roundsOutName = F('rounds_out');
+  }
 
   // ---- X_skip ----
   const skipNames: string[] = [];
@@ -729,6 +926,17 @@ export function buildNodeGadget(
       retry: opt(retry, 'retry'),
       tries: opt(tries, 'tries'),
       waiting: lookup(F('waiting')), stopped: lookup(F('stopped')),
+      inTool: opt(inToolLocal, 'in_tool'),
+      routedRequest: opt(routedRequest, 'routed_req'),
+      queue: opt(queue, 'queue'),
+      calls: opt(calls, 'calls'),
+      drained: opt(drained, 'drained'),
+      outstanding: opt(outstanding, 'outstanding'),
+      response: opt(response, 'response'),
+      dispatched: opt(dispatched, 'dispatched'),
+      rounds: opt(rounds, 'rounds'),
+      tools, agents, maxRounds: a.maxRounds, roundsAssumed: a.roundsAssumed,
+      maxToolCalls: a.maxToolCalls, toolCallsAssumed: a.toolCallsAssumed,
       inputs: inputGadgets, outputs: outputGadgets,
       references: referenceNames, unguardedReferences,
       transitions: {
@@ -737,9 +945,14 @@ export function buildNodeGadget(
         retryWait: retry === null ? null : F('retry_wait'),
         exhausted: retry === null ? null : F('exhausted'),
         sinks: sinkNames,
+        doneRequest: doneRequestName, dispatch: dispatchName, collect: collectName, resume: resumeName,
+        roundsOut: roundsOutName, callsOut: callsOutName,
       },
     };
   };
 
-  return { def, prefix: id, ports, refPorts, exposesSkipped: hasSkip, transitions, places: pending, materialise };
+  return {
+    def, prefix: id, ports, refPorts, toolPorts, exposesSkipped: hasSkip,
+    transitions, places: pending, materialise,
+  };
 }

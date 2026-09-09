@@ -116,8 +116,10 @@ import {
 } from 'libpetri/verification';
 import { decodeCounterexample } from './counterexample.js';
 import {
-  DEFAULT_MAX_CLASSES, MAX_WITNESSES, REST_ROLES, StateSpace, TERMINAL_ROLES, loopTransitions,
-  witnessCounterexample,
+  DEFAULT_MAX_CLASSES, MAX_WITNESSES, REST_ROLES, StateSpace, loopTransitions, restRolesFor,
+  rethrowIfBug,
+  terminalKindOf,
+  witnessCounterexample, PAUSE_REST_ROLES, HALT_REST_ROLES,
 } from './state-class.js';
 import type { TruncationShape } from './state-class.js';
 import type {
@@ -137,6 +139,48 @@ export const DEFAULT_PROPERTIES: readonly PropertyName[] = [
 
 // ==================== solver ====================
 
+/**
+ * The `SmtVerifier` methods this module calls that libpetri gained in 5.1.0.
+ *
+ * Presence is checked once per report, before any query, because the alternative is worse than
+ * a missing method: each call site would throw a `TypeError` from inside a query, and although
+ * {@link rethrowIfBug} now makes that loud rather than a verdict, the message a reader gets is
+ * `verifier.sinkPlacesWhen is not a function` from a stack several frames deep — which reads as
+ * a bug in this project rather than as an install that predates the API. The `package.json`
+ * range asked for `^5.0.0` until 5.1.0 shipped, and a registry install satisfied it with
+ * exactly such a package — so this was the likeliest wrong configuration rather than a
+ * hypothetical one. The floor is right now, and this check is what makes a downgrade or a
+ * stale lock fail with a sentence instead of with missing proofs.
+ *
+ * The three named methods stand in for the whole surface: `semiflowInvariants('auto')` — the
+ * string argument, not the method, which 5.0.0 already had — and `SmtVerificationResult.route`
+ * ship in the same release and cannot be probed without calling or running.
+ *
+ * **The limit of that proxy**, stated because it is invisible from the code: the five pieces
+ * are assumed to ship together, which holds because upstream landed them in one commit. If a
+ * future release ever splits them, this check passes while `'auto'` or `route` is missing —
+ * and the failure returns to its disguised form, a `TypeError` from inside a query. Add the
+ * split piece here if that ever happens.
+ */
+const REQUIRED_VERIFIER_METHODS = ['sinkPlacesWhen', 'stateEquation', 'enumerationMaxClasses'] as const;
+
+/**
+ * Fails with a message naming the gap when the installed libpetri predates the API this
+ * module needs (VER-014, VER-016, VER-017).
+ */
+export function assertLibpetriSurface(): void {
+  const proto = SmtVerifier.prototype as unknown as Record<string, unknown>;
+  const missing = REQUIRED_VERIFIER_METHODS.filter((m) => typeof proto[m] !== 'function');
+  if (missing.length === 0) return;
+  throw new Error(
+    `the installed libpetri is too old for this verifier: SmtVerifier is missing ${missing.join(', ')}. ` +
+    'This surface (VER-014 conditional sinks, VER-016 the state equation, VER-017 bounded ' +
+    "enumeration, and `semiflowInvariants('auto')`) ships in libpetri 5.1.0. Install that or " +
+    'later rather than relaxing this check: without those methods every SMT query fails, and ' +
+    'the report would close with every proof missing.',
+  );
+}
+
 /** Resolves z3 once per run (VER-013); a failure is a reason string, never a throw. */
 export function resolveSolver(env: NodeJS.ProcessEnv = process.env): SolverInfo {
   try {
@@ -148,6 +192,10 @@ export function resolveSolver(env: NodeJS.ProcessEnv = process.env): SolverInfo 
       reason: null,
     };
   } catch (e) {
+    // "No usable z3" is a real condition and a reason string; a defect in the resolution path
+    // is not, and reported as unavailability it would make every report solver-free and
+    // quietly weaker rather than failing.
+    rethrowIfBug(e);
     return {
       available: false,
       program: null,
@@ -243,6 +291,9 @@ function nodeCarriesUnit(g: NodeGadget, terms: ReadonlyMap<string, number>, w: n
   const inFlight = [
     g.routed,
     g.retry,
+    // An agent holds its unit on `A/routed_req` between the request outcome and `A_done_req`,
+    // exactly as any node holds it on `X/routed` between `X_run` and `X_done` (ADR 0004).
+    g.routedRequest,
     ...g.outputs.flatMap((o) => [o.ok, o.routed]),
   ].filter((p): p is Place<unknown> => p !== null);
   return inFlight.length === 0 || inFlight.some((p) => (terms.get(p.name) ?? 0) > 0);
@@ -353,7 +404,10 @@ export function smtRefusalFor(
  * failure becomes `unknown` with the message as the reason (VER-013). A net above the
  * measured size ceiling is refused outright ({@link smtRefusalFor}).
  */
-async function query(ctx: Context, property: SmtProperty, sinks: readonly Place<unknown>[]): Promise<QueryOutcome> {
+async function query(
+  ctx: Context, property: SmtProperty, sinks: readonly Place<unknown>[],
+  conditional: readonly ConditionalSink[] = [],
+): Promise<QueryOutcome> {
   if (ctx.smtRefusal !== null) {
     return { verdict: 'unknown', reason: ctx.smtRefusal, method: null, result: null, elapsedMs: 0 };
   }
@@ -364,10 +418,30 @@ async function query(ctx: Context, property: SmtProperty, sinks: readonly Place<
   try {
     const verifier = SmtVerifier.forNet(ctx.compiled.net)
       .initialMarking(ctx.state)
-      .semiflowInvariants(ctx.semiflowInvariants)
+      .semiflowInvariants(semiflowSetting(ctx))
       .timeout(ctx.timeoutMs)
       .property(property);
     if (sinks.length > 0) verifier.sinkPlaces(...sinks);
+    for (const c of conditional) verifier.sinkPlacesWhen(c.marker, ...c.places);
+    // The quiescence question is a proof attempt, and its inductive invariant needs the
+    // ordering laws only the marking equation states (libpetri VER-016, `tasks/todo.md` §4):
+    // with firing counters in the rule bodies the agent net at `maxToolCalls` 64 proves in
+    // 1.6 s where it was unknown at 120 s. The reachability families are witness hunts on a
+    // truncated graph, and counters slow witness search ~1.5×, so they stay without.
+    if (property.type === 'deadlock-free') verifier.stateEquation(true);
+    // libpetri's bounded enumeration (VER-017) is the attempt this module has *already* made
+    // before any query reaches here: `StateSpace` builds the same state-class graph, with a
+    // larger budget (`DEFAULT_MAX_CLASSES`, 200 000 against its 50 000) and the classification
+    // the report is built on — the pause filter, the truncation cause, the cyclic-run bound.
+    // The fallback runs only where that route did *not* close, so a second enumeration under a
+    // smaller budget cannot close either: it re-explores up to 50 000 classes per query and
+    // then declines. Two things it costs when left on: the wall clock of that attempt (the
+    // suite goes from 17 s to 101 s, the agent net at K = 64 from 1.6 s to 2.6 s), and the
+    // report's invariants — a verdict read off the graph runs no P-invariant pipeline, so
+    // `result.invariants` comes back empty and the structural section this module prints from
+    // it goes with it. Turned off here so the enumeration happens once, in the route that
+    // reports it properly; raising `maxClasses` is how a caller asks for more of it.
+    verifier.enumerationMaxClasses(0);
     const result = await verifier.verify();
     if (ctx.invariants === null && result.invariants.length > 0) {
       ctx.invariants = result.invariants;
@@ -381,6 +455,7 @@ async function query(ctx: Context, property: SmtProperty, sinks: readonly Place<
       elapsedMs: performance.now() - started,
     };
   } catch (e) {
+    rethrowIfBug(e);
     return {
       verdict: 'unknown',
       reason: `verification failed: ${messageOf(e)}`,
@@ -394,8 +469,9 @@ async function query(ctx: Context, property: SmtProperty, sinks: readonly Place<
 /** An SMT query as a {@link Decision}. */
 async function smtDecision(
   ctx: Context, property: SmtProperty, sinks: readonly Place<unknown>[] = [],
+  conditional: readonly ConditionalSink[] = [],
 ): Promise<Decision> {
-  const outcome = await query(ctx, property, sinks);
+  const outcome = await query(ctx, property, sinks, conditional);
   return {
     verdict: outcome.verdict,
     reason: outcome.reason,
@@ -449,30 +525,31 @@ function truncationReason(ctx: Context): string {
 }
 
 /**
- * Why the SMT fallback is asked at all, and — measured — what it can and cannot answer.
+ * Why the SMT fallback is asked, and what it asks.
  *
- * The fallback is one **whole-net** `deadlockFree` query with the structural rest set
- * declared as sinks — the VER-002 shape that is literally workflow-net proper completion,
- * and one query per workflow rather than M4's one per place. Measured (30 s per query,
- * `docs/verification.md`), it decided nothing on any fixture: `unknown` on eight of ten and
- * `violated` on `fanOut` and `multiProducer` with a witness that is a *paused* run — the
- * designed terminal the solver-free route classifies and this query cannot, because a
- * `_pause` marking also holds an `in`-place arrival the codec writes back and the sink set
- * cannot both admit that arrival and still detect a stranding on it.
+ * The fallback is one **whole-net** `deadlockFree` query per workflow — the VER-002 shape
+ * that is literally workflow-net proper completion, one query rather than M4's one per
+ * place — with the structural rest set declared as sinks ({@link restSinks}) and the pause /
+ * halt widenings declared as *conditional* sinks ({@link terminalSinks}, libpetri VER-014):
+ * a token may rest on an `in` / `ready` / `hasdata` place while `_pause` holds a token, and
+ * on those plus the empty-arrival markers while `_halt` does. That is the solver-free route's
+ * classification (`state-class.ts`, "The pause filter") stated as a property, so the two
+ * routes now ask the same question and a `proven` from either transfers.
  *
- * The reason for the nought-for-ten is structural, not a solver budget, and it is worth
- * being exact about because it decides when the query is worth running at all. VER-002's
- * error condition is *quiescent ∧ some marked place is not a declared sink*, and the sinks
- * declared here are exactly {@link REST_ROLES}. So on a net that has **any** reachable
- * quiescent marking outside that set — a paused run holding an arrival, which is most
- * workflows with a second branch in flight — the property is false by construction and its
- * `proven` direction cannot come back however long z3 runs. {@link StateSpace.outsideSinkClasses}
- * counts exactly those classes, and {@link smtFallbackCompletion} does not spend a timeout on
- * a question the graph has already answered `no` to.
+ * Until libpetri 5.0.x (2026-09-08) no property could express the widening, and the plain
+ * VER-002 question was false by construction on any workflow with a reachable paused marking
+ * holding an arrival — which is most of them — so it was skipped wherever the graph had
+ * already reached such a marking, and answered `violated` with a designed-terminal witness
+ * everywhere else (nought for ten, `docs/verification.md`). Measured after the change:
+ * `fanOut` proven in 0.2 s where it used to return that witness in 2 s. What it still cannot
+ * do is *prove* quiescence on a net whose proof needs chained inequality invariants —
+ * `agentTwoTools` at `maxToolCalls` 64 is `unknown` at 120 s — the same limit as the
+ * reachability cliff (`tasks/todo.md` §4, libpetri's inequality-invariant work).
  *
- * Where the count *is* zero the query is a real one and its `proven` would transfer, so it
- * runs. Its `violated` is passed through as a finding when the witness is not a designed
- * terminal, and downgraded when it is (see {@link PAUSE_WITNESS_REASON}).
+ * Its `violated` is a finding: a stranding the solver found outside the explored prefix. A
+ * witness that is nevertheless a designed terminal would mean the sink declaration and the
+ * graph's classification disagree; that is downgraded and named
+ * ({@link TERMINAL_WITNESS_REASON}) rather than reported as a defect.
  *
  * All of that is a claim about **this** query only. The other families' fallbacks decide
  * plenty on the same truncated graphs — on `switch20`, z3 proves `placeBound(_budget, 1)`
@@ -480,45 +557,41 @@ function truncationReason(ctx: Context): string {
  * family rather than being dropped wholesale.
  */
 const SMT_FALLBACK_REASON =
-  'the whole-net deadlockFree fallback (VER-002, structural rest set as sinks) did not decide it either';
+  'the whole-net deadlockFree fallback (VER-002 with the rest set as sinks and the pause / halt ' +
+  'widenings as conditional sinks, VER-014) did not decide it either';
 
 /**
- * Why the whole-net `deadlockFree` fallback was not even asked: the graph found a reachable
- * quiescent marking outside the declared sink set, so the query is false on this net and
- * `proven` — the only direction it could contribute here — is unreachable.
- */
-function provenUnreachableReason(ctx: Context): string {
-  const n = ctx.space.outsideSinkClasses;
-  return 'the whole-net deadlockFree fallback (VER-002, structural rest set as sinks) was not asked: ' +
-    `the graph already reached ${n} quiescent marking(s) holding a place outside that sink set ` +
-    '(a designed terminal whose arrival the marking codec writes back), so the query is false on this ' +
-    'net and can never return proven — the only direction it could add. Its violated direction would ' +
-    'name one of those same markings, which is not a defect; the graph classifies them instead';
-}
-
-/**
- * Why an SMT proper-completion violation whose witness is a designed terminal is downgraded.
+ * Why an SMT proper-completion violation the graph's own rule excuses is downgraded.
  *
- * A paused marking (`_pause`, from a Wait node or a destination stop) or a halted one
- * (`_halt`) holds unconsumed arrivals on purpose: the marking codec writes them back into
- * n8n's `nodeExecutionStack` (ADR 0005). The sink set cannot exclude the witness — declaring
- * the `in` / `ready` / `hasdata` places as sinks would also excuse a genuine stranding on
- * them, which is the whole question — so the query cannot separate the two. It is not a
- * proof either: Spacer returns one witness and a real stranding may hide behind it.
+ * A witness is classified exactly as the solver-free route classifies a quiescent class:
+ * `terminalKindOf` picks the kind (halt over pause), and every marked place is checked
+ * against that kind's rest set — the same widening {@link terminalSinks} declares to the
+ * solver. **Holding a terminal marker is not itself an excuse.** With the widenings declared
+ * the conditional sinks have already excused everything the marker excuses, so a witness that
+ * still marks something outside the widened set is a real stranding *even though it is also a
+ * paused or halted run* — a workflow that pauses on one branch and strands another — and it
+ * is reported. (Before VER-014 the test was "does the witness hold any terminal role", which
+ * was right while the query could not tell the two apart and would now discard that finding.)
  *
- * The solver-free route has no such problem: it classifies the class instead of asking a
- * query about it (`state-class.ts`, "The pause filter").
+ * What remains excused is a witness the graph would call a designed terminal outright. That
+ * can only mean the two disagree — `terminalKindOf` widens on a marked `waiting` / `stopped`
+ * place, `sinkPlacesWhen` on `_pause` / `_halt`, and every gadget branch that produces one of
+ * the former produces `_pause` beside it — so it is a bug in one of them, not a defect in the
+ * workflow, and it is reported as that ({@link TERMINAL_WITNESS_REASON}).
+ *
+ * A place the `NetMap` does not resolve (`role === null`) counts as stranded: no rest set
+ * contains it, and over-reporting is the safe direction.
  */
-const PAUSE_WITNESS_REASON =
+const TERMINAL_WITNESS_REASON =
   'the only witness the solver returned is a paused or halted run — a designed terminal marking ' +
-  'whose unconsumed arrivals the marking codec writes back, not a stranding. A sink set that ' +
-  'excused it would also excuse a real stranding on the same places, so the query cannot separate ' +
-  'the two; the solver-free route classifies the marking instead';
+  'the conditional sink declaration (VER-014) should have excused. The SMT declaration and the ' +
+  "solver-free route's classification disagree on this net; treated as undecided — report it";
 
 /** True when the witness marking holds `_pause` or `_halt`. */
-function witnessIsDesignedTerminal(cex: Counterexample | null): boolean {
-  return cex !== null && cex.stuckMarking.some(
-    (p) => p.role !== null && TERMINAL_ROLES.has(p.role));
+function witnessIsExcusedTerminal(cex: Counterexample | null): boolean {
+  if (cex === null) return false;
+  const rest = restRolesFor(terminalKindOf(cex.stuckMarking.map((p) => p.role)));
+  return !cex.stuckMarking.some((p) => p.role === null || !rest.has(p.role));
 }
 
 function record(
@@ -554,12 +627,14 @@ function placeOf(property: SmtProperty): string | null {
 /** What was asked and how it was answered. `property` names the question, `route` the answer. */
 function queryRecord(
   property: SmtProperty | 'none', decision: Decision, sinks: readonly Place<unknown>[] = [],
+  conditional: readonly ConditionalSink[] = [],
 ): PropertyCheck['query'] {
   return {
     property: property === 'none' ? 'none' : property.type,
     place: property === 'none' ? null : placeOf(property),
     verdict: decision.verdict,
     sinks: sinks.map((p) => p.name),
+    conditionalSinks: conditional.map((c) => ({ marker: c.marker.name, places: c.places.map((p) => p.name) })),
     method: decision.method,
     route: decision.route,
   };
@@ -756,7 +831,7 @@ async function runProperCompletion(ctx: Context): Promise<void> {
         }),
         reason: decision.reason,
         elapsedMs: decision.elapsedMs,
-        query: queryRecord(deadlockFree(), decision, restSinks(ctx)),
+        query: queryRecord(deadlockFree(), decision, restSinks(ctx), terminalSinks(ctx)),
         counterexample: decision.counterexample,
       });
     }
@@ -788,20 +863,48 @@ async function runProperCompletion(ctx: Context): Promise<void> {
       }),
       reason: decision.reason,
       elapsedMs: decision.elapsedMs,
-      query: queryRecord(deadlockFree(), decision, restSinks(ctx)),
+      query: queryRecord(deadlockFree(), decision, restSinks(ctx), terminalSinks(ctx)),
       counterexample: decision.counterexample,
     });
   }
 }
 
 /**
- * The structural rest set as `Place` objects: the sink declaration the whole-net
- * `deadlockFree` fallback is asked with (VER-002). It is exactly `REST_ROLES` read off
- * `NetMap`, so the SMT question and the graph's classification start from the same set — the
- * difference between them is the pause filter, which the sink clause cannot express.
+ * The structural rest set as `Place` objects: the unconditional sink declaration the
+ * whole-net `deadlockFree` fallback is asked with (VER-002). It is exactly `REST_ROLES` read
+ * off `NetMap`, so the SMT question and the graph's classification start from the same set;
+ * the pause filter's widening is {@link terminalSinks}.
  */
 function restSinks(ctx: Context): readonly Place<unknown>[] {
   return ctx.map.places.filter((p) => REST_ROLES.has(p.role)).map((p) => p.place);
+}
+
+/** A sink set that applies only while `marker` holds a token (libpetri VER-014). */
+export interface ConditionalSink {
+  readonly marker: Place<unknown>;
+  readonly places: readonly Place<unknown>[];
+}
+
+/**
+ * The pause filter as a sink declaration: while `_pause` is marked a token may rest on the
+ * places `PAUSE_REST_ROLES` adds to the rest set, and while `_halt` is marked on those
+ * `HALT_REST_ROLES` adds. `terminalKindOf` also treats a marked `waiting` / `stopped` place as
+ * a pause, and `_pause` alone reproduces that because every branch that produces one produces
+ * `_pause` beside it and nothing ever consumes `_pause` (`compiler/gadget.ts`, the waiting and
+ * stopped branches). `HALT_REST_ROLES ⊇ PAUSE_REST_ROLES`, so libpetri's union across markers
+ * is the graph's halt-over-pause precedence. A net without the marker declares nothing for it.
+ */
+function terminalSinks(ctx: Context): readonly ConditionalSink[] {
+  const marker = (role: PlaceRole): Place<unknown> | null =>
+    ctx.map.places.find((p) => p.role === role)?.place ?? null;
+  const widened = (roles: ReadonlySet<PlaceRole>): readonly Place<unknown>[] =>
+    ctx.map.places.filter((p) => roles.has(p.role) && !REST_ROLES.has(p.role)).map((p) => p.place);
+  const out: ConditionalSink[] = [];
+  const pause = marker('pause');
+  if (pause !== null) out.push({ marker: pause, places: widened(PAUSE_REST_ROLES) });
+  const halt = marker('halt');
+  if (halt !== null) out.push({ marker: halt, places: widened(HALT_REST_ROLES) });
+  return out;
 }
 
 /**
@@ -860,8 +963,9 @@ async function decideStranding(ctx: Context, place: Place<unknown>): Promise<Dec
  * was M4's shape and it is what made the family cost (places x timeout). Keyed on the
  * `Context`, so concurrent `verifyCompiled` calls never share an entry.
  *
- * It is also not asked at all when the graph has already shown the query to be false on this
- * net ({@link provenUnreachableReason}), which is what the whole 30-60 s would otherwise buy.
+ * It is asked wherever the graph did not close: with the widenings declared (VER-014) the
+ * question is the graph's own, so a reachable designed terminal no longer makes it false,
+ * and the gate that skipped it on that ground is gone with the reason it gave.
  */
 const fallbackCache = new WeakMap<Context, Promise<Decision>>();
 
@@ -869,15 +973,9 @@ async function smtFallbackCompletion(ctx: Context): Promise<Decision> {
   const cached = fallbackCache.get(ctx);
   if (cached !== undefined) return cached;
   const pending = (async (): Promise<Decision> => {
-    if (ctx.space.usable && ctx.space.outsideSinkClasses > 0) {
-      return {
-        verdict: 'unknown', reason: provenUnreachableReason(ctx), route: 'none', method: null,
-        elapsedMs: 0, counterexample: null,
-      };
-    }
-    const decision = await smtDecision(ctx, deadlockFree(), restSinks(ctx));
-    if (decision.verdict === 'violated' && witnessIsDesignedTerminal(decision.counterexample)) {
-      return { ...decision, verdict: 'unknown', reason: PAUSE_WITNESS_REASON };
+    const decision = await smtDecision(ctx, deadlockFree(), restSinks(ctx), terminalSinks(ctx));
+    if (decision.verdict === 'violated' && witnessIsExcusedTerminal(decision.counterexample)) {
+      return { ...decision, verdict: 'unknown', reason: TERMINAL_WITNESS_REASON };
     }
     return decision;
   })();
@@ -924,14 +1022,19 @@ async function runWholeNetCompletion(ctx: Context): Promise<void> {
     subject: { kind: 'net' },
     verdict: decision.verdict,
     explanation: explain(decision.verdict, {
-      proven: `Every one of the ${space.quiescentClasses} reachable quiescent markings of this workflow ` +
-        `(${space.classes} state classes) is either a completed run holding only residue or one of the ` +
-        `${space.terminalClasses} designed terminals — a paused or halted run the marking codec writes ` +
-        'back. Nothing is left pending anywhere in the net.',
+      proven: decision.route === 'smt'
+        ? 'The solver proved it: the whole-net deadlockFree question — rest set as sinks, pause / halt ' +
+          'widenings as conditional sinks, state equation on — has an inductive invariant over every ' +
+          'reachable marking, so no quiescent marking leaves work pending anywhere in the net. The graph ' +
+          `had explored ${space.classes} state classes without closing.`
+        : `Every one of the ${space.quiescentClasses} reachable quiescent markings of this workflow ` +
+          `(${space.classes} state classes) is either a completed run holding only residue or one of the ` +
+          `${space.terminalClasses} designed terminals — a paused or halted run the marking codec writes ` +
+          'back. Nothing is left pending anywhere in the net.',
       violated: solverFound
         ? 'This workflow can come to rest with work still pending: the whole-net deadlockFree query ' +
-          '(VER-002, structural rest set as sinks) returned a quiescent marking outside that set, and it ' +
-          'is not one of the designed terminals the marking codec writes back.'
+          '(VER-002, rest set as sinks, pause / halt widenings as conditional sinks) returned a quiescent ' +
+          'marking outside that set, and it is not one of the designed terminals the marking codec writes back.'
         : `This workflow can come to rest with work still pending: ${strandings.length}` +
           `${strandings.length >= MAX_WITNESSES ? '+' : ''} quiescent marking(s) hold a token on a place ` +
           `that is not residue.${stranded}`,
@@ -940,7 +1043,7 @@ async function runWholeNetCompletion(ctx: Context): Promise<void> {
     }),
     reason: decision.reason,
     elapsedMs: decision.elapsedMs,
-    query: queryRecord(deadlockFree(), decision, restSinks(ctx)),
+    query: queryRecord(deadlockFree(), decision, restSinks(ctx), terminalSinks(ctx)),
     counterexample: decision.counterexample,
   });
 }
@@ -1298,7 +1401,7 @@ async function runMutualExclusion(ctx: Context, request: MutualExclusionRequest)
         explanation: 'The pair could not be resolved to two nodes of this workflow.',
         reason: messageOf(e),
         elapsedMs: 0,
-        query: { property: 'mutual-exclusion', place: null, verdict: 'unknown', sinks: [], method: null, route: 'none' },
+        query: { property: 'mutual-exclusion', place: null, verdict: 'unknown', sinks: [], conditionalSinks: [], method: null, route: 'none' },
       });
       continue;
     }
@@ -1325,6 +1428,34 @@ async function runMutualExclusion(ctx: Context, request: MutualExclusionRequest)
       counterexample: decision.counterexample,
     });
   }
+}
+
+/**
+ * How the semiflow union is asked for: `'auto'` when the caller wants it, `false` when not.
+ *
+ * The option means "strengthen the encoding with the P-semiflows", and `'auto'` is how libpetri
+ * does exactly that and nothing more: it unions them when the null-space basis lost a law to
+ * the H1 guard — a non-linear place, which on these nets means the OR gadget's `all()` arc —
+ * and skips them when the basis is already complete, where they are provably redundant. That
+ * is the rule this project measured its way to and libpetri then made first-class, and it
+ * decides in one pass from a fact phase 3 already has.
+ *
+ * Why not plain `true`, which is what this passed before: the enumeration is worst-case
+ * exponential in branching, and on the shapes that matter here it *is* the pipeline. Measured
+ * 2026-09-09 on `layers` diamonds in series, phases 1-3 only: 81 nodes and 870 places cost
+ * 135.1 s with the union forced on and 2.6 s with `'auto'`, which chose to skip it and returned
+ * 144 of the 145 invariants — the one it left behind having moved no verdict on any fixture.
+ * `ifBothOutputs` is the net that does lose a law, and there `'auto'` turns the union on and
+ * returns the full 12 where `false` returns 10. So `'auto'` is `true`'s invariants where they
+ * exist and `false`'s cost everywhere else. libpetri pins that its verdict never differs from
+ * whichever explicit setting it chose.
+ *
+ * This is also what made `SMT_MAX_JOIN_INPUTS` / `SMT_MAX_FLAT_PLACES` necessary: the abort
+ * they guard was the union's cost, not the net's size (`tasks/todo.md`, and re-measure before
+ * removing them).
+ */
+function semiflowSetting(ctx: Context): 'auto' | false {
+  return ctx.semiflowInvariants ? 'auto' : false;
 }
 
 /**
@@ -1355,14 +1486,42 @@ async function collectInvariants(ctx: Context): Promise<readonly PInvariant[] | 
   try {
     const result = await SmtVerifier.forNet(ctx.compiled.net)
       .initialMarking(ctx.state)
+      // **Not `'auto'` here, and this is the one place the distinction bites.** `'auto'` unions
+      // the semiflows when the basis lost a law to the H1 guard, which is a test of
+      // *deficiency*; this run needs a law of a particular *form* — non-negative, weighting
+      // `_budget` and every `X/running` positively — and `computePInvariants` returns a signed
+      // null-space basis, which may span that law without containing it. Measured: with
+      // `'auto'` on `diamond` the basis is complete, the semiflows are skipped, and
+      // `budgetSemiflow` comes back null, so the budget family reports "no law giving _budget
+      // and every X/running the same positive weight" on a net that has one. The union is what
+      // produces it in non-negative form (`computePSemiflows`), so this run always asks for it.
+      // It is lazy and runs only for the `budget` family, so the cost lands only on a report
+      // that selects it.
       .semiflowInvariants(ctx.semiflowInvariants)
       .timeout(INVARIANT_SOLVER_TIMEOUT_MS)
+      // This run exists *for* the pipeline's invariants, and libpetri's bounded enumeration
+      // (VER-017) is a route around the pipeline: it reads the verdict off a state-class graph
+      // and returns no invariants at all, which empties the report's structural section on
+      // every net small enough to enumerate. The verdict here is discarded anyway.
+      .enumerationMaxClasses(0)
       .property(placeBound(ctx.map.shared.budget, ctx.compiled.effectiveBudget))
       .verify();
+    // An *empty* invariant list is only meaningful from the SMT route, the one that runs the
+    // pipeline (VER-003's route criterion): from any other it means "not computed" rather
+    // than "none exist", and caching it would make the report state the pipeline found no law
+    // when it never ran. A non-empty list is real whatever the route — with no solver at all
+    // the pipeline still runs and the route reports `unavailable`, which is exactly what
+    // `no-z3.test.ts` pins. Both call sites disable enumeration, so this guards against a
+    // future default answering here without the pipeline rather than against today.
+    if (result.invariants.length === 0 && result.route !== 'smt') return null;
     ctx.invariants = result.invariants;
     ctx.invariantReport = result.report;
     return result.invariants;
-  } catch {
+  } catch (e) {
+    // Same rule as {@link query}: an invariant pipeline that failed is `null`, a bug is not.
+    // This catch was bare, so a `TypeError` here emptied the report's structural section and
+    // took the budget family's semiflow with it, silently.
+    rethrowIfBug(e);
     return null;
   }
 }
@@ -1386,7 +1545,10 @@ export function truncationShapeOf(compiled: CompiledWorkflow): TruncationShape {
       break;
     }
   }
-  return { hasCycle: compiled.analysis.hasCycle, independentBranches: branching };
+  const agents = compiled.netMap.nodes
+    .filter((g) => g.calls !== null && g.maxToolCalls !== null)
+    .map((g) => ({ node: g.node, tools: g.tools.length, maxToolCalls: g.maxToolCalls!, assumed: g.toolCallsAssumed }));
+  return { hasCycle: compiled.analysis.hasCycle, independentBranches: branching, agents };
 }
 
 /** Which property families to run: the caller's list, or the default plus any requested pairs. */
@@ -1403,7 +1565,11 @@ export function selectProperties(options: VerifyOptions): readonly PropertyName[
 export async function verify(
   workflow: WorkflowDescription, options: VerifyOptions = {},
 ): Promise<VerificationReport> {
-  const compiled = compile(workflow, { budget: options.budget ?? 1 });
+  const compiled = compile(workflow, {
+    budget: options.budget ?? 1,
+    ...(options.maxAgentRounds === undefined ? {} : { maxAgentRounds: options.maxAgentRounds }),
+    ...(options.maxAgentToolCalls === undefined ? {} : { maxAgentToolCalls: options.maxAgentToolCalls }),
+  });
   return verifyCompiled(compiled, options);
 }
 
@@ -1411,6 +1577,7 @@ export async function verify(
 export async function verifyCompiled(
   compiled: CompiledWorkflow, options: VerifyOptions = {},
 ): Promise<VerificationReport> {
+  assertLibpetriSurface();
   const started = performance.now();
   const properties = selectProperties(options);
   const state = markingStateOf(compiled.initialMarking(options.triggerItems ?? null));
@@ -1490,6 +1657,7 @@ export async function verifyCompiled(
       terminal: ctx.space.terminalClasses,
       strandedPlaces: ctx.space.strandedPlaces().length,
       truncation: ctx.space.truncationCause(ctx.shape),
+      agents: ctx.shape.agents,
       expanded: ctx.space.expandedClasses,
       boundedCyclicRuns: ctx.space.boundedCyclicRuns,
       loopSteps: ctx.space.loopSteps,

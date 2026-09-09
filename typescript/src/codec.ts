@@ -84,13 +84,14 @@ import type {
 import { readySlot, type CompiledWorkflow, type InputGadget, type NodeGadget, type Variant } from './compiler/index.js';
 import type { ExecutionDataState } from './n8n/host.js';
 import {
-  isEdgePayload, isEntryPayload,
-  type EdgePayload, type EntryPayload, type OkPayload, type RetryPayload, type RunPayload, type StoppedPayload,
-  type WaitingPayload,
+  isDispatchPayload, isEdgePayload, isEntryPayload, isRequestPayload, isRoundPayload,
+  type EdgePayload, type EntryPayload, type OkPayload, type RequestPayload, type RetryPayload,
+  type RoundPayload, type RunPayload, type StoppedPayload, type WaitingPayload,
 } from './scheduler/payloads.js';
 
 export type {
-  EdgePayload, EntryPayload, InputPayload, OkPayload, RetryPayload, RunPayload, StoppedPayload, WaitingPayload,
+  DispatchPayload, EdgePayload, EntryPayload, InputPayload, OkPayload, RequestPayload, ResponsePayload,
+  RetryPayload, RoundPayload, RunPayload, StoppedPayload, WaitingPayload,
 } from './scheduler/payloads.js';
 
 /** A marking the codec cannot encode or n8n state it cannot decode; the message names node and place. */
@@ -207,7 +208,20 @@ export function decodeExecutionData(
 ): Map<Place<unknown>, Token<unknown>[]> {
   const diag = options.onDiagnostic ?? noop;
   const marking = compiled.sharedMarking();
-  const hasRun = (name: string): boolean => (options.runData?.[name]?.length ?? 0) > 0;
+  /**
+   * Whether `name` actually executed. A tool node is the one place where having a `runData`
+   * entry is not the same thing: `initializeNodeRunData` **reserves** a slot per requested
+   * action before the tool runs — n8n's own test asserts `data` is `undefined` for a tool whose
+   * round was abandoned — so a reserved-but-unfilled slot must not mark `X/done` or a resumed
+   * `$('Tool')` read arc would see a run that never happened.
+   */
+  const hasRun = (name: string): boolean => {
+    const runs = options.runData?.[name] ?? [];
+    if (runs.length === 0) return false;
+    let isTool = false;
+    try { isTool = compiled.netMap.node(name).form === 'tool'; } catch { isTool = false; }
+    return isTool ? runs.some((t) => t.data !== undefined) : true;
+  };
   const nodeOf = (name: string): NodeGadget => {
     try {
       return compiled.netMap.node(name);
@@ -231,12 +245,31 @@ export function decodeExecutionData(
   // Nodes with a decoded activation: what the resumed execution can still reach starts here.
   const pendingNodes = new Set<string>();
 
+  // An agent round the encoder wrote back (README "Agent tool dispatch"): the agent's own
+  // re-entry, and the tool calls that had not been dispatched when the execution stopped. Both
+  // are ordinary `nodeExecutionStack` entries — that is the shape n8n keeps them in — so they
+  // are recognised here and reassembled after the loop, once every entry has been seen.
+  const roundResume = new Map<string, IExecuteData>();
+  /** Tool activations in stack order; attributed to their agents after the loop, not during. */
+  const roundPending: Array<{ readonly tool: NodeGadget; readonly entry: IExecuteData }> = [];
+
   // ---- nodeExecutionStack: one activation per entry, in stack order ----
   for (const entry of executionData.nodeExecutionStack) {
     const g = nodeOf(entry.node.name);
     pendingNodes.add(g.node);
     const payload: EntryPayload = { kind: 'entry', executionData: entry };
     const token = tokenOf<unknown>(payload);
+    // An agent's re-entry carries the round it is waiting on. It must not go to `X/in`: that
+    // would start a *new* activation from the agent's main input and lose the round.
+    if (g.rounds !== null && entry.metadata?.nodeWasResumed === true
+      && entry.metadata.subNodeExecutionData !== undefined) {
+      roundResume.set(g.node, entry);
+      continue;
+    }
+    if (g.form === 'tool') {
+      roundPending.push({ tool: g, entry });
+      continue;
+    }
     if (g.form === 'direct') {
       add(marking, g.in!, token);
     } else if (g.form === 'or') {
@@ -249,6 +282,58 @@ export function decodeExecutionData(
       // action passes the entry through (`startInput`).
       g.inputs.forEach((i, k) => enqueue(g, i, k === 0 ? { kind: 'entry', token } : { kind: 'companion' }));
     }
+  }
+
+  // ---- agent rounds: reassemble what the encoder wrote back ----
+  // Attribution runs here and not inside the loop above: the encoder writes a round's tools
+  // *before* its agent (the stack is ordered by depth descending, and a tool sits one below its
+  // agent), so during the loop `roundResume` is still empty and a tool shared by two agents
+  // would always fall back to the first one.
+  const pendingOf = new Map<string, IExecuteData[]>();
+  for (const { tool, entry } of roundPending) {
+    const owner = tool.agents.length === 1
+      ? tool.agents[0]!
+      : tool.agents.find((agent) => (roundResume.get(agent)?.metadata?.subNodeExecutionData?.actions ?? [])
+        .some((a) => a.nodeName === tool.node));
+    if (owner === undefined) {
+      diag(
+        `node '${tool.node}': a stack entry for an ai_tool activation no open round claims; dropped ` +
+        `(agents: ${tool.agents.join(', ') || 'none'})`);
+      continue;
+    }
+    const q = pendingOf.get(owner);
+    if (q === undefined) pendingOf.set(owner, [entry]);
+    else q.push(entry);
+  }
+
+  // Every pending tool call goes on `A/queue`, whether the pause caught it undispatched or
+  // dispatched-but-unstarted: both re-dispatch to the same run, and routing all of them through
+  // the queue keeps them in request order, which putting them straight on `T/in_tool` would
+  // not. A tool already collected is not on the stack at all, so it does not re-run;
+  // `A/outstanding` is therefore zero and `A_resume` waits only on these.
+  for (const [agent, resume] of roundResume) {
+    const g = nodeOf(agent);
+    const pending = pendingOf.get(agent) ?? [];
+    pendingOf.delete(agent);
+    const roundId = `${agent}#${resume.runIndex ?? 0}`;
+    add(marking, g.dispatched!, tokenOf<unknown>({ kind: 'round', resume, roundId } as RoundPayload));
+    // The queue when there is anything left to dispatch, `drained` when there is not — the
+    // two are exclusive, and `A/calls` comes fresh from `sharedMarking`: the budget resets
+    // across a resume, which the ADR records.
+    if (pending.length > 0) {
+      add(marking, g.queue!, tokenOf<unknown>({ kind: 'request', pending, resume, roundId } as RequestPayload));
+    } else {
+      add(marking, g.drained!, unit());
+    }
+    pendingNodes.add(agent);
+    for (const e of pending) pendingNodes.add(e.node.name);
+  }
+  // A tool activation whose agent is not waiting on a round: the encoder never writes one, so
+  // this is hand-made state. n8n would still run it, but nothing would collect the response.
+  for (const [agent, entries] of pendingOf) {
+    diag(
+      `agent '${agent}': ${entries.length} ai_tool activation(s) on the stack with no re-entry ` +
+      `for '${agent}'; dropped (${entries.map((e) => e.node.name).join(', ')})`);
   }
 
   // ---- waitingExecution: partial slots, per node in ascending run index ----
@@ -455,7 +540,12 @@ export function encodeMarking(
   // ---- places the net drains on its own before it quiesces ----
   for (const g of nodes) {
     if (mode !== 'cancelled') {
-      const inFlight: Array<Place<unknown> | null> = [g.running, g.routed, g.inEmpty, ...g.outputs.flatMap((o) => [o.ok, o.routed])];
+      // `A/routed_req` belongs here with `X/routed`: both are the marker `X_run` writes in the
+      // firing that ends an activation, and both are consumed one cycle later by a transition
+      // that inhibits on nothing — so a quiesced net has drained them whatever stopped it.
+      const inFlight: Array<Place<unknown> | null> = [
+        g.running, g.routed, g.routedRequest, g.inEmpty, ...g.outputs.flatMap((o) => [o.ok, o.routed]),
+      ];
       if (g.form === 'or') for (const e of g.inputs[0]!.edges) inFlight.push(e.data, e.empty);
       for (const p of inFlight) if (p !== null && marking.tokenCount(p) > 0) throw undrained(g, p);
     }
@@ -509,6 +599,37 @@ export function encodeMarking(
       for (const t of marking.peekTokens(g.retry)) push((t.value as RetryPayload).executionData);
     }
     for (const t of marking.peekTokens(g.running)) push((t.value as RunPayload).executionData);
+
+    // ---- an agent round the pause or the halt caught mid-flight ----
+    // The tokens carry the very `IExecuteData` values n8n's own `handleRequest` produced, so
+    // writing them back is writing exactly the `nodeExecutionStack` n8n would have been left
+    // holding: the tool calls not yet dispatched, the one dispatched but not yet started, and
+    // the agent's own re-entry underneath them. Nothing here is reconstructed.
+    //
+    // A dispatched tool that is *running* is already pushed above, off `X/running`; one that
+    // finished has its response on `A/response` and its `runData` written, so there is nothing
+    // left to re-queue for it.
+    if (g.inTool !== null) {
+      for (const t of marking.peekTokens(g.inTool)) {
+        const v = t.value;
+        if (isDispatchPayload(v)) push(v.executionData);
+        else diag(`node '${g.node}': token on '${g.inTool.name}' carries no dispatch; dropped`);
+      }
+    }
+    if (g.queue !== null) {
+      for (const t of marking.peekTokens(g.queue)) {
+        const v = t.value;
+        if (isRequestPayload(v)) for (const e of v.pending) push(e);
+        else diag(`node '${g.node}': token on '${g.queue.name}' carries no request; dropped`);
+      }
+    }
+    if (g.dispatched !== null) {
+      for (const t of marking.peekTokens(g.dispatched)) {
+        const v = t.value;
+        if (isRoundPayload(v)) push(v.resume);
+        else diag(`node '${g.node}': token on '${g.dispatched.name}' carries no round; dropped`);
+      }
+    }
 
     if (g.form === 'direct') {
       const inputIndex = directInputIndex(compiled, g);

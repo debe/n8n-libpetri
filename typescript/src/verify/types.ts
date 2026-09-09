@@ -10,7 +10,7 @@
  * and what libpetri answered, so the inversion is never hidden.
  */
 import type { BudgetRestriction, PlaceRole, TransitionRole, Variant } from '../compiler/index.js';
-import type { TruncationCause } from './state-class.js';
+import type { AgentBudget, TruncationCause } from './state-class.js';
 
 /** The property families {@link verify} can ask about. CLI `--property` takes these names. */
 export type PropertyName =
@@ -133,11 +133,16 @@ export interface QueryRecord {
   /**
    * Sink places the whole-net `deadlockFree` question is scoped by (VER-002): the structural
    * rest set, where a token at quiescence is legitimate residue. Recorded on the proper
-   * completion family whichever route answered, because it is the *question*'s definition —
-   * the solver-free route applies the same set plus the pause filter it can express and the
-   * sink clause cannot (`state-class.ts`).
+   * completion family whichever route answered, because it is the *question*'s definition.
    */
   readonly sinks: readonly string[];
+  /**
+   * The pause filter as the SMT question states it (libpetri VER-014): while `marker` holds a
+   * token, a token may also rest on `places`. Two entries on every n8n net — `_pause` widening
+   * to the pause rest set, `_halt` to the halt rest set — so the solver-free route's
+   * classification (`state-class.ts`) and the solver ask the same question.
+   */
+  readonly conditionalSinks: readonly { readonly marker: string; readonly places: readonly string[] }[];
   /** `'state-class graph'`, `'IC3/PDR'`, `'P-invariant'`, `'structural'`; `null` when nothing ran. */
   readonly method: string | null;
   readonly route: CheckRoute;
@@ -209,6 +214,12 @@ export interface StateSpaceSummary {
   readonly strandedPlaces: number;
   /** Why the graph did not close; `null` when it did. */
   readonly truncation: TruncationCause | null;
+  /**
+   * Every agent and its tool-call budget, declared or assumed. The graph explores every round
+   * size up to the budget, so on an agent workflow this is the width of the claim a `proven`
+   * makes — and, when the graph truncated, the knob that closes it.
+   */
+  readonly agents: readonly AgentBudget[];
   /**
    * Classes the BFS expanded — the prefix a `bounded` verdict is certified over. Equal to
    * {@link classes} on a complete graph.
@@ -320,6 +331,18 @@ export interface VerifyOptions {
   readonly maxClasses?: number;
   /** VER-007. Default `true`: without it the reset-arc chains lose their conservation laws. */
   readonly semiflowInvariants?: boolean;
+  /**
+   * An agent's round budget when its `options.maxIterations` is an expression. Default 10, n8n's
+   * own default for that parameter — the scheduler's `maxAgentRounds`, so a report matches the
+   * net that runs.
+   */
+  readonly maxAgentRounds?: number;
+  /**
+   * An agent's tool-call budget unless the workflow declares `options.maxToolCalls`. Default 64,
+   * the scheduler's runtime default, which is far wider than a graph can explore: pass a small
+   * value here to see what a declared budget would verify as, then declare it on the agent.
+   */
+  readonly maxAgentToolCalls?: number;
   /**
    * Whether the SMT route may run at all, and on how big a net (VER-001/VER-013).
    *

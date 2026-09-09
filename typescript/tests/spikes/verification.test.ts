@@ -99,7 +99,9 @@ function joinNet(n0: number, n1: number) {
       .build(),
   );
   const net = PetriNet.builder(`join-${n0}-${n1}`).transitions(...transitions).build();
-  const verifier = () => SmtVerifier.forNet(net).initialMarking((m: MarkingStateBuilder) => {
+  // `enumerationMaxClasses(0)`: this spike is about the IC3/PDR path — it asserts on the
+  // solver's own report — and libpetri's bounded enumeration (VER-017) would answer first.
+  const verifier = () => SmtVerifier.forNet(net).enumerationMaxClasses(0).initialMarking((m: MarkingStateBuilder) => {
     for (const p of seeded) m.tokens(p, 1);
     for (const f of free) m.tokens(f, 1);
     m.tokens(budget, 1);
@@ -114,7 +116,7 @@ function twoPhaseNet(k: number, withIdle = true, sh: Shared = shared()) {
   const a = nodeGadget({ name: 'A', withIdle, act: ok }, sh);
   const b = nodeGadget({ name: 'B', withIdle, act: ok }, sh);
   const net = PetriNet.builder(`two-phase-k${k}`).transitions(...a.transitions, ...b.transitions).build();
-  const verifier = (tokensOnAIn = 1) => SmtVerifier.forNet(net).initialMarking((m: MarkingStateBuilder) => {
+  const verifier = (tokensOnAIn = 1) => SmtVerifier.forNet(net).enumerationMaxClasses(0).initialMarking((m: MarkingStateBuilder) => {
     m.tokens(a.input, tokensOnAIn); m.tokens(b.input, 1); m.tokens(sh.budget, k);
     if (withIdle) { m.tokens(a.idle, 1); m.tokens(b.idle, 1); }
   });
@@ -195,6 +197,9 @@ describeZ3('spike: verification with z3', () => {
       const net = PetriNet.builder('self-loop').transitions(selfLoop('A_fire', aIn, aOut), selfLoop('B_fire', bIn, bOut)).build();
 
       const r = await SmtVerifier.forNet(net)
+        // As above: the claim under test is the pipeline's semiflow, which the enumeration
+        // route (VER-017) does not compute because it never runs the pipeline.
+        .enumerationMaxClasses(0)
         .initialMarking((m: MarkingStateBuilder) => { m.tokens(aIn, 1); m.tokens(bIn, 1); m.tokens(budget, 1); })
         .property(placeBound(budget, 1))
         .verify();

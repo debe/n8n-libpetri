@@ -6,7 +6,7 @@
  * descriptions, so the shape has to be supplied (`--node-types`) or guessed — and every
  * guess must show up as a warning. That is what this file pins.
  */
-import { compile } from '../../src/compiler/index.js';
+import { analyse, compile } from '../../src/compiler/index.js';
 import {
   BUILT_IN_SHAPES, connectionsOf, describeWorkflowJson, looksLikeTrigger, parseWorkflowJson, pickStartNode,
 } from '../../src/verify/index.js';
@@ -187,5 +187,58 @@ describe('workflow JSON adapter', () => {
       { from: 'B', outputIndex: 0, to: 'A', inputIndex: 0 },
     ];
     expect(pickStartNode(nodes, cycle)).toBe('B');
+  });
+});
+
+describe('agent tool dispatch in an exported workflow', () => {
+  // The scheduler reads `ai_tool` off a live `Workflow`; the CLI reads the JSON export. If only
+  // one of them sees the tool wiring, `verify` analyses a *different net* from the one the
+  // scheduler runs and reports it with the same confidence — which is the one thing "one net
+  // serves execution and verification" forbids.
+  const exported = {
+    name: 'agent-export',
+    nodes: [
+      { name: 'Trigger', type: 'n8n-nodes-base.manualTrigger', typeVersion: 1, position: [0, 0], parameters: {} },
+      { name: 'AI Agent', type: '@n8n/n8n-nodes-langchain.agent', typeVersion: 3, position: [220, 0], parameters: { options: { maxIterations: 4 } } },
+      { name: 'Calculator', type: '@n8n/n8n-nodes-langchain.toolCalculator', typeVersion: 1, position: [220, 200], parameters: {} },
+      { name: 'Respond', type: 'n8n-nodes-base.set', typeVersion: 1, position: [440, 0], parameters: {} },
+    ],
+    connections: {
+      Trigger: { main: [[{ node: 'AI Agent', type: 'main', index: 0 }]] },
+      'AI Agent': { main: [[{ node: 'Respond', type: 'main', index: 0 }]] },
+      // A tool node's only connection, keyed from the tool into the agent — and with no `main`
+      // key at all, which is what made an early `continue` skip it.
+      Calculator: { ai_tool: [[{ node: 'AI Agent', type: 'ai_tool', index: 0 }]] },
+    },
+  };
+
+  it('reads the ai_tool wiring and the round budget off the export', () => {
+    const { description } = describeWorkflowJson(exported);
+    expect(description.toolConnections).toEqual([{ agent: 'AI Agent', tool: 'Calculator' }]);
+    expect(description.nodes.find((n) => n.name === 'AI Agent')!.maxRounds).toBe(4);
+
+    const a = analyse(description);
+    expect(a.byName.get('Calculator')!.isTool).toBe(true);
+    expect(a.byName.get('AI Agent')!.tools).toEqual(['Calculator']);
+    expect(a.byName.get('AI Agent')!.roundsAssumed).toBe(false);
+  });
+
+  it('compiles the same round the scheduler would run', () => {
+    const c = compile(describeWorkflowJson(exported).description);
+    const agent = c.netMap.node('AI Agent');
+    expect(agent.transitions.dispatch).not.toBeNull();
+    expect(agent.transitions.resume).not.toBeNull();
+    expect(c.initialMarking([{ json: {} }]).get(agent.rounds!)).toHaveLength(4);
+  });
+
+  it('says so when maxIterations is an expression it cannot read', () => {
+    const withExpression = {
+      ...exported,
+      nodes: exported.nodes.map((n) => (n.name === 'AI Agent'
+        ? { ...n, parameters: { options: { maxIterations: '={{ $json.limit }}' } } } : n)),
+    };
+    const a = analyse(describeWorkflowJson(withExpression).description);
+    expect(a.byName.get('AI Agent')!.roundsAssumed).toBe(true);
+    expect(a.diagnostics.join('\n')).toMatch(/does not declare a static maxIterations/);
   });
 });

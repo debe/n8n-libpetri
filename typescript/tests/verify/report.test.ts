@@ -16,7 +16,7 @@ function check(partial: Partial<PropertyCheck>): PropertyCheck {
     reason: null,
     counterexample: null,
     elapsedMs: 120,
-    query: { property: 'place-bound', place: '_budget', verdict: 'proven', sinks: [], method: 'IC3/PDR', route: 'smt' },
+    query: { property: 'place-bound', place: '_budget', verdict: 'proven', sinks: [], conditionalSinks: [], method: 'IC3/PDR', route: 'smt' },
     ...partial,
   };
 }
@@ -35,7 +35,7 @@ function report(partial: Partial<VerificationReport> = {}): VerificationReport {
     net: { places: 63, transitions: 28, flatTransitions: 53 },
     stateSpace: {
       classes: 393, complete: true, maxClasses: 200_000, requestedMaxClasses: 200_000, elapsedMs: 9,
-      quiescent: 60, terminal: 49, strandedPlaces: 0, truncation: null, expanded: 393,
+      quiescent: 60, terminal: 49, strandedPlaces: 0, truncation: null, agents: [], expanded: 393,
       boundedCyclicRuns: null, loopSteps: 0, error: null,
     },
     invariants: { basis: 8, semiflowsEncoded: 1, encoded: 9, budgetSemiflow: '_budget + A/running = 1' },
@@ -80,6 +80,7 @@ describe('verify report rendering', () => {
       stateSpace: {
         classes: 200_001, complete: false, maxClasses: 200_000, requestedMaxClasses: 200_000,
         elapsedMs: 3946, quiescent: 10_816, terminal: 10_400, strandedPlaces: 0, truncation: 'cycle',
+      agents: [],
         expanded: 194_725, boundedCyclicRuns: 21, loopSteps: 2, error: null,
       },
     })).join('\n');
@@ -186,6 +187,7 @@ describe('verify report rendering', () => {
       stateSpace: {
         classes: 200_001, complete: false, maxClasses: 200_000, requestedMaxClasses: 200_000,
         elapsedMs: 3946, quiescent: 10_816, terminal: 10_400, strandedPlaces: 0, truncation: 'cycle',
+      agents: [],
         expanded: 194_725, boundedCyclicRuns: 21, loopSteps: 2, error: null,
       },
     }));

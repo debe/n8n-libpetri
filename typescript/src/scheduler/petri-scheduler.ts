@@ -59,6 +59,17 @@ export interface PetriSchedulerOptions {
   readonly legacy: () => WorkflowScheduler;
   /** Concurrency budget `k` (`_budget` tokens). Default 1 (sequential n8n). */
   readonly budget?: number;
+  /**
+   * An agent's round budget when its `options.maxIterations` is an expression the adapter could
+   * not read. Default `DEFAULT_MAX_AGENT_ROUNDS`, n8n's own default for that parameter.
+   */
+  readonly maxAgentRounds?: number;
+  /**
+   * An agent's tool-call budget for one execution, unless the workflow declares
+   * `options.maxToolCalls`. Default `DEFAULT_MAX_AGENT_TOOL_CALLS`. Distinct from {@link budget}:
+   * that bounds how many nodes run at once, this bounds how many tool calls an agent may make.
+   */
+  readonly maxAgentToolCalls?: number;
   /** Compiled-workflow LRU shared across executions. A private one when omitted. */
   readonly cache?: CompiledWorkflowCache;
   /** libpetri event store attached to every execution (`InMemoryEventStore` for tests). */
@@ -131,10 +142,17 @@ export class PetriScheduler implements WorkflowScheduler {
    * on a miss, and the program itself compiles lazily on first access (CONC-020).
    */
   compileDescription(description: WorkflowDescription): CompiledWorkflow {
-    const key = CompiledWorkflowCache.key(structuralHash(analyse(description)), this.budget);
+    // The agent budgets reach the analysis the key hashes *and* the compile, so an agent's
+    // resolved `maxRounds` / `maxToolCalls` — both in the hash — reflect this scheduler's
+    // options and two schedulers configured differently never share an entry.
+    const agents = {
+      ...(this.options.maxAgentRounds === undefined ? {} : { maxAgentRounds: this.options.maxAgentRounds }),
+      ...(this.options.maxAgentToolCalls === undefined ? {} : { maxAgentToolCalls: this.options.maxAgentToolCalls }),
+    };
+    const key = CompiledWorkflowCache.key(structuralHash(analyse(description, agents)), this.budget);
     const hit = this.cache.get(key);
     if (hit !== undefined) return hit;
-    const fresh = compile(description, { budget: this.budget, actions: schedulerActions() });
+    const fresh = compile(description, { budget: this.budget, actions: schedulerActions(), ...agents });
     this.cache.set(key, fresh);
     return fresh;
   }

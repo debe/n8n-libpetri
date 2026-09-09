@@ -11,9 +11,10 @@ import type { IRunExecutionData, Workflow } from 'n8n-workflow';
 import { decodeExecutionData, encodeMarking } from '../../src/codec.js';
 import { compile, type CompiledWorkflow, type WorkflowDescription } from '../../src/compiler/index.js';
 import { PetriScheduler } from '../../src/scheduler/index.js';
-import { ALL, conn, linear, node, twoTriggers, workflow } from '../fixtures/workflows.js';
+import { agentSharedTool, agentTwoTools, ALL, conn, linear, node, twoTriggers, workflow } from '../fixtures/workflows.js';
 import {
-  FakeHost, execute, fakeHooks, fakeNodeHelpers, fakeWorkflow, items, newRunExecutionData, ranNodes, type NodeScript,
+  FakeHost, execute, fakeHooks, fakeNodeHelpers, fakeWorkflow, items, newRunExecutionData, ranNodes, sleep,
+  type NodeScript,
 } from '../scheduler/support.js';
 import {
   Rng, assertLegacyShape, emptyState, entryFor, gadget, live, named, namedLive, randomExecutionData, randomPauseMarking,
@@ -30,6 +31,104 @@ async function resume(wf: Workflow, red: IRunExecutionData, scripts: Readonly<Re
   await scheduler.run(host, wf, red, hooks);
   return { scheduler, host, store };
 }
+
+describe('an agent round the execution stopped inside', () => {
+  /**
+   * One agent that asks for both tools once and answers afterwards, and a Calculator that
+   * cancels the execution the first time it runs. The state is shared across both phases on
+   * purpose: the resumed run must find the agent *mid-round*, not asking again.
+   */
+  function agentScripts() {
+    let asked = false;
+    let cancelled = false;
+    return {
+      Agent: () => {
+        if (asked) return { data: [[{ json: { answer: 'done' } }]] };
+        asked = true;
+        return {
+          actions: ['Calculator', 'Search'].map((nodeName, i) => ({
+            actionType: 'ExecutionNodeAction' as const, nodeName, input: {}, type: 'ai_tool' as const,
+            id: `c${i}`, metadata: {},
+          })),
+          metadata: { requestId: 'r1' },
+        };
+      },
+      Calculator: async ({ host }) => {
+        if (!cancelled) {
+          cancelled = true;
+          await sleep(20); host.cancel(); await sleep(5);
+        }
+        return { data: [[{ json: { result: 1 } }]] };
+      },
+      Search: () => ({ data: [[{ json: { result: 2 } }]] }),
+    } as Readonly<Record<string, NodeScript>>;
+  }
+
+  it('resumes from the stack it was written back to, and finishes the round', async () => {
+    // Cancel inside the first tool at budget 1, so the second is still undispatched.
+    const scripts = agentScripts();
+    const r = await execute(agentTwoTools, scripts, { startItems: [{ json: { n: 1 } }], budget: 1 });
+    expect(r.scheduler.outcome).toBe('cancelled');
+    expect(ranNodes(r.calls)).toEqual(['Trigger', 'Agent', 'Calculator']);
+    expect(r.runExecutionData.executionData!.nodeExecutionStack.map((e) => e.node.name))
+      .toEqual(['Search', 'Agent']);
+
+    // The decoded marking is the round, not two fresh activations: the agent's re-entry is on
+    // `A/dispatched` (not on its main `X/in`, which would start a new run and lose the round),
+    // the undispatched tool is on the queue, and the round is therefore not drained.
+    const c = r.scheduler.compiled!;
+    const m = decodeExecutionData(c, r.runExecutionData.executionData!, { runData: r.runData });
+    const n = named(m);
+    expect(n['id:Agent/dispatched']).toBe(1);
+    expect(n['id:Agent/queue']).toBe(1);
+    expect(n['id:Agent/drained']).toBeUndefined();
+    expect(n['id:Agent/in']).toBeUndefined();
+    // The tool-call budget comes fresh from `sharedMarking`: it resets across a resume.
+    expect(n['id:Agent/calls']).toBe(c.netMap.node('Agent').maxToolCalls);
+    // `Search` has a reserved `runData` slot but never ran, so its `X/done` must not be marked:
+    // `initializeNodeRunData` writes the slot at plan time, with no `data`.
+    expect(n['id:Search/done']).toBeUndefined();
+    expect(n['id:Calculator/done']).toBe(1);
+
+    // And it runs to completion from there: the remaining tool, then the agent with both
+    // results, then the rest of the workflow. Neither tool runs twice.
+    const { scheduler, host } = await resume(r.workflow, r.runExecutionData, scripts);
+    expect(scheduler.outcome).toBe('completed');
+    expect(ranNodes(host.calls)).toEqual(['Search', 'Agent', 'End']);
+    expect(r.runData.Calculator).toHaveLength(1);
+    expect(r.runData.Search).toHaveLength(1);
+    expect(r.runData.End![0]!.data!.main![0]![0]!.json).toEqual({ answer: 'done' });
+  });
+});
+
+describe('a tool shared by two agents', () => {
+  it('attributes a pending tool call to the agent whose round names it', () => {
+    // The encoder writes a round's tools *before* its agent (the stack is depth-descending, and
+    // a tool sits one below its agent), so attributing during the stack walk would always see
+    // an empty round map and fall back to the tool's first agent. Here that would be `A1`.
+    const c = compile(agentSharedTool);
+    const wf = fakeWorkflow(agentSharedTool);
+    const red = newRunExecutionData(wf.nodes.Trigger!, { startItems: items({ n: 1 }) });
+    const x = red.executionData!;
+    x.nodeExecutionStack = [
+      { node: wf.nodes.Calculator!, data: { main: [items({ q: 1 })] }, source: { main: [{ previousNode: 'A2' }] } },
+      {
+        node: wf.nodes.A2!, data: { main: [items({})] }, source: { main: [{ previousNode: 'A1' }] },
+        metadata: {
+          nodeWasResumed: true,
+          subNodeExecutionData: { actions: [{ nodeName: 'Calculator', runIndex: 0, action: {} }], metadata: {} },
+        },
+      },
+    ] as never;
+
+    const n = named(decodeExecutionData(c, x, { runData: {} }));
+    expect(n['id:A2/dispatched']).toBe(1);
+    expect(n['id:A2/queue']).toBe(1);
+    expect(n['id:A2/drained']).toBeUndefined();
+    expect(n['id:A1/dispatched']).toBeUndefined();
+    expect(n['id:A1/queue']).toBeUndefined();
+  });
+});
 
 describe('the wait fixture', () => {
   it('encoded by the scheduler, decoded and re-encoded byte-for-byte; then resumed as handleWaitingState resumes it and run to completion', async () => {

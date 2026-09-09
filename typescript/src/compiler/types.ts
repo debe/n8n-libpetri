@@ -50,6 +50,31 @@ export interface NodeDescription {
   readonly maxTries?: number;
   /** n8n `waitBetweenTries` in milliseconds, read as `min(5000, max(0, waitBetweenTries || 1000))`. */
   readonly waitBetweenTries?: number;
+  /**
+   * An agent node's `options.maxIterations` (n8n default 10), the number of tool-call rounds
+   * the node itself permits before `checkMaxIterations` throws. Seeds `A/rounds`, so the round
+   * loop is *structurally* bounded and its reachability graph is finite.
+   *
+   * The place never enforces: the node's own counter (`iterationCount`, carried on the request
+   * metadata and round-tripped by `collectSubNodeResults`) still decides. Seed exactly this many
+   * and `A/rounds` cannot bind before n8n's check does. `undefined` on an agent whose parameter
+   * is an expression the adapter could not read statically — the compiler then falls back to its
+   * configured cap and marks the agent unbounded for verification.
+   */
+  readonly maxRounds?: number;
+  /**
+   * An agent's tool-call budget for the whole execution: seeds `A/calls`, consumed one unit per
+   * dispatched tool call and refunded by nothing. n8n has no such bound — `maxIterations` caps
+   * rounds, and a model may request any number of calls in one — so this one is the
+   * scheduler's, read from `options.maxToolCalls` when a workflow declares it and otherwise
+   * from `CompileOptions.maxAgentToolCalls`.
+   *
+   * It is what makes an agent workflow *verifiable* at all: the number of tool calls a round
+   * dispatches is a count, an `Out` branch cannot express a count, and the state-class graph
+   * would otherwise explore one call in flight where the executor reaches many. Consumed one
+   * unit per firing of `A_dispatch`, the count becomes a path length, which the graph sees.
+   */
+  readonly maxToolCalls?: number;
 }
 
 /** One `main` connection `from.outputIndex → to.inputIndex`, by node name. */
@@ -58,6 +83,22 @@ export interface MainConnection {
   readonly outputIndex: number;
   readonly to: string;
   readonly inputIndex: number;
+}
+
+/**
+ * One `ai_tool` connection, by node name. n8n wires these *from* the tool *to* the agent
+ * (`connectionsBySourceNode[tool].ai_tool` lists the agent), which is the direction the names
+ * here keep.
+ *
+ * This is the only non-`main` connection type the scheduler ever sees. Every other `ai_*` type
+ * (`ai_languageModel`, `ai_memory`, `ai_outputParser`, …) is resolved by `supplyData` *inside*
+ * `runNode` and never reaches a scheduler, so the compiler is right not to model it.
+ */
+export interface ToolConnection {
+  /** The agent node the tool is wired into: the `EngineRequest` it answers comes from here. */
+  readonly agent: string;
+  /** The tool node, dispatched by name in an `ExecutionNodeAction`. */
+  readonly tool: string;
 }
 
 /**
@@ -113,6 +154,11 @@ export interface WorkflowDescription {
   readonly nodes: readonly NodeDescription[];
   readonly connections: readonly MainConnection[];
   /**
+   * `ai_tool` connections (README "Agent tool dispatch"). Absent or empty on a workflow with no
+   * agent, which is every workflow the compiler saw before M7 — the shape is additive.
+   */
+  readonly toolConnections?: readonly ToolConnection[];
+  /**
    * Names of the nodes the execution starts from, first the primary one (n8n's
    * `nodeExecutionStack[0]`, whose `X/in` receives the trigger data in `initialMarking`).
    * A resumed execution lists every node on `nodeExecutionStack` plus every node with
@@ -131,6 +177,19 @@ export interface WorkflowDescription {
 export interface CompileOptions {
   /** Concurrency budget `k` (`_budget` tokens). Default 1. Forced to 1 when the k-safety check fails. */
   readonly budget?: number;
+  /**
+   * Seed for an agent's `A/rounds` when the adapter could not read `options.maxIterations`
+   * statically (an expression). Default `DEFAULT_MAX_AGENT_ROUNDS` — n8n's own default for that
+   * parameter. Distinct from {@link budget}: this bounds a round *loop*, the budget bounds
+   * *concurrency*.
+   */
+  readonly maxAgentRounds?: number;
+  /**
+   * Seed for an agent's `A/calls` when the workflow declares no `options.maxToolCalls`. Default
+   * `DEFAULT_MAX_AGENT_TOOL_CALLS`. Unlike {@link maxAgentRounds} this is not a fallback for an
+   * n8n bound: n8n has none, so it is the bound.
+   */
+  readonly maxAgentToolCalls?: number;
   /**
    * Actions to bind per transition. A binder that returns `null` leaves the structural
    * placeholder in place, so M2 can bind real actions for the roles it owns and keep the
@@ -156,7 +215,8 @@ export interface CompileOptions {
  */
 export type TransitionRole =
   | 'start' | 'start-unmet' | 'run' | 'route' | 'done' | 'skip' | 'arm' | 'clear' | 'retry' | 'exhausted'
-  | 'sink';
+  | 'sink'
+  | 'done-request' | 'dispatch' | 'collect' | 'resume' | 'rounds-out' | 'calls-out';
 
 /**
  * Place roles. Besides the per-node gadget places (README "Per-node gadget"):
@@ -168,11 +228,19 @@ export type TransitionRole =
  *   Every start, start-unmet and retry-wait inhibits on it; routes, skips, arms, clears,
  *   done and exhausted do not, so a paused net drains its structural transitions and
  *   quiesces with every token on an in / ready / hasdata / waiting place.
+ *
+ * The agent round adds its own (README "Agent tool dispatch"). `in-tool`, `queue`, `drained`,
+ * `outstanding` and `dispatched` are **a round in flight**: a net that quiesces holding one of
+ * them has a tool call or a re-entry the codec must write back, so they join the codec's rest
+ * set inside a designed terminal exactly as `in-data` and `ready` do. `rounds` and `calls` are
+ * budgets, consumed like `_budget` and never pending.
  */
 export type PlaceRole =
   | 'in-data' | 'in-empty' | 'edge-data' | 'edge-empty' | 'nil' | 'ready' | 'hasdata' | 'ran' | 'free'
   | 'idle' | 'running' | 'ok' | 'routed' | 'done' | 'skipped' | 'retry' | 'tries' | 'waiting' | 'stopped'
-  | 'budget' | 'halt' | 'pause';
+  | 'budget' | 'halt' | 'pause'
+  | 'in-tool' | 'routed-request' | 'queue' | 'drained' | 'outstanding' | 'response'
+  | 'dispatched' | 'rounds' | 'calls';
 
 /** `tree`: the two ends are in different SCCs; `cycle`: both ends share one SCC. */
 export type EdgeKind = 'tree' | 'cycle';
@@ -230,9 +298,13 @@ export interface PlaceInfo {
  * - `or`: one input index with several empty-capable producer edges (README "OR-inputs");
  * - `join`: several inputs, or an input with several producers of which at most one can
  *   carry an empty (README "Join gadget");
- * - `choose-branch`: a join whose `requiredInputs` lists inputs that must carry data.
+ * - `choose-branch`: a join whose `requiredInputs` lists inputs that must carry data;
+ * - `tool`: the node is dispatched by an agent over `ai_tool`, never by a `main` producer. Its
+ *   input side is a single `T/in_tool` an agent's `A_dispatch` writes, and its success branch
+ *   deposits the agent's `A/response` instead of edge tokens. Everything between those two ends
+ *   — start, run, retry, halt, wait, stop, done — is the ordinary gadget.
  */
-export type JoinForm = 'direct' | 'or' | 'join' | 'choose-branch';
+export type JoinForm = 'direct' | 'or' | 'join' | 'choose-branch' | 'tool';
 
 /** The host-level edge places of one connection, owned by the consumer. */
 export interface EdgeSlot {
@@ -307,6 +379,28 @@ export interface NodeGadgetTransitions {
   readonly retryWait: string | null;
   readonly exhausted: string | null;
   readonly sinks: readonly string[];
+  /** `A_done_req`: refunds `_budget` and opens the round (agent nodes only). */
+  readonly doneRequest: string | null;
+  /** `A_dispatch`: pops one action off `A/queue` onto some tool's `T/in_tool` (agent nodes only). */
+  readonly dispatch: string | null;
+  /**
+   * `A_collect`: pairs one `A/response` with one `A/outstanding` and produces nothing — a
+   * genuine sink (CORE-043 AC4), the same category as the OR form's `X_clear`.
+   */
+  readonly collect: string | null;
+  /** `A_resume`: re-enters `X_run` with the round's `EngineResponse` (agent nodes only). */
+  readonly resume: string | null;
+  /**
+   * `A_rounds_out`: the round budget is spent with a round still open, so the agent pauses
+   * instead of stranding and its re-entry is written back to `nodeExecutionStack`.
+   */
+  readonly roundsOut: string | null;
+  /**
+   * `A_calls_out`: the tool-call budget is spent with calls still queued. The agent re-enters
+   * `X_run` carrying the fact, and the run fails with the budget error under its own `onError`
+   * policy — the same shape as `maxIterations` throwing inside n8n's node.
+   */
+  readonly callsOut: string | null;
 }
 
 /** Everything the scheduler needs to drive one node's gadget. */
@@ -363,6 +457,60 @@ export interface NodeGadget {
   readonly waiting: Place<unknown>;
   /** `X/stopped`: the destination-node stop, or a cancellation before the run (PlaceRole `stopped`). */
   readonly stopped: Place<unknown>;
+  /**
+   * `T/in_tool` (`tool` form): the dispatch place an agent's `A_dispatch` writes, carrying the
+   * `IExecuteData` n8n's own `addNodeToBeExecuted` built for this action. `null` on every other
+   * form.
+   */
+  readonly inTool: Place<unknown> | null;
+  /**
+   * The agent side, all `null` unless the node has at least one `ai_tool` producer. This is
+   * `references/patterns.md` §5 ("fan-out and join with pending markers"): `routedReq` phases
+   * the budget refund as `routed` does, `queue` carries the undispatched actions, `pending`
+   * counts them structurally so no action decides "am I the last one", `outstanding` is the
+   * pattern's `JOB_PENDING`, `dispatched` its `ROUTING_DONE`, and `rounds` bounds the loop.
+   *
+   * There is no accumulator for collected responses on purpose: `A_collect` consumes
+   * `outstanding` when it fires and would deposit on completion, so `A_resume` could drain
+   * n − 1 markers inside that window and leak one into the next round
+   * (`tests/spikes/agent-round.test.ts` measured it). `A_collect` produces nothing instead.
+   */
+  readonly routedRequest: Place<unknown> | null;
+  /** `A/queue`: one token carrying the actions not yet dispatched, plus the agent's resume entry. */
+  readonly queue: Place<unknown> | null;
+  /**
+   * `A/calls`: the tool-call budget, seeded with `maxToolCalls` and consumed one unit per
+   * `A_dispatch`. Refunded by nothing, so it is monotonically decreasing — which is what keeps
+   * the reachability graph finite, and what lets it explore every round size up to the budget:
+   * the count is the number of dispatch firings, not a token deposit.
+   */
+  readonly calls: Place<unknown> | null;
+  /**
+   * `A/drained`: the round has nothing left to dispatch. Written by `A_done_req` for an empty
+   * request and by `A_dispatch` when it takes the last action off the queue; consumed by
+   * `A_resume`. The queue token and this marker are exclusive.
+   */
+  readonly drained: Place<unknown> | null;
+  /** `A/outstanding`: one unit token per dispatched, uncollected action. */
+  readonly outstanding: Place<unknown> | null;
+  /** `A/response`: one token per tool that finished, deposited by the tool's own `T_done`. */
+  readonly response: Place<unknown> | null;
+  /** `A/dispatched`: the round is open and fully dispatched; carries the agent's resume entry. */
+  readonly dispatched: Place<unknown> | null;
+  /** `A/rounds`: the round budget, seeded with `maxRounds` units and consumed one per `A_resume`. */
+  readonly rounds: Place<unknown> | null;
+  /** Tool nodes this agent may dispatch, in `A_dispatch`'s `xor` branch order. */
+  readonly tools: readonly string[];
+  /** Agents that may dispatch this tool (`tool` form); empty otherwise. */
+  readonly agents: readonly string[];
+  /** `maxRounds` as compiled: the seed of `A/rounds`. `null` when the node is not an agent. */
+  readonly maxRounds: number | null;
+  /** True when `maxRounds` came from a configured fallback rather than the workflow JSON. */
+  readonly roundsAssumed: boolean;
+  /** `maxToolCalls` as compiled: the seed of `A/calls`. `null` when the node is not an agent. */
+  readonly maxToolCalls: number | null;
+  /** True when `maxToolCalls` is the scheduler's default rather than a value the workflow declared. */
+  readonly toolCallsAssumed: boolean;
   /** Inputs the gadget models, ascending index: connected ones plus dead required ones. Empty for the direct form. */
   readonly inputs: readonly InputGadget[];
   /** Connected outputs, ascending index. Unconnected outputs get no places. */

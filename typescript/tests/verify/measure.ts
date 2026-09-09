@@ -31,7 +31,8 @@ import type { Place, Token } from 'libpetri';
 import { compile } from '../../src/compiler/index.js';
 import type { CompiledWorkflow, WorkflowDescription } from '../../src/compiler/index.js';
 import { diamond, multiProducer } from '../fixtures/workflows.js';
-import { REST_ROLES } from '../../src/verify/index.js';
+import { HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES } from '../../src/verify/index.js';
+import type { PlaceRole } from '../../src/compiler/types.js';
 import { generateWorkflow, liveSampleNode, orphanBranch } from './support.js';
 
 interface Sample {
@@ -41,6 +42,7 @@ interface Sample {
   readonly familySize: number;
   readonly property: SmtProperty;
   readonly sinks: readonly Place<unknown>[];
+  readonly conditionalSinks: readonly { readonly marker: Place<unknown>; readonly places: readonly Place<unknown>[] }[];
 }
 
 /**
@@ -89,34 +91,40 @@ function samplesFor(compiled: CompiledWorkflow): Sample[] {
   const samples: Sample[] = [
     {
       family: 'budget', what: 'placeBound(_budget, k)', familySize: 1,
-      property: placeBound(map.shared.budget, compiled.effectiveBudget), sinks: [],
+      property: placeBound(map.shared.budget, compiled.effectiveBudget), sinks: [], conditionalSinks: [],
     },
     {
       family: 'no-double-activation', what: `placeBound(${last.node}/running, 1)`, familySize: nodes.length,
-      property: placeBound(last.running, 1), sinks: [],
+      property: placeBound(last.running, 1), sinks: [], conditionalSinks: [],
     },
     {
       family: 'dead-nodes',
       what: `unreachable(${dead.node}/running) [${deadNode === undefined ? 'no dead node in this workflow; live' : 'dead'}]`,
       familySize: nodes.length,
-      property: unreachable(new Set([dead.running])), sinks: [],
+      property: unreachable(new Set([dead.running])), sinks: [], conditionalSinks: [],
     },
     {
       family: 'dead-nodes', what: `unreachable(${live.node}/running) [live]`, familySize: nodes.length,
-      property: unreachable(new Set([live.running])), sinks: [],
+      property: unreachable(new Set([live.running])), sinks: [], conditionalSinks: [],
     },
     {
       family: 'mutual-exclusion', what: `mutualExclusion(${first.node}, ${last.node})`,
       familySize: (nodes.length * (nodes.length - 1)) / 2,
-      property: mutualExclusion(first.running, last.running), sinks: [],
+      property: mutualExclusion(first.running, last.running), sinks: [], conditionalSinks: [],
     },
   ];
   if (deadNode === undefined) samples.splice(2, 1);
   // One whole-net query, not one per place: that is the fallback's shape since M5, and the
   // `familySize: 1` is the point — M4's per-place form cost (places x timeout).
+  const widened = (roles: ReadonlySet<PlaceRole>): Place<unknown>[] =>
+    map.places.filter((p) => roles.has(p.role) && !REST_ROLES.has(p.role)).map((p) => p.place);
   samples.push({
-    family: 'proper-completion', what: 'deadlockFree() [whole net, rest set as sinks]',
+    family: 'proper-completion', what: 'deadlockFree() [whole net, rest set as sinks, pause / halt widenings as conditional sinks]',
     familySize: 1, property: deadlockFree(), sinks,
+    conditionalSinks: [
+      { marker: map.shared.pause, places: widened(PAUSE_REST_ROLES) },
+      { marker: map.shared.halt, places: widened(HALT_REST_ROLES) },
+    ],
   });
   const joinPlace = joinPlaces[0];
   if (joinPlace !== undefined) {
@@ -130,7 +138,7 @@ function samplesFor(compiled: CompiledWorkflow): Sample[] {
       family: 'proper-completion',
       what: `placeBound(${joinPlace.name}, ${capacity}) [arrival bound, ${input?.round === null || input?.round === undefined ? 'join slot' : 'OR round'}]`,
       familySize: joinPlaces.length,
-      property: placeBound(joinPlace, capacity), sinks: [],
+      property: placeBound(joinPlace, capacity), sinks: [], conditionalSinks: [],
     });
   }
   return samples;
@@ -145,6 +153,8 @@ async function run(
     .timeout(timeoutMs)
     .property(sample.property);
   if (sample.sinks.length > 0) verifier.sinkPlaces(...sample.sinks);
+  for (const c of sample.conditionalSinks) verifier.sinkPlacesWhen(c.marker, ...c.places);
+  if (sample.property.type === 'deadlock-free') verifier.stateEquation(true);
   const started = performance.now();
   const result = await verifier.verify();
   return { verdict: result.verdict.type, ms: performance.now() - started };

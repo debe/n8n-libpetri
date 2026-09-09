@@ -41,6 +41,10 @@ const FORCED_TO_ONE = ['destinationStop', 'ifBothOutputs', 'loopOverItems', 'mul
  * them, which is a fact about the workflow and not about the engine.
  */
 const OVERLAPS = [
+  // `agentRound` is the one that is *only* concurrent here: n8n pushes an agent's tool calls
+  // onto one stack and runs them one at a time, so the overlap is the model's, not the
+  // workflow's. `agentTwoRounds` asks for one tool per round and stays sequential.
+  'agentRound',
   'complicatedMulti', 'diamond', 'expressionRef', 'fanOut', 'fanOut4', 'haltInFlight',
   'parallelBranches', 'partialRequired', 'runFilter', 'switch20', 'webhookRespond',
 ];

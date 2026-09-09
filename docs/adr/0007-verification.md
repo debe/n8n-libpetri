@@ -228,7 +228,7 @@ graph per report, bounded by `maxClasses`, and **every** family reads it:
 
 | family | from the graph | fallback | then |
 |---|---|---|---|
-| proper completion | the quiescent classes, classified (§10) | one whole-net `deadlockFree`, structural rest set as sinks — **only where the graph has not already refuted that query** | `bounded` (§11) |
+| proper completion | the quiescent classes, classified (§10) | one whole-net `deadlockFree`, structural rest set as sinks — **only where the graph has not already refuted that query** (gate retired by §13: the widenings are now declared and the query is asked wherever the graph did not close) | `bounded` (§11) |
 | dead nodes | is `X/running` marked in any class | `unreachable({X/running})` per node | — |
 | no double activation | peak token count on `X/running` | `placeBound(X/running, 1)` per node | `bounded` |
 | budget | peak token count on `_budget` | `placeBound(_budget, k)` | `bounded` |
@@ -242,7 +242,7 @@ cyclic-node runs" is not evidence of that, so a bounded arm there would report a
 
 Two things gate the fallback column, and both are decisions this ADR owns.
 
-**The proper-completion query is not asked when the graph has refuted it.** VER-002's error
+**The proper-completion query is not asked when the graph has refuted it** *(amended by §13 — the gate is gone, because the reason for it is)*. VER-002's error
 condition is *quiescent ∧ some marked place is not a declared sink*, and the declared sinks are
 exactly the structural rest set. So one reachable quiescent marking outside that set — a paused
 run holding an arrival, which is every workflow with a second branch in flight — makes the
@@ -369,8 +369,12 @@ to, so the split changes no verdict on any fixture; what it changes is what the 
 Two *shapes* cannot close, and NU-053 names both: heavy independent parallelism (the graph has
 no partial-order reduction, so `n` independent branches interleave combinatorially) and
 cycles (the reachable state space is unbounded, so no cap can close it). `switch20` and
-`loopOverItems` are the two fixtures. Neither ever yields a `proven` — that is the one
-failure mode this surface must not have, and it is pinned at three caps on both fixtures.
+`loopOverItems` are the two fixtures. Neither ever yields a `proven` *from the graph* — that
+is the one failure mode this surface must not have, and it is pinned at three caps on both
+fixtures. (Since §13 the SMT fallback proves `loopOverItems` outright — a proof over every
+reachable marking, not the prefix — so the report's headline for that fixture is `proven`
+with the solver as its route; `bounded` remains what the graph alone can say, and what the
+report says under `--smt-fallback off`.)
 
 The reported **cause** has two more values, because attributing every acyclic truncation to
 NU-053's parallelism was inference rather than measurement: a four-node chain at a 10-class
@@ -488,6 +492,71 @@ nothing else — so the difference is confined to the halt/pause window. This is
 about the net under standard Petri-net firing, which is what "one net serves execution and
 verification" buys and where it stops.
 
+### 13. The fallback asks the graph's own question (libpetri VER-014, 2026-09-08)
+
+§9 skipped the whole-net `deadlockFree` query wherever the graph had reached a quiescent marking
+outside the rest set, and §10 downgraded the designed-terminal witness it returned everywhere
+else, for one reason: no libpetri property could say that the rest set *widens* under a
+terminal marker. That is what `terminalKindOf` does on the graph route — `_halt` marked, the
+halt rest set; a pause marker marked, the pause rest set; else the structural rest set — and the
+sink clause could only name one set for every marking. The question the solver was asked was
+therefore false by construction on most workflows (the nought-for-ten measurement below), and
+the gate was the honest response to a property that could not be made true.
+
+libpetri now has the property. `SmtVerifier.sinkPlacesWhen(marker, ...places)` (VER-014)
+declares a sink set that applies while `marker` holds a token; declarations accumulate per
+marker and union across markers; the marker itself is at rest whenever marked;
+`TerminatesAtSink` is unaffected; and every `DeadlockFree` route reads it — the flat encoder, the
+name-coloured encoder, the certificate check, abstract replay and Route B's `decide`. The
+encoding is one extra conjunct per conditional place (`m_p ≥ 1 ∧ m_marker = 0`), and a script
+that declares nothing is byte-identical to before.
+
+`verify.ts` declares exactly the graph's rule: `_pause` admits `PAUSE_REST_ROLES ∖ REST_ROLES`
+and `_halt` admits `HALT_REST_ROLES ∖ REST_ROLES`. Two markers suffice although `terminalKindOf`
+also reads a marked `waiting` / `stopped` as a pause, because every branch that produces one of
+those produces `_pause` beside it and nothing ever consumes `_pause` (`compiler/gadget.ts`); and
+`HALT_REST_ROLES ⊇ PAUSE_REST_ROLES`, so libpetri's union across markers is the graph's
+halt-over-pause precedence. Three things follow:
+
+- **The gate is retired**, with the reason it gave. The query is asked wherever the graph did not
+  close, and `StateSpace.outsideSinkClasses` becomes a statistic — how many quiescent classes the
+  unwidened question would have called strandings — rather than the condition it used to be.
+- **The designed-terminal downgrade becomes a tripwire.** A witness that is a paused or halted
+  run can no longer be the solver being right about the wrong question; it would mean the SMT
+  declaration and the graph's classification disagree on a role, and it is reported as that,
+  never as a defect.
+- **The query record carries the declaration** (`QueryRecord.conditionalSinks`), so a reader of
+  the JSON sees which places each marker admits, not only the unconditional set.
+
+Measured on the day: `fanOut` **proven in 0.2 s** where the unwidened question returned a paused
+witness in 2.2 s; `agentTwoTools` at `maxToolCalls` 64 **unknown at 120 s** where it returned
+the same witness in 32 s. The second is the limit that decides how far this goes: with the right
+question asked, Spacer still has to prove quiescence on a net whose inductive invariant needs
+chained linear *inequalities* — the same root cause as the reachability cliff of §9's
+measurement, found the same day and handed upstream (`tasks/todo.md` §4: libpetri conjoins only
+equality invariants; six sign-checked sub/super-invariants prove the cliff in 0.1 s).
+
+That landed the same day, in two parts. **VER-015**, a linear state-equation bound, always on
+for reachability-safety properties: one QF_LIA query for `y ≥ 0, y·C ≤ 0, y·demand ≥ y·M0 + 1`,
+re-checked in BigInt and proven structurally before Spacer runs — the cliff net is proven at
+every depth in 0.0 s, unmodified. **VER-016**, the state equation with firing counters, opt-in
+as `SmtVerifier.stateEquation(true)`: every rule body conjoins `M' = M0 + C·n'` over the linear
+places, so every linear consequence of the marking equation — the ordering laws above included —
+is a fact in the body rather than a lemma to invent; enumerating the inequality cone instead was
+tried upstream and does not finish on the depth-1 net in 300 s, which is why the counters are the
+vehicle. `verify.ts` turns it on for the quiescence fallback only: counters slow witness search
+by about 1.5×, and the reachability families are witness hunts on a truncated graph. With the
+widenings declared and the equation on, `agentTwoTools` at `maxToolCalls` 64 is **proven in
+1.5 s**, and `loopOverItems` — the cyclic fixture §11 could only bound — is **proven in 0.5 s**,
+so a full report on it now reads `proven` with the solver as its route and the `--strict`
+gate passes; the certificate check re-proves the synthesized
+invariant against the counter-augmented step, and replay still confirms a witness. What remains
+a witness-search cost — `diamond` with the plain rest set, a genuine violation, unknown at 180 s
+with and without counters — is recorded upstream as its own item.
+
+Nothing in §7 changes: a fallback `proven` is a statement about the same priority- and
+value-blind abstraction (VER-004) as the graph's, and the `bounded` verdict of §11 is untouched.
+
 ## Consequences
 
 The measurements are in [`docs/verification.md`](../verification.md). The shape of the
@@ -497,7 +566,9 @@ result, after M5:
 is `proven` in 1–120 ms on every acyclic fixture (43 classes for a 4-node chain, 330 for the
 diamond, 1967 for a 41-node chain, 5894 for a 9-node fan-out, 41 147 for the 21-node
 generated workflow — the M5 figures were 50 / 393 / 2048 / 6151 / 47 924, before M6 shrank the
-gadget), and `violated` in 25 ms on `ifBothOutputs`, where it strands
+gadget; and the diamond is 306 since libpetri's state-class key became canonical on
+2026-09-09, which changed only the fixtures whose branches interleave — `linear`, `fanOut`,
+`chain40` and `wide8` are unmoved), and `violated` in 25 ms on `ifBothOutputs`, where it strands
 `Merge/ready_0` and `Merge/hasdata` — the already-registered divergence #2, caught by the
 property that exists to catch it, with the firing path that reaches the stuck marking. M4
 measured every one of those as `unknown` at 30 s, 60 s and 600 s.
@@ -517,8 +588,8 @@ loop body), and `userCycle` at `k = 135` in 2.0 s (§11). That is sound, is not 
 the useful half of what a truncated cyclic graph knows; the alternative on the table was to
 keep reporting `unknown` and call the limit permanent.
 
-**The SMT fallback splits in two, and the document says which half works.** For *proper
-completion* it decides nothing: one whole-net `deadlockFree` with the structural rest set as
+**The SMT fallback splits in two, and the document says which half works** *(the proper-completion
+half amended by §13)*. For *proper completion* it decides nothing: one whole-net `deadlockFree` with the structural rest set as
 sinks, 30 s per query, gives `unknown` on `linear`, `diamond`, `chooseBranch`,
 `ifBothOutputs`, `chain40`, `wide8`, `loopOverItems` and `switch20`, and `violated` on
 `fanOut` (3.8 s) and `multiProducer` (28.7 s) with a witness that is a paused run — §10's
@@ -576,7 +647,8 @@ structural boundedness, does.
   `violated`), the rest sets as constants, truncation reporting for both NU-053 shapes, and —
   the assertion that carries the whole surface — that a *false `proven` is impossible* on a
   truncated graph at any cap. Its `the bounded verdict for a cyclic workflow` block pins §11:
-  `loopOverItems` is `bounded` with the bound growing as the cap grows, the acyclic
+  `loopOverItems` is `bounded` on the graph route with the bound growing as the cap grows
+  (and `proven` by the §13 fallback in a full report), the acyclic
   truncation stays `unknown` with no bound borrowed, `k = 0` is refused, `loopTransitions`
   names the `run` of the cyclic nodes and nothing else, the `cyclicStranding` fixture —
   a cycle *and* a real stranding — is `violated` rather than `bounded` at every cap, and

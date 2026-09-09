@@ -51,6 +51,16 @@ export interface RunPayload {
   readonly attempt: number;
   readonly taskStartedData?: ITaskStartedData;
   readonly unmetReference?: string;
+  /** Tool form only: the agent whose `A/response` this run's success branch writes. */
+  readonly agent?: string;
+  /** Tool and agent forms: the round this activation belongs to, for diagnostics. */
+  readonly roundId?: string;
+  /**
+   * Agent form, set by `A_calls_out`: the tool-call budget ran out with this many actions
+   * still queued. `X_run` fails the activation with `toolCallBudgetExceeded` instead of running
+   * it, so the failure is recorded and routed under `onError` like any node error.
+   */
+  readonly toolCallsExceeded?: { readonly undispatched: number; readonly budget: number };
   /**
    * This attempt resumes n8n's *inner* re-run loop (lines 143–160), which calls `runNode`
    * and nothing else — set by `X_retry_wait` when the token it consumed carried a `soft`
@@ -75,6 +85,9 @@ export interface RetryPayload {
   readonly attempt: number;
   readonly taskStartedData: ITaskStartedData;
   readonly reason: RetryReason;
+  /** Tool form: the agent this activation answers to, carried across every attempt. */
+  readonly agent?: string;
+  readonly roundId?: string;
   /**
    * `runExecutionData.waitTill` as the failing attempt read it before its own `runNode`, so
    * `X_exhausted` can tell a wait this node started from one a sibling started (k > 1).
@@ -108,6 +121,70 @@ export interface WaitingPayload {
 export interface StoppedPayload {
   readonly executionData: IExecuteData;
   readonly ran: boolean;
+}
+
+/**
+ * The token on `A/routed_req` and, once the round opens, on `A/queue` — an agent returned an
+ * `EngineRequest` and n8n's own `handleRequest` has planned it.
+ *
+ * `pending` is the tool activations still to dispatch, **in the order the model requested them**;
+ * `A_dispatch` pops the head each firing and puts the tail back, so a tool's `X_start` follows
+ * request order at every budget. `resume` is the agent's own re-entry entry, carrying
+ * `metadata.nodeWasResumed` and `metadata.subNodeExecutionData` exactly as n8n built it — which
+ * is what makes `host.collectSubNodeResults` rebuild the right `EngineResponse` with no help
+ * from us. `roundId` is data only: it names the round in diagnostics and in the differ, and
+ * never reaches the net's enablement (see ADR 0008 on why this is not a ν-name).
+ */
+export interface RequestPayload {
+  readonly kind: 'request';
+  readonly pending: readonly IExecuteData[];
+  readonly resume: IExecuteData;
+  readonly roundId: string;
+}
+
+/**
+ * The token on `A/dispatched`: the round is open, and this is the agent's re-entry.
+ *
+ * Deliberately *not* the {@link RequestPayload}. `A_dispatch` rewrites `A/queue` with a shorter
+ * `pending` on every firing, so a copy parked on `A/dispatched` would still name the tools the
+ * round started with. The marking codec reads both places when an execution pauses mid-round,
+ * and stale entries there would be re-queued tool calls that already ran.
+ */
+export interface RoundPayload {
+  readonly kind: 'round';
+  readonly resume: IExecuteData;
+  readonly roundId: string;
+}
+
+export function isRoundPayload(v: unknown): v is RoundPayload {
+  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'round';
+}
+
+/**
+ * The token on `T/in_tool`: one planned tool activation plus the agent that asked for it. The
+ * agent travels with the token because a tool can serve several agents, and `T_run`'s success
+ * branch is an `xor` over their `A/response` places — the token says which one to take.
+ */
+export interface DispatchPayload {
+  readonly kind: 'dispatch';
+  readonly executionData: IExecuteData;
+  readonly agent: string;
+  readonly roundId: string;
+}
+
+/** The token on `A/response`: a dispatched tool finished and its `runData` is written. */
+export interface ResponsePayload {
+  readonly kind: 'response';
+  readonly tool: string;
+  readonly roundId: string;
+}
+
+export function isRequestPayload(v: unknown): v is RequestPayload {
+  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'request';
+}
+
+export function isDispatchPayload(v: unknown): v is DispatchPayload {
+  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'dispatch';
 }
 
 export function isEdgePayload(v: unknown): v is EdgePayload {

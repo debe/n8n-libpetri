@@ -53,11 +53,12 @@ import type {
 } from 'n8n-workflow';
 import { entryForEdge } from '../codec.js';
 import type { ActionBinder, InputGadget, NetMapView, NodeGadget, TransitionInfo } from '../compiler/index.js';
-import type { SchedulerHooks, SchedulerHost } from '../n8n/host.js';
-import { engineRequestUnsupported, UnmetReferenceError } from './errors.js';
+import type { PlannedNode, SchedulerHooks, SchedulerHost } from '../n8n/host.js';
+import { engineRequestUnsupported, toolCallBudgetExceeded, UnmetReferenceError } from './errors.js';
 import {
-  isEdgePayload, isEntryPayload,
-  type EdgePayload, type OkPayload, type RetryPayload, type RetryReason, type RunPayload, type StoppedPayload,
+  isDispatchPayload, isEdgePayload, isEntryPayload,
+  type DispatchPayload, type EdgePayload, type OkPayload, type RequestPayload, type ResponsePayload,
+  type RetryPayload, type RetryReason, type RoundPayload, type RunPayload, type StoppedPayload,
   type WaitingPayload,
 } from './payloads.js';
 
@@ -129,7 +130,9 @@ type Outcome =
   | { readonly kind: 'retry'; readonly payload: RetryPayload }
   | { readonly kind: 'halt' }
   | { readonly kind: 'waiting'; readonly executionData: IExecuteData }
-  | { readonly kind: 'stopped'; readonly executionData: IExecuteData; readonly ran: boolean };
+  | { readonly kind: 'stopped'; readonly executionData: IExecuteData; readonly ran: boolean }
+  /** The node returned an `EngineRequest`: `A_done_req` opens a tool round from this payload. */
+  | { readonly kind: 'request'; readonly payload: RequestPayload };
 
 /** `stack-scheduler.ts:98-100`: an error item on the first output counts as a failed try. */
 function isErrorValue(v: unknown): boolean {
@@ -147,8 +150,117 @@ function checkFailure(data: IRunNodeResponse | EngineRequest): boolean {
 // ==================== the run ====================
 
 /**
+ * The `IExecuteData` of one planned activation, exactly as `addNodeToBeExecuted` builds it for a
+ * node with at most one `main` input (`workflow-execute.ts:800-855`).
+ *
+ * Every entry of a round is such a node: a tool has no `main` producer at all, and an agent has
+ * one. The multi-input half of that function — `waitingExecution`, the sibling walk — is
+ * therefore unreachable here, and {@link planRound} refuses rather than guesses if a workflow
+ * ever presents an agent wired otherwise.
+ */
+function plannedEntry(env: ExecutionEnv, e: PlannedNode): IExecuteData {
+  const node = env.workflow.nodes[e.inputConnectionData.node];
+  if (node === undefined) {
+    throw new Error(`n8n-libpetri: planned activation for unknown node '${e.inputConnectionData.node}'`);
+  }
+  const main: Array<INodeExecutionData[] | null> = [];
+  for (let i = e.inputConnectionData.index; i >= 0; i--) main[i] = null;
+  main[e.inputConnectionData.index] = e.parentOutputData[e.parentOutputIndex] ?? null;
+  return {
+    node,
+    data: { main } as ITaskDataConnections,
+    source: {
+      main: [{
+        previousNode: e.parentNode,
+        previousNodeOutput: e.parentOutputIndex,
+        previousNodeRun: e.runIndex,
+      }],
+    },
+    runIndex: e.nodeRunIndex,
+    ...(e.metadata === undefined ? {} : { metadata: e.metadata }),
+  } as IExecuteData;
+}
+
+/**
+ * Lines 163–174: the agent's `EngineRequest`, planned but not dispatched.
+ *
+ * n8n's `handleEngineRequest` plans the round *and* pushes it onto `nodeExecutionStack`.
+ * `planEngineRequest` is the same call without the push, so we get n8n's own plan — the
+ * reserved `runData` slots, the `rewireOutputLogTo` tag, the `preservedSourceOverwrite`
+ * metadata — and the net decides when any of it runs. Nothing is ever enqueued on the host:
+ * `FakeHost.addNodeToBeExecuted` throws precisely to keep that true.
+ *
+ * `handleRequest` reverses the actions under v1 and `unshift`s the agent's own re-entry first,
+ * so the plan reads `[agent, tool_m … tool_1]`. Reversing it back gives the request order the
+ * queue dispatches in, with the agent's re-entry separated out.
+ */
+function planRound(
+  env: ExecutionEnv,
+  g: NodeGadget,
+  executionNode: INode,
+  executionData: IExecuteData,
+  runIndex: number,
+  request: EngineRequest,
+): Outcome | null {
+  const { host, workflow, runExecutionData } = env;
+  // Whether the node has a round to open is decided *after* the plan, not before it: n8n
+  // reserves the requested nodes' run-data slots inside `handleRequest` even on the path where
+  // it then schedules nothing, and a request that plans nothing dispatches nothing, so it needs
+  // no round and no `ai_tool` connection. The per-entry check below is what refuses a dispatch
+  // the net cannot route.
+  const planned = host.planEngineRequest({
+    workflow, currentNode: executionNode, request, runIndex, executionData,
+    runData: runExecutionData.resultData.runData,
+  });
+  // n8n returns nothing when the parent node cannot be found and reports it; the round never
+  // opens and the activation produced no output, which is what its own loop does next.
+  if (planned.length === 0) {
+    env.diagnostic(
+      `node '${executionNode.name}': engine request could not be planned (no parent node); ` +
+      'no tool round is opened and the activation produces no output, as n8n does');
+    return null;
+  }
+  const [resumePlan, ...toolPlans] = planned;
+  if (resumePlan === undefined || resumePlan.inputConnectionData.node !== executionNode.name) {
+    throw new Error(
+      `internal: node '${executionNode.name}' planned a round whose first entry is ` +
+      `'${resumePlan?.inputConnectionData.node}'; expected the agent's own re-entry`);
+  }
+  for (const e of planned) {
+    // The single-input assumption `plannedEntry` rests on. n8n would route a multi-input node
+    // through `waitingExecution` instead, and no agent or tool node is one.
+    const inputs = workflow.connectionsByDestinationNode[e.inputConnectionData.node]?.main?.length ?? 0;
+    if (inputs > 1) {
+      throw new Error(
+        `n8n-libpetri: tool round for '${executionNode.name}' includes '${e.inputConnectionData.node}', ` +
+        `which has ${inputs} main inputs; agent and tool activations must have at most one`);
+    }
+  }
+  // `handleRequest` reversed the actions so a LIFO stack would run them in request order; we
+  // dispatch from the head of a queue, so reverse them back.
+  const pending = toolPlans.reverse().map((e) => plannedEntry(env, e));
+  for (const entry of pending) {
+    if (!g.tools.includes(entry.node.name)) {
+      // n8n dispatches by node *name* and never consults the connections; the net dispatches by
+      // the `ai_tool` connection the workflow draws, so an action naming an unwired node cannot
+      // be routed (divergence #22). Fail by name rather than dispatching a prefix of the round.
+      throw engineRequestUnsupported(executionNode, entry.node.name);
+    }
+  }
+  if (g.routedRequest === null) throw engineRequestUnsupported(executionNode);
+  const payload: RequestPayload = {
+    kind: 'request',
+    pending,
+    resume: plannedEntry(env, resumePlan),
+    roundId: `${executionNode.name}#${runIndex}`,
+  };
+  return { kind: 'request', payload };
+}
+
+/**
  * Lines 163–186: the request check and the output post-processing of one `runNode` result.
- * An `EngineRequest` is out of scope and fails the node with a clear error.
+ * An `EngineRequest` is handled by the caller ({@link attempt}); reaching here with one is a
+ * bug in this file, not a user-visible condition.
  */
 async function postRun(
   env: ExecutionEnv,
@@ -370,6 +482,11 @@ async function softAttempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload
     const runNodeData = await host.runNode(
       workflow, executionData, runExecutionData, runIndex, host.additionalData, host.mode, host.abortSignal);
     wait(); // claim in the same turn as the resolution (divergence #15)
+    if (isEngineRequest(runNodeData)) {
+      const round = planRound(env, g, executionNode, executionData, runIndex, runNodeData);
+      if (round !== null) return round;
+      return { kind: 'ok', nodeSuccessData: [], runIndex };
+    }
     if (g.retry !== null && checkFailure(runNodeData)) {
       return again({ kind: 'soft', runNodeData: runNodeData as IRunNodeResponse });
     }
@@ -453,12 +570,25 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
     } else {
       // README "Expression references": the twin's token fails with n8n's own error.
       if (payload.unmetReference !== undefined) throw new UnmetReferenceError(payload.unmetReference);
+      // `A_calls_out`: the round could not be finished, so this activation fails instead of
+      // running — under `onError`, like `checkMaxIterations` throwing inside n8n's own node.
+      if (payload.toolCallsExceeded !== undefined) {
+        throw toolCallBudgetExceeded(executionNode, payload.toolCallsExceeded.undispatched, payload.toolCallsExceeded.budget);
+      }
       host.collectSubNodeResults(executionData, subNodeExecutionResults); // line 125
       const runNodeData = await host.runNode(
         workflow, executionData, runExecutionData, runIndex, host.additionalData, host.mode, host.abortSignal,
         subNodeExecutionResults,
       ); // lines 132–141
       wait(); // claim in the same turn as the resolution (divergence #15)
+      // Lines 163–174: an agent asking for its tools. n8n `continue`s the loop here — nothing
+      // is recorded for this activation, no `nodeExecuteAfter`, no output — and the net does
+      // the same: the request outcome opens a round and the agent re-enters through `A_resume`.
+      if (isEngineRequest(runNodeData)) {
+        const round = planRound(env, g, executionNode, executionData, runIndex, runNodeData);
+        if (round !== null) return round;
+        return { kind: 'ok', nodeSuccessData: [], runIndex };
+      }
       // Lines 143–160: the soft-failure re-run; the net decides whether a try is left.
       if (canRetry && checkFailure(runNodeData)) {
         return retryOutcome({ executionData, attempt: payload.attempt + 1, taskStartedData, waitTillBefore, reason: { kind: 'soft', runNodeData: runNodeData as IRunNodeResponse } });
@@ -506,7 +636,23 @@ async function exhaust(env: ExecutionEnv, payload: RetryPayload): Promise<Outcom
  * and `X/routed` marks the outcome for `X_done` to refund the budget one cycle later
  * (ADR 0004). A split node writes one `X/ok_o` per output for its `X_route_o` instead.
  */
-function succeed(ctx: TransitionContext, g: NodeGadget, value: OkPayload): void {
+function succeed(
+  ctx: TransitionContext, g: NodeGadget, value: OkPayload, map: NetMapView, run?: RunPayload,
+): void {
+  if (g.form === 'tool') {
+    // A tool's output goes to the agent that dispatched it, not to a main edge. The `xor` over
+    // the agents is resolved by the dispatch token, which named one when `T_start` fired. The
+    // place is the agent's own `A/response`: composition funnelled this tool's `resp_k` port
+    // onto it, so addressing it through the map is addressing the same place (CORE-002).
+    const owner = run?.agent ?? g.agents[0]!;
+    if (!g.agents.includes(owner)) {
+      throw new Error(`internal: tool '${g.node}' has no ai_tool connection to '${owner}'`);
+    }
+    const payload: ResponsePayload = { kind: 'response', tool: g.node, roundId: run?.roundId ?? '' };
+    ctx.output(map.node(owner).response!, payload);
+    ctx.output(g.routed!, null);
+    return;
+  }
   if (g.splitRouting) {
     for (const out of g.outputs) ctx.output(out.ok!, value);
     return;
@@ -516,11 +662,11 @@ function succeed(ctx: TransitionContext, g: NodeGadget, value: OkPayload): void 
 }
 
 /** Writes the outcome's branch; `fallback` handles an outcome the gadget has no branch for. */
-function write(ctx: TransitionContext, g: NodeGadget, map: NetMapView, outcome: Outcome): void {
+function write(ctx: TransitionContext, g: NodeGadget, map: NetMapView, outcome: Outcome, run?: RunPayload): void {
   const shared = map.shared;
   switch (outcome.kind) {
     case 'ok':
-      succeed(ctx, g, { nodeSuccessData: outcome.nodeSuccessData, runIndex: outcome.runIndex });
+      succeed(ctx, g, { nodeSuccessData: outcome.nodeSuccessData, runIndex: outcome.runIndex }, map, run);
       return;
     case 'retry':
       ctx.output(g.retry!, outcome.payload);
@@ -544,6 +690,11 @@ function write(ctx: TransitionContext, g: NodeGadget, map: NetMapView, outcome: 
       ctx.output(shared.budget, null);
       return;
     }
+    case 'request':
+      // Phased like the success outcome: the marker here, the budget refunded by `A_done_req`
+      // one cycle later (ADR 0004), so the agent releases its slot for the tools it asked for.
+      ctx.output(g.routedRequest!, outcome.payload);
+      return;
   }
 }
 
@@ -565,6 +716,7 @@ async function guarded(
   map: NetMapView,
   executionData: IExecuteData,
   body: () => Promise<Outcome>,
+  run?: RunPayload,
 ): Promise<void> {
   const env = envOf(ctx);
   let outcome: Outcome;
@@ -584,7 +736,7 @@ async function guarded(
   // one taken at this point could not see what a sibling resolving in the same executor
   // cycle deposits, since `X_run` routes its own outcome and those arrivals reach the
   // marking in the same phase-1 batch as `_halt` itself.
-  write(ctx, g, map, outcome);
+  write(ctx, g, map, outcome, run);
 }
 
 // ==================== start: IExecuteData from the input tokens ====================
@@ -600,7 +752,20 @@ function readyOf(g: NodeGadget, i: InputGadget) {
 }
 
 /** Consumes the start inputs and builds the node's `IExecuteData`, refunding the join slots. */
+/**
+ * The tool form's input side: one dispatch token, which carries the activation n8n's own
+ * `addNodeToBeExecuted` built *and* the agent that asked for it. The agent travels on the token
+ * because a tool can serve several agents and `T_run`'s success is an `xor` over their
+ * `A/response` places.
+ */
+function startInputTool(ctx: TransitionContext, g: NodeGadget): DispatchPayload {
+  const v = ctx.input(g.inTool!);
+  if (!isDispatchPayload(v)) throw new Error(`node '${g.node}': unexpected token on '${g.inTool!.name}'`);
+  return v;
+}
+
 function startInput(ctx: TransitionContext, env: ExecutionEnv, g: NodeGadget, map: NetMapView): IExecuteData {
+  if (g.form === 'tool') return startInputTool(ctx, g).executionData;
   if (g.form === 'direct') {
     const v = ctx.input(g.in!);
     if (isEntryPayload(v)) return v.executionData;
@@ -641,10 +806,20 @@ function startAction(g: NodeGadget, map: NetMapView, unmetReference?: string): T
   return async (ctx) => {
     const env = envOf(ctx);
     env.state.starts.set(g.node, (env.state.starts.get(g.node) ?? 0) + 1);
-    const executionData = startInput(ctx, env, g, map);
+    // The tool form consumes a dispatch token that names the agent it answers to, so the run
+    // can route its success back to the right `A/response`.
+    let executionData: IExecuteData;
+    let round: { agent?: string; roundId?: string } = {};
+    if (g.form === 'tool') {
+      const dispatch = startInputTool(ctx, g);
+      executionData = dispatch.executionData;
+      round = { agent: dispatch.agent, roundId: dispatch.roundId };
+    } else {
+      executionData = startInput(ctx, env, g, map);
+    }
     const payload: RunPayload = unmetReference === undefined
-      ? { executionData, attempt: 0 }
-      : { executionData, attempt: 0, unmetReference };
+      ? { executionData, attempt: 0, ...round }
+      : { executionData, attempt: 0, unmetReference, ...round };
     ctx.output(g.running, payload);
   };
 }
@@ -658,7 +833,7 @@ function runAction(g: NodeGadget, map: NetMapView): TransitionAction {
     state.inFlight++;
     if (state.inFlight > state.maxInFlight) state.maxInFlight = state.inFlight;
     try {
-      await guarded(ctx, g, map, payload.executionData, () => attempt(envOf(ctx), g, payload));
+      await guarded(ctx, g, map, payload.executionData, () => attempt(envOf(ctx), g, payload), payload);
     } finally {
       state.inFlight--;
     }
@@ -669,7 +844,110 @@ function runAction(g: NodeGadget, map: NetMapView): TransitionAction {
 function exhaustedAction(g: NodeGadget, map: NetMapView): TransitionAction {
   return async (ctx) => {
     const payload = ctx.input(g.retry!) as RetryPayload;
-    await guarded(ctx, g, map, payload.executionData, () => exhaust(envOf(ctx), payload));
+    await guarded(ctx, g, map, payload.executionData, () => exhaust(envOf(ctx), payload),
+      { executionData: payload.executionData, attempt: payload.attempt, agent: payload.agent, roundId: payload.roundId });
+  };
+}
+
+// ==================== the agent round ====================
+
+/**
+ * `A_done_req`: the round opens — with the queue when there is something to dispatch, or
+ * already drained for an empty request, in which case `A_resume` fires next and the agent
+ * re-runs with an empty `EngineResponse`. No count is deposited: the number of tool calls is
+ * discovered by `A_dispatch` firing, one budget unit at a time.
+ */
+function doneRequestAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  return async (ctx) => {
+    const payload = ctx.input(g.routedRequest!) as RequestPayload;
+    ctx.output(map.shared.budget, null);
+    const round: RoundPayload = { kind: 'round', resume: payload.resume, roundId: payload.roundId };
+    ctx.output(g.dispatched!, round);
+    if (payload.pending.length === 0) ctx.output(g.drained!, null);
+    else ctx.output(g.queue!, payload);
+  };
+}
+
+/**
+ * `A_dispatch`: the head of the queue onto its tool's `T/in_tool`, the tail back onto
+ * `A/queue`, one unit onto `A/outstanding`.
+ *
+ * One firing per action, in request order, because `A/queue` holds a single token. n8n's own
+ * `executes requested tools in the order the actions were requested` is what that preserves;
+ * the tools then run at whatever width `_budget` allows, which is where this differs from a
+ * stack that runs them one at a time.
+ */
+function dispatchAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  return async (ctx) => {
+    const payload = ctx.input(g.queue!) as RequestPayload;
+    const [head, ...tail] = payload.pending;
+    if (head === undefined) {
+      throw new Error(`internal: agent '${g.node}' dispatched with an empty queue; the queue token should have been drained`);
+    }
+    const target = map.node(head.node.name);
+    if (target.inTool === null) {
+      throw new Error(`internal: agent '${g.node}' dispatched to '${head.node.name}', which is not a tool`);
+    }
+    const dispatch: DispatchPayload = {
+      kind: 'dispatch', executionData: head, agent: g.node, roundId: payload.roundId,
+    };
+    ctx.output(target.inTool, dispatch);
+    ctx.output(g.outstanding!, null);
+    // The one decision this action makes that the graph cannot: whether the queue has more.
+    // The graph explores both; see the gadget for why neither spurious branch can strand.
+    if (tail.length === 0) ctx.output(g.drained!, null);
+    else ctx.output(g.queue!, { ...payload, pending: tail });
+  };
+}
+
+/**
+ * `A_calls_out`: the tool-call budget is spent and the queue still holds actions. The agent
+ * re-enters `X_run` carrying the fact; `attempt()` then fails the activation with
+ * `toolCallBudgetExceeded` before `runNode`, so the error is recorded and routed under the
+ * node's `onError` policy exactly as `maxIterations` is when n8n's node throws it.
+ */
+function callsOutAction(g: NodeGadget): TransitionAction {
+  return async (ctx) => {
+    const round = ctx.input(g.dispatched!) as RoundPayload;
+    const queue = ctx.input(g.queue!) as RequestPayload;
+    const next: RunPayload = {
+      executionData: round.resume, attempt: 0, roundId: round.roundId,
+      toolCallsExceeded: { undispatched: queue.pending.length, budget: g.maxToolCalls ?? 0 },
+    };
+    ctx.output(g.running, next);
+  };
+}
+
+/**
+ * `A_resume`: nothing left to dispatch and nothing still out, so the agent re-enters `X_run`
+ * with the entry n8n built for it — `metadata.nodeWasResumed` suppresses the second
+ * `nodeExecuteBefore` hook and `metadata.subNodeExecutionData` is what
+ * `host.collectSubNodeResults` reads the round's `EngineResponse` back out of.
+ */
+function resumeAction(g: NodeGadget): TransitionAction {
+  return async (ctx) => {
+    const payload = ctx.input(g.dispatched!) as RoundPayload;
+    const next: RunPayload = { executionData: payload.resume, attempt: 0, roundId: payload.roundId };
+    ctx.output(g.running, next);
+  };
+}
+
+/**
+ * `A_rounds_out`: the agent has spent its round budget with a round still open, so nothing can
+ * resume it. The re-entry goes back through `X/stopped` with `ran: false` — the shape the codec
+ * already writes onto `nodeExecutionStack` for an activation that never ran — and `_pause` makes
+ * the run a designed stop rather than a silent quiesce.
+ */
+function roundsOutAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  return async (ctx) => {
+    const payload = ctx.input(g.dispatched!) as RoundPayload;
+    const env = envOf(ctx);
+    env.diagnostic(
+      `agent '${g.node}': round budget spent with a round still open; the re-entry and any ` +
+      'undispatched tool calls are written back to nodeExecutionStack');
+    const stopped: StoppedPayload = { executionData: payload.resume, ran: false };
+    ctx.output(g.stopped, stopped);
+    ctx.output(map.shared.pause, null);
   };
 }
 
@@ -723,6 +1001,13 @@ export function schedulerActions(): ActionBinder {
       case 'route': return routeAction(g, info);
       case 'retry': return retryWaitAction(g);
       case 'exhausted': return exhaustedAction(g, map);
+      case 'done-request': return doneRequestAction(g, map);
+      case 'dispatch': return dispatchAction(g, map);
+      case 'resume': return resumeAction(g);
+      case 'rounds-out': return roundsOutAction(g, map);
+      case 'calls-out': return callsOutAction(g);
+      // `collect` produces nothing (a genuine sink, CORE-043 AC4): pairing one response with
+      // one outstanding marker is the whole of its effect, and the marking is where it lands.
       default: return null;
     }
   };

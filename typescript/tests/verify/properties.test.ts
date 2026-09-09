@@ -321,33 +321,48 @@ describeZ3('verify: properties', () => {
       expect(report.counts.unknown).toBe(0);
     });
 
-    it('a truncated cyclic graph answers with its own bound, and does not spend a timeout on a refuted query', { timeout: CASE_TIMEOUT_MS }, async () => {
-      // The fallback for this family is one whole-net `deadlockFree` with the structural rest
-      // set as sinks — and on this net the graph has already exhibited a quiescent marking
-      // outside that sink set, so the query is false here and its `proven` (the only
-      // direction it could add) cannot come back. It is therefore not asked, and the row
-      // lands on the graph's own `bounded` prefix with a reason carrying both halves.
+    it('a truncated cyclic graph is proven by the fallback, which asks the graph\'s own question', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // The graph truncates on the cycle and can only bound. The fallback is one whole-net
+      // `deadlockFree` with the structural rest set as sinks and the pause / halt widenings as
+      // conditional sinks (VER-014) — the graph's classification as a property, so it is no
+      // longer false by construction here — asked with the state equation on (VER-016), which
+      // is what lets Spacer find the inductive invariant. Its `proven` is about every
+      // reachable marking, not the explored prefix, so the row is a proof and says so.
       const report = await verify(loopOverItems, {
-        ...base, timeoutMs: 4_000, maxClasses: 500, properties: ['proper-completion'],
+        ...base, timeoutMs: 10_000, maxClasses: 500, properties: ['proper-completion'],
+      });
+      const whole = checksOf(report, 'proper-completion').find((c) => c.subject.kind === 'net')!;
+      expect(whole.verdict, digest(report)).toBe('proven');
+      expect(whole.query.property).toBe('deadlock-free');
+      expect(whole.query.route).toBe('smt');
+      expect(whole.query.conditionalSinks).toHaveLength(2);
+      expect(whole.explanation).toMatch(/The solver proved it/);
+      expect(whole.explanation).toMatch(/without closing/);
+      expect(report.counts.bounded).toBe(0);
+      for (const c of checksOf(report, 'proper-completion')) {
+        expect(c.verdict, `${c.name}: ${digest(report)}`).toBe('proven');
+      }
+    });
+
+    it('with the SMT route off, a truncated cyclic graph answers with its own bound', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // Without the fallback the graph's `bounded` prefix is all there is, and the reason
+      // carries both halves: the cap that truncated it, and why z3 was not consulted.
+      const report = await verify(loopOverItems, {
+        ...base, timeoutMs: 4_000, maxClasses: 500, properties: ['proper-completion'], smtFallback: 'off',
       });
       const whole = checksOf(report, 'proper-completion').find((c) => c.subject.kind === 'net')!;
       expect(whole.verdict, digest(report)).toBe('bounded');
       expect(whole.query.property).toBe('deadlock-free');
-      expect(whole.query.route).not.toBe('smt');
+      expect(whole.query.route).toBe('state-class-graph');
       expect(whole.reason).toMatch(/500-class cap/);
-      expect(whole.reason).toMatch(/deadlockFree fallback \(VER-002, structural rest set as sinks\) was not asked/);
-      expect(whole.reason).toMatch(/can never return proven/);
+      expect(whole.reason).toMatch(/SMT route is off/);
       expect(whole.reason).toMatch(/not a proof/);
       // Nothing borrows a proof from the truncated prefix: every row the *graph* decides is
-      // `bounded`. The one row the solver still closes is the structural join-slot bound —
-      // a `placeBound`, not a reachability question, so it is sound on a truncated graph.
+      // `bounded`, and no row is proven — the join-slot bound the solver used to close is a
+      // z3 question too.
       for (const c of checksOf(report, 'proper-completion')) {
-        if (c.query.route === 'smt') continue;
-        expect(c.verdict, `${c.name}: ${digest(report)}`).toBe('bounded');
+        expect(c.verdict, `${c.name}: ${digest(report)}`).not.toBe('proven');
       }
-      expect(checksOf(report, 'proper-completion')
-        .filter((c) => c.verdict === 'proven')
-        .map((c) => c.subject.kind), digest(report)).toEqual(['join-input']);
     });
 
     it('an acyclic workflow whose graph truncates has nothing to bound, and stays unknown — with the query really asked', { timeout: CASE_TIMEOUT_MS }, async () => {
@@ -432,13 +447,13 @@ describeZ3('verify: properties', () => {
     it('carries the solver-free route\'s own numbers, so a truncation is visible in the JSON', { timeout: CASE_TIMEOUT_MS }, async () => {
       const report = await verify(diamond, { ...base, properties: ['proper-completion'] });
       // Re-measured with the collapsed outcome (ADR 0004): 393 with X/ok + X_route per node.
-      expect(report.stateSpace.classes).toBe(330);
+      expect(report.stateSpace.classes).toBe(306);
       expect(report.stateSpace.complete).toBe(true);
       // `requestedMaxClasses` is the constant the caller did not override; `maxClasses` is that
       // lowered to what *this* heap can hold, because only a memory bound stops a V8 heap
       // exhaustion from aborting the process (`effectiveMaxClasses`). Pinning it to 200 000
       // pins the runner's memory: a GitHub runner's ~2.35 GB heap reports 140 928, and the
-      // graph still closes at 330 well inside it. The lowering itself is covered at fixed heap
+      // graph still closes at 306 well inside it. The lowering itself is covered at fixed heap
       // sizes in `state-class.test.ts`.
       expect(report.stateSpace.requestedMaxClasses).toBe(DEFAULT_MAX_CLASSES);
       expect(report.stateSpace.maxClasses).toBe(effectiveMaxClasses(DEFAULT_MAX_CLASSES));

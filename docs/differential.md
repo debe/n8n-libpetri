@@ -105,10 +105,10 @@ The sweep contains 23 workflows and runs each at budgets 1, 2 and 4.
 
 | Budget | Pass | Registered divergence | Fail |
 |---:|---:|---:|---:|
-| 1 | 19 | 4 | 0 |
-| 2 | 15 | 8 | 0 |
-| 4 | 15 | 8 | 0 |
-| **Total** | **49** | **20** | **0** |
+| 1 | 21 | 4 | 0 |
+| 2 | 17 | 8 | 0 |
+| 4 | 17 | 8 | 0 |
+| **Total** | **55** | **20** | **0** |
 
 The divergent fixtures exercise these cases:
 
@@ -122,6 +122,21 @@ The divergent fixtures exercise these cases:
 | `complicatedMulti` | 2,4 | Independent activations moved |
 | `haltInFlight` | 2,4 | Sibling completed inside the halt window |
 | `webhookRespond` | 2,4 | Respond node was already in flight |
+
+The two agent fixtures are the newest, and the only ones whose concurrency the workflow does not
+supply. `agentRound` has one agent ask for two tools at once: n8n pushes them onto a single stack
+and runs them one at a time, while the net gives each its own budget unit — so it is the one
+fixture that overlaps at k = 2 purely because of the model. Both engines still agree exactly, at
+every budget: data equal, happens-before respected, order equal. Two things make that possible
+and neither is the scheduler's doing — `initializeNodeRunData` reserves each tool's run index at
+plan time, so completion order cannot decide which slot a tool writes; and `A/queue` holds a
+single token, so dispatch stays in request order however wide the tools then run.
+
+The happens-before model excludes one edge kind for them. A dispatched `ai_tool` activation's
+`source` names the agent, but the agent *asked* for it rather than feeding it, and the asking and
+answering activations share a run index — so `finish(agent) < start(tool)` is false in n8n too.
+`initializeNodeRunData` marks exactly those runs with a non-`main` `inputOverride`, and the differ
+reads that rather than guessing.
 
 `multiProducer`, `destinationStop`, `ifBothOutputs`, `loopOverItems` and `userCycle` are lowered
 to an effective budget of one by the compiler's current k-safety rule. Their presence

@@ -6,7 +6,10 @@ export { PetriScheduler, type PetriSchedulerOptions, type SchedulerOutcome } fro
 export { ENGINE_ENTERED_DIAGNOSTIC, registerPetriScheduler, type RegisterPetriSchedulerOptions, type PetriSchedulerRegistration } from './register.js';
 export { CompiledWorkflowCache } from './cache.js';
 export { schedulerActions, ENV_KEY, type ExecutionEnv, type SchedulerState } from './actions.js';
-export { SchedulerNodeError, UnmetReferenceError, UNMET_REFERENCE_MESSAGE_TEMPLATE, engineRequestUnsupported } from './errors.js';
+export {
+  SchedulerNodeError, UnmetReferenceError, UNMET_REFERENCE_MESSAGE_TEMPLATE, engineRequestUnsupported,
+  toolCallBudgetExceeded,
+} from './errors.js';
 export type {
   EdgePayload, EntryPayload, InputPayload, OkPayload, RetryPayload, RetryReason, RunPayload, StoppedPayload,
   WaitingPayload,

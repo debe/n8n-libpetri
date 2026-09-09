@@ -17,6 +17,10 @@ export interface RegisterPetriSchedulerOptions {
   readonly StackScheduler: new () => WorkflowScheduler;
   /** Concurrency budget `k`. Default 1. */
   readonly budget?: number;
+  /** An agent's round budget when its `options.maxIterations` cannot be read statically. Default 10. */
+  readonly maxAgentRounds?: number;
+  /** An agent's tool-call budget per execution unless the workflow declares `options.maxToolCalls`. Default 8. */
+  readonly maxAgentToolCalls?: number;
   readonly eventStore?: EventStore;
   /** LRU capacity of the shared compiled-workflow cache. Default 16. */
   readonly cacheCapacity?: number;
@@ -56,6 +60,8 @@ export function registerPetriScheduler(options: RegisterPetriSchedulerOptions): 
       nodeHelpers: options.nodeHelpers,
       legacy: () => new options.StackScheduler(),
       budget: options.budget ?? 1,
+      ...(options.maxAgentRounds === undefined ? {} : { maxAgentRounds: options.maxAgentRounds }),
+      ...(options.maxAgentToolCalls === undefined ? {} : { maxAgentToolCalls: options.maxAgentToolCalls }),
       cache,
       ...(options.eventStore === undefined ? {} : { eventStore: options.eventStore }),
       ...(options.onDiagnostic === undefined ? {} : { onDiagnostic: options.onDiagnostic }),

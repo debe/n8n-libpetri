@@ -30,9 +30,12 @@ import type { Place } from 'libpetri';
 import { compile } from '../../src/compiler/index.js';
 import type { WorkflowDescription } from '../../src/compiler/index.js';
 import {
-  chooseBranch, diamond, fanOut, ifBothOutputs, linear, loopOverItems, multiProducer, switch20, userCycle,
+  agentOneTool, agentTwoTools, chooseBranch, diamond, fanOut, ifBothOutputs, linear, loopOverItems,
+  multiProducer, switch20, userCycle,
 } from '../fixtures/workflows.js';
-import { REST_ROLES, markingStateOf, verify } from '../../src/verify/index.js';
+import { HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES, markingStateOf, verify } from '../../src/verify/index.js';
+import type { PlaceRole } from '../../src/compiler/types.js';
+import type { CompiledWorkflow } from '../../src/compiler/index.js';
 import type { VerificationReport } from '../../src/verify/index.js';
 import { generateChain, generateFanOut } from './support.js';
 
@@ -48,6 +51,8 @@ const FIXTURES: ReadonlyArray<readonly [string, WorkflowDescription]> = [
   ['wide8', generateFanOut(8, 'wide-8')],
   ['switch20', switch20],
   ['loopOverItems', loopOverItems],
+  ['agentOneTool', agentOneTool],
+  ['agentTwoTools', agentTwoTools],
 ];
 
 function table(rows: readonly (readonly string[])[]): string {
@@ -81,6 +86,12 @@ function strandedSummary(report: VerificationReport): string {
     .join(' + ');
 }
 
+
+/** The places a marker admits beyond the rest set (the pause filter as VER-014 conditional sinks). */
+function widened(compiled: CompiledWorkflow, roles: ReadonlySet<PlaceRole>): Place<unknown>[] {
+  return compiled.netMap.places.filter((p) => roles.has(p.role) && !REST_ROLES.has(p.role)).map((p) => p.place);
+}
+
 async function smtFallback(
   workflow: WorkflowDescription, timeoutMs: number,
 ): Promise<{ verdict: string; ms: number; witness: string }> {
@@ -94,6 +105,9 @@ async function smtFallback(
     .timeout(timeoutMs)
     .property(deadlockFree())
     .sinkPlaces(...sinks)
+    .sinkPlacesWhen(compiled.netMap.shared.pause, ...widened(compiled, PAUSE_REST_ROLES))
+    .sinkPlacesWhen(compiled.netMap.shared.halt, ...widened(compiled, HALT_REST_ROLES))
+    .stateEquation(true)
     .verify();
   const elapsed = performance.now() - started;
   const last = result.counterexampleTrace[result.counterexampleTrace.length - 1];
@@ -186,22 +200,26 @@ async function main(): Promise<void> {
         const r = await smtFallback(workflow, timeoutMs);
         const report = reports.get(label)!;
         const graphDecided = completionVerdict(report) !== 'TRUNCATED';
-        // Since M5 the query is asked only where the graph neither closed nor refuted the
-        // query itself: a reachable quiescent marking outside the sink set makes
-        // `deadlockFree` false on that net, so its `proven` can never come back. Note that a
-        // `bounded` row did *not* close — it is a truncated cyclic graph that still said
-        // something — so the completeness flag, not the verdict, decides this column.
+        // The query is asked wherever the graph did not close (since the pause / halt
+        // widenings are declared as conditional sinks the question is the graph's own, and
+        // the gate that skipped it on a refuted net is gone). A `bounded` row did *not*
+        // close — it is a truncated cyclic graph that still said something — so the
+        // completeness flag, not the verdict, decides this column.
         const asked = report.checks.some((c) => c.property === 'proper-completion' && c.query.route === 'smt')
           ? 'yes'
-          : report.stateSpace.complete ? 'no (the graph closed)' : 'no (the graph refuted it)';
-        const useful = r.verdict === 'unknown' || r.witness !== 'a stranding'
-          ? 'no'
-          : graphDecided ? 'no (the graph decided it too)' : 'YES';
+          : report.stateSpace.complete ? 'no (the graph closed)' : 'no';
+        // A `proven` on a graph that did not close, or a stranding the graph did not reach,
+        // is a decision the graph could not make.
+        const useful = r.verdict === 'proven'
+          ? (report.stateSpace.complete ? 'no (the graph closed)' : 'YES')
+          : r.verdict === 'unknown' || r.witness !== 'a stranding'
+            ? 'no'
+            : graphDecided ? 'no (the graph decided it too)' : 'YES';
         smtRows.push([label, r.verdict, ms(r.ms), r.witness, useful, asked]);
         process.stderr.write(`${label}: deadlockFree -> ${r.verdict} in ${ms(r.ms)} ${r.witness}\n`);
       }
       process.stdout.write(
-        `### The SMT fallback: one whole-net deadlockFree, rest set as sinks (timeout ${timeoutMs} ms)\n\n` +
+        `### The SMT fallback: one whole-net deadlockFree, rest set as sinks, pause / halt widenings as conditional sinks, state equation on (timeout ${timeoutMs} ms)\n\n` +
         `${table(smtRows)}\n\n`);
     }
   }

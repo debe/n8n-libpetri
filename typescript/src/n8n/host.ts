@@ -19,6 +19,21 @@ import type {
 } from 'n8n-workflow';
 
 /** The members of `WorkflowExecute` a scheduler drives (patch 0001, `SchedulerHost`). */
+/**
+ * One entry of n8n's `NodeToBeExecuted` (`requests-response.ts`), structurally. Fed straight
+ * back to {@link SchedulerHost.addNodeToBeExecuted} so n8n's own construction builds the
+ * `IExecuteData` and nothing about `data`, `source`, `runIndex` or `metadata` is mirrored here.
+ */
+export interface PlannedNode {
+  readonly inputConnectionData: IConnection;
+  readonly parentOutputIndex: number;
+  readonly parentNode: string;
+  readonly parentOutputData: INodeExecutionData[][];
+  readonly runIndex: number;
+  readonly nodeRunIndex: number;
+  readonly metadata?: ITaskMetadata;
+}
+
 export interface SchedulerHost {
   readonly additionalData: IWorkflowExecuteAdditionalData;
   readonly mode: WorkflowExecuteMode;
@@ -51,6 +66,27 @@ export interface SchedulerHost {
   ensureInputData(workflow: Workflow, executionNode: INode, executionData: IExecuteData): boolean;
   getPinnedOutput(node: INode): INodeExecutionData[][] | undefined;
   getRetryParams(executionData: IExecuteData): [number, number];
+  /**
+   * n8n's `handleRequest` (`requests-response.ts`) **without** the stack push: the planned tool
+   * activations plus the agent's own re-entry, in the order `handleEngineRequest` would have
+   * added them. It reserves each tool's `runData` slot, tags `node.rewireOutputLogTo` and builds
+   * the `preservedSourceOverwrite` metadata, so reusing it is what keeps every `IExecuteData`
+   * byte-identical to the stack scheduler's.
+   *
+   * Returns `[]` when the parent node cannot be found, exactly as n8n does, and the caller then
+   * treats the request as producing no output rather than opening a round.
+   *
+   * The net decides *when* these run; the host only builds them.
+   */
+  planEngineRequest(args: {
+    workflow: Workflow;
+    currentNode: INode;
+    request: EngineRequest;
+    runIndex: number;
+    executionData: IExecuteData;
+    runData: IRunData;
+  }): PlannedNode[];
+
   handleEngineRequest(args: {
     workflow: Workflow;
     currentNode: INode;

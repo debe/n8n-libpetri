@@ -19,6 +19,7 @@
  */
 import type {
   EngineRequest, EngineResponse, ExecutionBaseError, IConnection, IExecuteData, INode, INodeExecutionData,
+  IRunData,
   IRunExecutionData, IRunNodeResponse, ITaskDataConnections, ITaskMetadata, Workflow,
 } from 'n8n-workflow';
 import type { ExecutionDataState, SchedulerHooks, SchedulerHost, WorkflowScheduler } from '../n8n/host.js';
@@ -71,6 +72,36 @@ export class ReferenceHost extends FakeHost {
     for (let i = 0; i < numberOfConnections; i++) {
       nodeWaiting[runIndex]!.main.push(null);
       nodeWaitingSource[runIndex]!.main.push(null);
+    }
+  }
+
+  /**
+   * `handleEngineRequest` (`workflow-execute.ts:1581-1617`): the plan, then one
+   * `addNodeToBeExecuted` per entry. `FakeHost` only records the call, because the
+   * `PetriScheduler` must never reach it — the net decides when a round's activations run —
+   * so the reference engine is the only thing that turns the scheduling half on.
+   *
+   * With it, the differ can run an agent workflow on both engines and compare: n8n's stack
+   * against the net's round.
+   */
+  override handleEngineRequest(args: {
+    workflow: Workflow;
+    currentNode: INode;
+    request: EngineRequest;
+    runIndex: number;
+    executionData: IExecuteData;
+    runData: IRunData;
+  }): void {
+    if (!this.enqueueEnabled) {
+      super.handleEngineRequest(args);
+      return;
+    }
+    this.calls.push(`handleEngineRequest(${args.currentNode.name})`);
+    for (const e of this.planEngineRequest(args)) {
+      this.addNodeToBeExecuted(
+        args.workflow, e.inputConnectionData, e.parentOutputIndex, e.parentNode,
+        e.parentOutputData, e.runIndex, e.nodeRunIndex, e.metadata,
+      );
     }
   }
 

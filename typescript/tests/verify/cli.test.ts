@@ -236,12 +236,36 @@ describeZ3('verify CLI runs', () => {
     expect(strict.err).toMatch(/are not proven/);
   });
 
-  it('a cyclic workflow reports BOUNDED: exit 0 plain, exit 1 under --strict', { timeout: CASE_TIMEOUT_MS }, async () => {
+  it('a cyclic workflow is proven by the SMT fallback: exit 0 plain and under --strict', { timeout: CASE_TIMEOUT_MS }, async () => {
+    // The graph truncates on the cycle and can only bound; the fallback asks the graph's own
+    // question (rest set as sinks, pause / halt widenings as conditional sinks) with the state
+    // equation on and proves it, so the gate that wants proofs passes too.
+    const argv = ['verify', 'wf.json', '--property', 'proper-completion', '--max-classes', '2000',
+      '--timeout', '10000', '--quiet', '--json'];
+    const plain = io({ 'wf.json': CYCLE_JSON });
+    expect(await runCli(argv, plain), plain.err).toBe(0);
+    const report = JSON.parse(plain.out) as {
+      counts: Record<string, number>;
+      stateSpace: { complete: boolean; truncation: string | null };
+      checks: Array<{ verdict: string; subject: { kind: string }; query: { route: string } }>;
+    };
+    expect(report.stateSpace.complete).toBe(false);
+    expect(report.stateSpace.truncation).toBe('cycle');
+    const whole = report.checks.find((c) => c.subject.kind === 'net')!;
+    expect(whole.verdict).toBe('proven');
+    expect(whole.query.route).toBe('smt');
+    expect(report.counts.bounded).toBe(0);
+
+    const strict = io({ 'wf.json': CYCLE_JSON });
+    expect(await runCli([...argv, '--strict'], strict), strict.err).toBe(0);
+  });
+
+  it('a cyclic workflow reports BOUNDED with the SMT route off: exit 0 plain, exit 1 under --strict', { timeout: CASE_TIMEOUT_MS }, async () => {
     // The verdict item D exists for. It is not a finding — the plain run passes — and it is
     // not a proof either, so the gate that wants proofs fails on it and says which counts
     // are not proven.
     const argv = ['verify', 'wf.json', '--property', 'proper-completion', '--max-classes', '2000',
-      '--timeout', '1000', '--quiet', '--json'];
+      '--timeout', '1000', '--smt-fallback', 'off', '--quiet', '--json'];
     const lenient = io({ 'wf.json': CYCLE_JSON });
     expect(await runCli(argv, lenient), lenient.err).toBe(0);
     const report = JSON.parse(lenient.out) as {

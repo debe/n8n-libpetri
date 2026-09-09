@@ -1,7 +1,7 @@
-From a4f4e7cb923ada3edc7c1fc4b3969a54a3d2a2a4 Mon Sep 17 00:00:00 2001
-From: Dennis Berger <dbgh@knownhosts.org>
-Date: Sat, 5 Sep 2026 14:22:27 +0200
-Subject: [PATCH] refactor(core): Make the workflow scheduler pluggable
+From dc1cb70cbf05b2947f4893ab168922b36a2aa9ec Mon Sep 17 00:00:00 2001
+From: Dennis Berger <theabyssinspace@gmail.com>
+Date: Tue, 8 Sep 2026 09:45:15 +0200
+Subject: [PATCH 2/2] refactor(core): Make the workflow scheduler pluggable
  (no-changelog)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -77,7 +77,7 @@ index 00000000..bc50e933
 +	factory = defaultFactory;
 +}
 diff --git a/packages/core/src/execution-engine/workflow-execute.ts b/packages/core/src/execution-engine/workflow-execute.ts
-index 0504e7f9..830fad3c 100644
+index 8bf386e4..cdd2a2f3 100644
 --- a/packages/core/src/execution-engine/workflow-execute.ts
 +++ b/packages/core/src/execution-engine/workflow-execute.ts
 @@ -90,7 +90,7 @@ import {
@@ -89,7 +89,7 @@ index 0504e7f9..830fad3c 100644
  import { TriggersAndPollers } from './triggers-and-pollers';
  import { convertBinaryData } from '../utils/convert-binary-data';
  
-@@ -2227,7 +2227,7 @@ export class WorkflowExecute {
+@@ -2262,7 +2262,7 @@ export class WorkflowExecute {
  		this.checkForWorkflowIssues(workflow);
  		this.handleWaitingState(workflow);
  

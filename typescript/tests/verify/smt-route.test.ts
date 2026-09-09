@@ -78,27 +78,31 @@ describe('the SMT route is refused above the measured size ceiling', () => {
   });
 });
 
-describe('the whole-net deadlockFree fallback is not asked when the graph has already refuted it', () => {
-  it('a truncated cyclic graph skips it, and says why instead of blaming the solver', { timeout: CASE_TIMEOUT_MS }, async () => {
+describe('the whole-net deadlockFree fallback asks the graph\'s own question (VER-014)', () => {
+  it('a truncated cyclic graph asks it, declaring the pause and halt widenings as conditional sinks', { timeout: CASE_TIMEOUT_MS }, async () => {
     const report = await verify(loopOverItems, {
       properties: ['proper-completion'], maxClasses: 2_000, timeoutMs: TEST_TIMEOUT_MS,
     });
     const whole = wholeNet(report);
-    // The graph reached quiescent markings holding a place outside the declared sink set —
-    // designed terminals, but the sink clause cannot tell them apart — so VER-002's error
-    // condition is satisfied on this net and the query can only ever answer `violated` or
-    // `unknown`. Asking it would spend the whole timeout to learn nothing.
-    expect(whole.query.route).not.toBe('smt');
-    expect(whole.reason).toContain('was not asked');
-    expect(whole.reason).toContain('can never return proven');
-    expect(whole.reason).not.toContain('did not decide it either');
-    expect(whole.elapsedMs).toBeLessThan(TEST_TIMEOUT_MS);
+    // The graph reached quiescent markings holding a place outside the plain rest set —
+    // designed terminals. Until libpetri could express the widening that made the VER-002
+    // question false by construction and it was skipped here. Now the widenings are declared
+    // (`sinkPlacesWhen`), the question is the graph's own, it is asked — with the state
+    // equation on — and it is proven; the row records the declaration so a reader can see
+    // which sinks each marker admits.
+    expect(whole.verdict).toBe('proven');
+    expect(whole.query.route).toBe('smt');
+    expect(whole.query.conditionalSinks.map((c) => c.marker).sort()).toEqual(['_halt', '_pause']);
+    const pause = whole.query.conditionalSinks.find((c) => c.marker === '_pause')!;
+    const halt = whole.query.conditionalSinks.find((c) => c.marker === '_halt')!;
+    expect(pause.places.some((p) => p.endsWith('/in'))).toBe(true);
+    for (const p of pause.places) expect(halt.places).toContain(p);
+    expect(whole.reason ?? '').not.toContain('was not asked');
   });
 
   it('a graph that has *not* refuted it still asks: the question is real there', { timeout: CASE_TIMEOUT_MS }, async () => {
-    // switch20 truncates with six quiescent classes, all of them inside the rest set, so
-    // nothing the graph saw makes `deadlockFree` false — and the fallback runs. The gate is
-    // evidence-driven, not a blanket "never ask".
+    // switch20 truncates with six quiescent classes, all of them inside the rest set; the
+    // fallback runs here as everywhere the graph did not close.
     const report = await verify(switch20, {
       properties: ['proper-completion'], maxClasses: 500, timeoutMs: 100, smtFallback: 'force',
     });

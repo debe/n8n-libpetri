@@ -44,7 +44,7 @@
  */
 import { scanExpressionReferences, LOOP_NODE_TYPES } from '../n8n/adapter.js';
 import type {
-  MainConnection, NodeDescription, NodeTypeShape, OnError, WorkflowDescription,
+  MainConnection, NodeDescription, NodeTypeShape, OnError, ToolConnection, WorkflowDescription,
 } from '../compiler/index.js';
 
 /** The node-type shapes a `--node-types` file may carry. Both maps are optional. */
@@ -122,22 +122,31 @@ function asRecord(v: unknown, what: string): Record<string, unknown> {
   return v as Record<string, unknown>;
 }
 
-/** `connections` in n8n's export shape: `{ "<from>": { "main": [ [ {node,type,index} ] ] } }`. */
+/**
+ * `connections` in n8n's export shape: `{ "<from>": { "main": [ [ {node,type,index} ] ] } }`.
+ *
+ * Also reads the `ai_tool` key, which n8n stores on the same map keyed *from the tool into the
+ * agent*. It has to: the compiled net gives an agent a dispatch arm per `ai_tool` connection,
+ * so a verifier that read only `main` would analyse a net without the agent's round — a
+ * different net from the one the scheduler runs, reported with the same confidence. One net
+ * serves execution and verification, and that includes this path.
+ */
 export function connectionsOf(raw: unknown, names: ReadonlySet<string>): {
-  connections: MainConnection[]; warnings: string[];
+  connections: MainConnection[]; toolConnections: ToolConnection[]; warnings: string[];
 } {
   const connections: MainConnection[] = [];
+  const toolConnections: ToolConnection[] = [];
   const warnings: string[] = [];
-  if (raw === undefined || raw === null) return { connections, warnings };
+  if (raw === undefined || raw === null) return { connections, toolConnections, warnings };
   const byNode = asRecord(raw, 'connections');
   for (const [from, value] of Object.entries(byNode)) {
     if (!names.has(from)) {
       warnings.push(`connections list '${from}', which is not a node of this workflow; dropped`);
       continue;
     }
-    const main = asRecord(value ?? {}, `connections['${from}']`)['main'];
-    if (!Array.isArray(main)) continue;
-    main.forEach((targets, outputIndex) => {
+    const byType = asRecord(value ?? {}, `connections['${from}']`);
+    const main = byType['main'];
+    if (Array.isArray(main)) main.forEach((targets, outputIndex) => {
       if (!Array.isArray(targets)) return;
       for (const t of targets) {
         if (typeof t !== 'object' || t === null) continue;
@@ -154,8 +163,27 @@ export function connectionsOf(raw: unknown, names: ReadonlySet<string>): {
         });
       }
     });
+    // `ai_tool`: the same map, but n8n keys it from the tool node into the agent, so `from` is
+    // the tool here. Every other `ai_*` type is resolved by `supplyData` inside `runNode` and
+    // never reaches a scheduler, so it is right to ignore them.
+    const aiTool = byType['ai_tool'];
+    if (!Array.isArray(aiTool)) continue;
+    for (const targets of aiTool) {
+      if (!Array.isArray(targets)) continue;
+      for (const t of targets) {
+        if (typeof t !== 'object' || t === null) continue;
+        const target = t as Record<string, unknown>;
+        if (target['type'] !== undefined && target['type'] !== 'ai_tool') continue;
+        const agent = target['node'];
+        if (typeof agent !== 'string' || !names.has(agent)) {
+          warnings.push(`ai_tool connection ${from} -> '${String(agent)}' names an unknown node; dropped`);
+          continue;
+        }
+        toolConnections.push({ agent, tool: from });
+      }
+    }
   }
-  return { connections, warnings };
+  return { connections, toolConnections, warnings };
 }
 
 function nodeDescriptionOf(raw: RawNode, index: number, used: Set<string>): NodeDescription {
@@ -311,8 +339,26 @@ export function describeWorkflowJson(raw: unknown, options: WorkflowJsonOptions 
   const description: WorkflowDescription = {
     ...(typeof id === 'string' ? { id } : {}),
     ...(typeof name === 'string' ? { name } : {}),
-    nodes,
+    nodes: nodes.map((n) => {
+      // The agent's round budget, where n8n keeps it. Only a literal counts: an expression is
+      // resolved per item at execution time, so the compiler falls back and marks the agent
+      // unbounded for verification rather than reporting a bound it guessed.
+      const options = parametersOf.get(n.name)?.['options'];
+      const literal = (key: string): number | undefined => {
+        const raw = typeof options === 'object' && options !== null
+          ? (options as Record<string, unknown>)[key] : undefined;
+        return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined;
+      };
+      const maxRounds = literal('maxIterations');
+      const maxToolCalls = literal('maxToolCalls');
+      return {
+        ...n,
+        ...(maxRounds === undefined ? {} : { maxRounds }),
+        ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
+      };
+    }),
     connections,
+    toolConnections: parsed.toolConnections,
     startNode,
     nodeTypes: (n) => shapes.get(n.name)!,
     expressionReferences: (n) => references.get(n.name) ?? [],

@@ -5,7 +5,147 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **libpetri 5.1.0 is the floor** (`^5.0.0` → `^5.1.0`, lock relocked). The verifier calls
+  `sinkPlacesWhen` [VER-014], `stateEquation` [VER-016], `enumerationMaxClasses` [VER-017] and
+  `semiflowInvariants('auto')`, reads `SmtVerificationResult.route`, and pins class counts that
+  hold only under the canonical state-class key. None of that is in 5.0.0, which the old range
+  admitted: against that copy every SMT query degrades to `unknown` rather than failing, so the
+  range expressed a compatibility claim nobody had checked. `verify()` now asserts the surface
+  at entry and refuses such an install by name. The suite is 869/869 against the **published**
+  5.1.0 tarball rather than a working-tree symlink, which is the configuration none of the
+  day's measurements had used.
+- **The semiflow union is asked for as `'auto'` on the query path.** libpetri unions the
+  P-semiflows only when the null-space basis lost a law to the H1 guard, deciding in one pass,
+  which is what this project measured its way to: the enumeration is worst-case exponential in
+  branching and on a branchy net it *is* the pipeline. Phases 1-3 on 81 nodes and 870 places
+  cost 135.1 s with the union forced on and **2.6 s** under `'auto'`, which skipped it and
+  returned 144 of the 145 invariants, the missing one having moved no verdict on any fixture.
+  `ifBothOutputs`, whose OR gadget loses a law to that guard, gets the union and its full 12.
+  The invariant-only run keeps asking for the union explicitly: it needs a law of a particular
+  *form* (non-negative over `_budget` and every `X/running`) and `'auto'` tests only for
+  deficiency, so under `'auto'` the budget family reported no such law on a net that has one.
+- **libpetri's bounded enumeration (VER-017) is switched off at both call sites.** It reads a
+  verdict off a state-class graph before the solver pipeline runs, which is the attempt this
+  package already makes first: `StateSpace` builds the same graph with a larger budget (200 000
+  against its 50 000) and the classification the report is built on. Since the SMT route runs
+  only where that graph did *not* close, a second enumeration under a smaller budget cannot
+  close either — it re-explores up to 50 000 classes per query and then declines. Measured with
+  it on: the test suite goes from 17 s to 101 s and the two-tool agent at `maxToolCalls` 64
+  from 1.5 s to 2.6 s. It also empties the report's structural section, because a verdict read
+  off the graph runs no P-invariant pipeline and `invariants` comes back empty. Enumeration now
+  happens once, in the route that classifies and reports it; `maxClasses` is how a caller asks
+  for more of it.
+- **The SMT proper-completion fallback asks the graph's own question.** libpetri VER-014
+  (`SmtVerifier.sinkPlacesWhen`) can declare a sink set that applies only while a marker holds
+  a token, so the whole-net `deadlockFree` query now declares the pause / halt widenings the
+  solver-free route always applied (`_pause` admits the pause rest set, `_halt` the halt rest
+  set). The "not asked when the graph has refuted it" gate is retired with the reason it gave,
+  the designed-terminal downgrade becomes a declaration-mismatch tripwire, and the query record
+  carries `conditionalSinks`, and the query runs with libpetri's state equation (VER-016,
+  `stateEquation(true)`) so the ordering laws its inductive invariant needs are facts in the
+  rule bodies rather than lemmas Spacer has to invent. `fanOut` is proven by the fallback in
+  0.2 s where it used to return a paused witness, and the two-tool agent at `maxToolCalls` 64 —
+  `unknown` at 120 s under the plain question — proves in 1.5 s. **`loopOverItems`, the cyclic
+  fixture the graph could only ever call `bounded`, is proven by the fallback in 0.5 s**, so a
+  full report on it reads `proven` and `--strict` passes; `--smt-fallback off` keeps the
+  graph's `bounded` (ADR 0007 §13). The whole-net row's explanation says which route proved it.
+- **State-class counts re-pinned under libpetri's canonical state-class key.** libpetri now
+  orders a class's clocks canonically and keys on the full DBM matrix, so one marking is one
+  class: `diamond` 330 → 306 (1094 → 963 at k = 2), `multiProducer` 218 → 211, `ifBothOutputs`
+  732 → 697, the two-tool agent at `maxToolCalls` 8 149 958 → 85 935. Verdicts unchanged.
+
+### Fixed
+- **A programming error inside a verification query is no longer reported as `unknown`.** The
+  catch in `query()` turns a failed query into an undecided verdict, which is right for a solver
+  that died and wrong for a bug: the two were indistinguishable once both were `unknown`, so a
+  `TypeError` — the shape a missing library method takes — would empty every proof from the
+  report while leaving it well-formed, with no crash and no failing build. `TypeError` and
+  `ReferenceError` now propagate; `RangeError` deliberately does not, since a stack overflow on
+  a deep net is the capacity limit `unknown` exists for. The same rule is applied to the
+  invariant-only run, whose catch was bare. Version skew was the instance that surfaced it; the
+  class is any bug in a verification path becoming a weaker verdict, so the rule is applied at
+  all four boundaries that convert a failure into "undecided": the query, the invariant run,
+  z3 resolution (a defect there made every report solver-free) and `StateSpace.explore` (a
+  defect there deleted the solver-free route from every report). libpetri found the same fault
+  five times in its own transports on the same reading.
+- **A stranding the SMT fallback finds is no longer discarded because the run also paused.**
+  The downgrade rule asked "does the witness hold any terminal role", which was right while the
+  query could not tell a designed terminal from a stranding. With the pause / halt widenings
+  declared as conditional sinks it is not: everything a marker excuses is already excused, so a
+  witness that still marks something outside the widened set is a real finding even when it
+  holds `_pause` — a workflow that pauses on one branch and strands another. The witness is now
+  classified exactly as the graph classifies a quiescent class, and only a witness the graph
+  would call a designed terminal outright is downgraded, as the declaration mismatch it would
+  be. Found by the 2026-09-09 review; pinned in both directions.
+- **The structural hash separates workflows by their `ai_tool` wiring and round budget** (v7 →
+  v8). The net cache is keyed by `(structural hash, budget)`, and neither fact is derivable from
+  the main graph, so two workflows differing only in which tools an agent is wired to shared one
+  compiled net. Found by the boundary review; no test was failing.
+- **A paused agent round survives a resume.** `decodeExecutionData` dropped a tool-form node's
+  stack entry silently — the form has no `inputs`, so the join branch iterated nothing — losing
+  every undispatched tool call. It now reassembles the round from the entries the encoder wrote.
+- **`FakeHost.collectSubNodeResults` is implemented**, so an agent in the differential harness
+  receives its own tool results. It was a stub, which meant a fixture agent had to count rounds
+  in a closure and the differ could not run an agent workflow at all.
+- **`n8n-libpetri verify` reads `ai_tool` connections** from a workflow JSON export. It read only
+  `main`, so an agent workflow was analysed as a net with no round — a different net from the one
+  the scheduler runs, reported with the same confidence.
+
 ### Added
+- **AI Agent tool dispatch runs in the net** (ADR 0008). `AgentV3` returns an `EngineRequest`
+  instead of data when its model wants a tool; that is now a fourth outcome of `X_run`, and a
+  round of tool calls is a marking rather than a stack. The compiler turns each `ai_tool`
+  connection into a dispatch arm, and a tool node is the ordinary per-node gadget with `T/in_tool`
+  as its input side and the dispatching agent's `A/response` as its success branch — so retries,
+  halts, HITL waits and `$('Tool')` references all work with no new machinery.
+
+  Three things follow that a stack cannot give:
+
+  - **Tool calls run concurrently.** n8n pushes an agent's tool calls onto one stack and runs them
+    one at a time; each dispatched tool here takes its own `_budget` unit, so two 500 ms tool calls
+    take ~500 ms. Tool *starts* still follow the order the model requested, because `A/queue` holds
+    one token and `A_dispatch` pops it once per scheduling cycle. Run data is identical at every
+    budget, structurally: `initializeNodeRunData` reserves each tool's `nodeRunIndex` at plan time.
+  - **A round survives a pause.** The undispatched tool calls, the dispatched-but-unstarted one and
+    the agent's re-entry are written back onto `nodeExecutionStack` in n8n's own shape — and
+    because the tokens carry the very `IExecuteData` values `handleRequest` produced, nothing is
+    reconstructed.
+  - **Agent workflows verify, for every round size up to a budget.** Two budgets bound the round
+    loop and nothing refunds either: `A/rounds`, seeded from the agent's own `options.maxIterations`,
+    and `A/calls`, a per-agent tool-call budget consumed one unit per dispatch. The second is what
+    makes the round *verifiable* — the number of tool calls is a count, an `Out` branch cannot carry
+    a count, and consumed one unit per firing the count becomes a path the state-class graph sees.
+    Proper completion **proven** solver-free on `agentOneTool` (1,730 classes, 35 ms) and
+    `agentTwoTools` (7,968 classes, 200 ms) at a declared `maxToolCalls` of 4, with
+    `peak(A/outstanding)` at the budget — the graph explores a round with every tool in flight — and
+    no existing verdict changed. An agent that declares no budget runs under the scheduler default
+    of 64 and verifies as truncated, cause `tool-calls`, with a report that names the agent, the
+    assumed number and the knob (`docs/verification.md`, "What an agent verdict covers").
+
+  Conformance against n8n's own suite goes from **35/44 loop-driving with an eight-case
+  restatement to 40/44 with none**, helpers back to 1613/1613 (and 2080/2080 across all of
+  `packages/core`). The four remaining regressions are all registered divergences.
+- **A per-agent tool-call budget** (`options.maxToolCalls` on the agent, else
+  `registerPetriScheduler({ maxAgentToolCalls })`, default 64). n8n has no such bound: `maxIterations`
+  caps rounds and a model may request any number of calls in one. Over budget, the agent fails with
+  `toolCallBudgetExceeded` under its own `onError`, the shape `maxIterations` has when n8n's node
+  throws it (divergence #25). The budget is also the width of a verification claim, and the one
+  truncation cause with a knob: `verify` reports `tool-calls` and says what to declare.
+- `planEngineRequest` on the scheduler seam (patch 0001): `handleEngineRequest` without the
+  `addNodeToBeExecuted` calls, so a scheduler that keeps its own representation of pending work
+  can have n8n *build* a round without anything being enqueued on the host.
+- Agent fixtures in the differential sweep (`agentRound`, `agentTwoRounds`): **data equal,
+  happens-before respected and order equal at k = 1, 2 and 4** against the reference stack loop.
+  `agentRound` is also the first fixture whose concurrency is the *model's* rather than the
+  workflow's — n8n runs an agent's tool calls one at a time, so the overlap the
+  budget-equivalence test now asserts at k = 2 exists only here.
+- `state-class.ts` refuses to build a graph for a net carrying a ν-net `matchSpec`. The plain
+  `StateClassGraph` never reads one, so it is libpetri's over-approximation fallback — sound for
+  reachability safety, **not** for quiescence (`nu-nets.md` §8), which is what
+  `proper-completion` asks. Nothing compiles a `matchSpec` today; this is the tripwire for
+  whoever adds the first.
+
 - Repository scaffold: TypeScript package skeleton, docs, spec and task layout, CI.
 - Architecture and model in `README.md`; net-native modelling principles in ADR 0001.
 - `compile(workflow)` (`n8n-libpetri/compiler`): turns an n8n workflow description into one

@@ -1,7 +1,7 @@
-From 7df6ac56943059abfb36d9c366149b10daaee889 Mon Sep 17 00:00:00 2001
-From: Dennis Berger <dbgh@knownhosts.org>
-Date: Sat, 5 Sep 2026 07:39:26 +0200
-Subject: [PATCH] refactor(core): Extract the execution loop into
+From 48618e04281ed6e60c11725cf8c6597db7d1a66b Mon Sep 17 00:00:00 2001
+From: Dennis Berger <theabyssinspace@gmail.com>
+Date: Tue, 8 Sep 2026 09:45:08 +0200
+Subject: [PATCH 1/2] refactor(core): Extract the execution loop into
  StackScheduler (no-changelog)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -28,12 +28,21 @@ them. `runExecutionData` stays private (the tests pin that) and is passed to
 waiting state, cancellation and the `.then/.catch/.finally` chain — is
 unchanged, and so is behaviour: the execution-engine suite produces the same
 1657 results.
+
+`planEngineRequest()` is the one member that is new rather than moved. It is
+`handleEngineRequest()` without the `addNodeToBeExecuted()` calls: the plan
+`handleRequest()` produces, returned instead of pushed onto
+`nodeExecutionStack`. A scheduler that keeps its own representation of pending
+work needs n8n to *build* an agent's tool round — the reserved run-data slots,
+the `rewireOutputLogTo` tag, the source-overwrite metadata — without deciding
+when any of it runs. `handleEngineRequest()` is unchanged and still what
+`StackScheduler` calls.
 ---
  packages/core/src/execution-engine/index.ts   |   2 +
- .../src/execution-engine/stack-scheduler.ts   | 520 ++++++++++++++++
- .../src/execution-engine/workflow-execute.ts  | 583 ++----------------
- .../execution-engine/workflow-scheduler.ts    |  69 +++
- 4 files changed, 630 insertions(+), 544 deletions(-)
+ .../src/execution-engine/stack-scheduler.ts   | 520 +++++++++++++++
+ .../src/execution-engine/workflow-execute.ts  | 618 +++---------------
+ .../execution-engine/workflow-scheduler.ts    |  70 ++
+ 4 files changed, 666 insertions(+), 544 deletions(-)
  create mode 100644 packages/core/src/execution-engine/stack-scheduler.ts
  create mode 100644 packages/core/src/execution-engine/workflow-scheduler.ts
 
@@ -580,7 +589,7 @@ index 00000000..8670a9f1
 +	}
 +}
 diff --git a/packages/core/src/execution-engine/workflow-execute.ts b/packages/core/src/execution-engine/workflow-execute.ts
-index f2204834..0504e7f9 100644
+index f2204834..8bf386e4 100644
 --- a/packages/core/src/execution-engine/workflow-execute.ts
 +++ b/packages/core/src/execution-engine/workflow-execute.ts
 @@ -5,7 +5,6 @@
@@ -622,16 +631,51 @@ index f2204834..0504e7f9 100644
  	/**
  	 * Executes the given workflow.
  	 *
-@@ -1573,7 +1578,7 @@ export class WorkflowExecute {
+@@ -1573,7 +1578,42 @@ export class WorkflowExecute {
  	 *
  	 * Make sure to continue the execution loop after calling this function.
  	 */
 -	private handleEngineRequest({
++	/**
++	 * The same plan {@link handleEngineRequest} makes, returned instead of scheduled.
++	 *
++	 * A scheduler that keeps its own representation of pending work — rather than this class's
++	 * `nodeExecutionStack` — still needs n8n to *build* the round: `handleRequest` reserves each
++	 * requested node's run-data slot, tags `rewireOutputLogTo` and derives the source overwrite
++	 * metadata. It decides nothing about when any of it runs, which is the scheduler's business.
++	 *
++	 * `handleEngineRequest` is this plus `addNodeToBeExecuted` per entry.
++	 */
++	planEngineRequest({
++		workflow,
++		currentNode,
++		request,
++		runIndex,
++		executionData,
++		runData,
++	}: {
++		workflow: Workflow;
++		currentNode: INode;
++		request: EngineRequest;
++		runIndex: number;
++		executionData: IExecuteData;
++		runData: IRunData;
++	}) {
++		return handleRequest({
++			workflow,
++			currentNode,
++			request,
++			runIndex,
++			executionData,
++			runData,
++		}).nodesToBeExecuted;
++	}
++
 +	handleEngineRequest({
  		workflow,
  		currentNode,
  		request,
-@@ -1709,7 +1714,7 @@ export class WorkflowExecute {
+@@ -1709,7 +1749,7 @@ export class WorkflowExecute {
  	 * `runtimeData.executedByUserId` still inherit the flags. The stash is
  	 * transport-only, so consume it to keep it out of the persisted task metadata.
  	 */
@@ -640,7 +684,7 @@ index f2204834..0504e7f9 100644
  		this.additionalData.currentNodeUsedDynamicCredentials = false;
  		this.additionalData.currentNodeAttemptedDynamicCredentials = false;
  
-@@ -1721,7 +1726,7 @@ export class WorkflowExecute {
+@@ -1721,7 +1761,7 @@ export class WorkflowExecute {
  	}
  
  	/** Create the task metadata that is known before the node runs. */
@@ -649,7 +693,7 @@ index f2204834..0504e7f9 100644
  		return {
  			startTime: Date.now(),
  			executionIndex: this.additionalData.currentNodeExecutionIndex++,
-@@ -1734,7 +1739,7 @@ export class WorkflowExecute {
+@@ -1734,7 +1774,7 @@ export class WorkflowExecute {
  	 * Stamp every input item with its `pairedItem` lineage, so an item can be traced back
  	 * to the item it came from.
  	 */
@@ -658,7 +702,7 @@ index f2204834..0504e7f9 100644
  		const newTaskDataConnections: ITaskDataConnections = {};
  		for (const connectionType of Object.keys(executionData.data)) {
  			newTaskDataConnections[connectionType] = executionData.data[connectionType].map(
-@@ -1781,7 +1786,7 @@ export class WorkflowExecute {
+@@ -1781,7 +1821,7 @@ export class WorkflowExecute {
  	 * The run index of this node execution. Engine requests set it explicitly. Otherwise
  	 * it is the number of times the node already ran.
  	 */
@@ -667,7 +711,7 @@ index f2204834..0504e7f9 100644
  		if (executionData.runIndex !== undefined) {
  			return executionData.runIndex;
  		}
-@@ -1798,7 +1803,7 @@ export class WorkflowExecute {
+@@ -1798,7 +1838,7 @@ export class WorkflowExecute {
  	 * there is nothing to re-run, so don't apply retryOnFail (it would just re-throw the
  	 * same error after pointless waits without re-executing anything).
  	 */
@@ -676,7 +720,7 @@ index f2204834..0504e7f9 100644
  		const isResumedError = executionData.metadata?.resumeError !== undefined;
  		if (executionData.node.retryOnFail !== true || isResumedError) {
  			return [1, 0];
-@@ -1812,7 +1817,7 @@ export class WorkflowExecute {
+@@ -1812,7 +1852,7 @@ export class WorkflowExecute {
  	}
  
  	/** The pinned output of a node, or undefined if the node has none. */
@@ -685,7 +729,7 @@ index f2204834..0504e7f9 100644
  		const { pinData } = this.runExecutionData.resultData;
  		if (!pinData || node.disabled || pinData[node.name] === undefined) {
  			return undefined;
-@@ -1825,7 +1830,7 @@ export class WorkflowExecute {
+@@ -1825,7 +1865,7 @@ export class WorkflowExecute {
  	 * Collect the results of the sub-nodes an AI agent asked for, so the agent can
  	 * resume with them. Does nothing if the node is not resuming from a tool call.
  	 */
@@ -694,7 +738,7 @@ index f2204834..0504e7f9 100644
  		executionData: IExecuteData,
  		subNodeExecutionResults: EngineResponse,
  	): void {
-@@ -1849,7 +1854,7 @@ export class WorkflowExecute {
+@@ -1849,7 +1889,7 @@ export class WorkflowExecute {
  	 * collect the hints it reported and route items to the error output if it is enabled.
  	 * Returns the output data and the close function the node asked to run at the end.
  	 */
@@ -703,7 +747,7 @@ index f2204834..0504e7f9 100644
  		runNodeData: IRunNodeResponse,
  		workflow: Workflow,
  		executionData: IExecuteData,
-@@ -1921,7 +1926,7 @@ export class WorkflowExecute {
+@@ -1921,7 +1961,7 @@ export class WorkflowExecute {
  	 * Handle an error a node threw: mark the node as the last one executed, report the
  	 * error and return it in the serializable shape the run data stores.
  	 */
@@ -712,7 +756,7 @@ index f2204834..0504e7f9 100644
  		error: unknown,
  		executionNode: INode,
  		workflow: Workflow,
-@@ -1959,7 +1964,7 @@ export class WorkflowExecute {
+@@ -1959,7 +1999,7 @@ export class WorkflowExecute {
  	 * A node with `alwaysOutputData` that returned nothing gets one empty item, so the
  	 * nodes after it still run. The item keeps the lineage of all input items.
  	 */
@@ -721,7 +765,7 @@ index f2204834..0504e7f9 100644
  		nodeSuccessData: INodeExecutionData[][] | null | undefined,
  		executionData: IExecuteData,
  	): INodeExecutionData[][] | null | undefined {
-@@ -1983,10 +1988,7 @@ export class WorkflowExecute {
+@@ -1983,10 +2023,7 @@ export class WorkflowExecute {
  	}
  
  	/** Build the task record for a finished node run. */
@@ -733,7 +777,7 @@ index f2204834..0504e7f9 100644
  		return {
  			...taskStartedData,
  			executionTime: Date.now() - taskStartedData.startTime,
-@@ -2003,7 +2005,7 @@ export class WorkflowExecute {
+@@ -2003,7 +2040,7 @@ export class WorkflowExecute {
  	 * execution context, so the redaction layer can grant that user access to their own
  	 * data. The identity is execution-scoped, so this is the same value across nodes.
  	 */
@@ -742,7 +786,7 @@ index f2204834..0504e7f9 100644
  		if (
  			this.additionalData.currentNodeUsedDynamicCredentials &&
  			this.additionalData.dynamicCredentialsResolvedUserId &&
-@@ -2021,7 +2023,7 @@ export class WorkflowExecute {
+@@ -2021,7 +2058,7 @@ export class WorkflowExecute {
  	 * the loop continues. Otherwise the task data is stored, the node is pushed back onto
  	 * the stack so it can be restarted, and the loop must stop.
  	 */
@@ -751,7 +795,7 @@ index f2204834..0504e7f9 100644
  		executionNode,
  		executionData,
  		taskData,
-@@ -2114,7 +2116,7 @@ export class WorkflowExecute {
+@@ -2114,7 +2151,7 @@ export class WorkflowExecute {
  	 * TODO: Remove when AI-723 lands. There is no need to merge anymore, because the only
  	 * reason to have this entry already is because of `inputOverride`.
  	 */
@@ -760,7 +804,7 @@ index f2204834..0504e7f9 100644
  		const nodeRunData = this.runExecutionData.resultData.runData[nodeName];
  		if (nodeRunData[runIndex]) {
  			Object.assign(nodeRunData[runIndex], taskData);
-@@ -2127,7 +2129,7 @@ export class WorkflowExecute {
+@@ -2127,7 +2164,7 @@ export class WorkflowExecute {
  	 * Move the error a node reported in `$error` onto the standard `error` and `json`
  	 * fields of the item, so all nodes report errors the same way.
  	 */
@@ -769,7 +813,7 @@ index f2204834..0504e7f9 100644
  		for (const execution of nodeSuccessData) {
  			for (const lineResult of execution) {
  				if (
-@@ -2148,7 +2150,7 @@ export class WorkflowExecute {
+@@ -2148,7 +2185,7 @@ export class WorkflowExecute {
  	 * Log the output of an AI tool node on its own connection type instead of `main`.
  	 * TODO: Remove when AI-723 lands.
  	 */
@@ -778,7 +822,7 @@ index f2204834..0504e7f9 100644
  		executionNode: INode,
  		taskData: ITaskData,
  		nodeSuccessData: INodeExecutionData[][],
-@@ -2165,17 +2167,17 @@ export class WorkflowExecute {
+@@ -2165,17 +2202,17 @@ export class WorkflowExecute {
  	}
  
  	/** True while there are nodes queued for execution. */
@@ -799,7 +843,7 @@ index f2204834..0504e7f9 100644
  		this.runExecutionData.executionData!.nodeExecutionStack.unshift(executionData);
  	}
  
-@@ -2191,7 +2193,7 @@ export class WorkflowExecute {
+@@ -2191,7 +2228,7 @@ export class WorkflowExecute {
  	 * True if the loop must stop now. Marks the execution as timed-out first if its
  	 * timeout has passed, so a timeout is reported as a cancellation.
  	 */
@@ -808,7 +852,7 @@ index f2204834..0504e7f9 100644
  		if (this.hasExecutionTimedOut()) {
  			this.status = 'canceled';
  			this.timedOut = true;
-@@ -2206,7 +2208,7 @@ export class WorkflowExecute {
+@@ -2206,7 +2243,7 @@ export class WorkflowExecute {
  	 * leaves that are parallel to the destination node. Normally they would execute,
  	 * because they have the same parent and all child nodes of a parent execute.
  	 */
@@ -817,7 +861,7 @@ index f2204834..0504e7f9 100644
  		const { runNodeFilter } = this.runExecutionData.startData!;
  		return runNodeFilter !== undefined && !runNodeFilter.includes(nodeName);
  	}
-@@ -2225,538 +2227,31 @@ export class WorkflowExecute {
+@@ -2225,538 +2262,31 @@ export class WorkflowExecute {
  		this.checkForWorkflowIssues(workflow);
  		this.handleWaitingState(workflow);
  
@@ -1362,7 +1406,7 @@ index f2204834..0504e7f9 100644
  					);
  				})
  				.catch(async (error) => {
-@@ -2784,9 +2279,9 @@ export class WorkflowExecute {
+@@ -2784,9 +2314,9 @@ export class WorkflowExecute {
  							console.error('There was a problem running hook "workflowExecuteAfter"', error);
  						});
  
@@ -1376,10 +1420,10 @@ index f2204834..0504e7f9 100644
  								`There was a problem deactivating trigger of workflow "${workflow.id}": "${errorClose.message}"`,
 diff --git a/packages/core/src/execution-engine/workflow-scheduler.ts b/packages/core/src/execution-engine/workflow-scheduler.ts
 new file mode 100644
-index 00000000..acb3089e
+index 00000000..3abeabd5
 --- /dev/null
 +++ b/packages/core/src/execution-engine/workflow-scheduler.ts
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,70 @@
 +import type { ExecutionBaseError, IRunExecutionData, Workflow } from 'n8n-workflow';
 +
 +import type { ExecutionLifecycleHooks } from './execution-lifecycle-hooks';
@@ -1408,6 +1452,7 @@ index 00000000..acb3089e
 +	| 'getPinnedOutput'
 +	| 'getRetryParams'
 +	| 'handleEngineRequest'
++	| 'planEngineRequest'
 +	| 'handleNodeExecutionError'
 +	| 'isExecutionStackNotEmpty'
 +	| 'isLegacyExecutionOrder'

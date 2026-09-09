@@ -126,7 +126,35 @@
       differential 49 pass / 20 divergent / 0 fail; the net-size and state-class reduction measured
       before/after and recorded in `docs/state-of-the-project.md`
 
-**The plan through M6 is done.** Everything below is what it left open.
+## M7 — Agent tool dispatch
+- [x] **`ai_tool` connections compile.** `WorkflowDescription` carries `toolConnections`; a node
+      with an incoming `ai_tool` connection and no `main` producer compiles in the `tool` form —
+      the ordinary node gadget with `T/in_tool` as its input side and the dispatching agent's
+      `A/response` as its success branch. `toolConnectionsOf` reads them off
+      `connectionsBySourceNode[*].ai_tool`; every other `ai_*` type stays invisible, because
+      `supplyData` resolves those inside `runNode`
+- [x] **The round is a fan-out with pending markers** (`patterns.md` §5): `A_done_req`,
+      `A_dispatch`, `A_collect` (a genuine sink) and `A_resume`, with `A/queue` carrying the data
+      and `A/pending` the count so no action decides "am I the last one". `X_run` gains a request
+      outcome, phased through `A/routed_req` exactly as the success outcome is phased through
+      `X/routed` (ADR 0008)
+- [x] **The round budget is n8n's own number.** `A/rounds` is seeded from the agent's
+      `options.maxIterations` (default 10), so the round cycle is *bounded* and the reachability
+      graph closes: proper completion **proven** solver-free on `agentOneTool` (296 classes, 2 ms)
+      and `agentTwoTools` (380 classes, 3 ms). `A_rounds_out` turns exhaustion into a designed
+      pause rather than the stranding the verifier found
+- [x] **The host builds, the net decides.** Patch 0001 adds `planEngineRequest` —
+      `handleEngineRequest` without the `addNodeToBeExecuted` calls — and nothing is ever enqueued
+      on n8n's stack; `FakeHost.addNodeToBeExecuted` still throws
+- [x] **No `matchSpec` and no `freshName`**, on `nu-nets.md` §6's own criteria, with the three
+      blocking findings recorded in ADR 0008. `state-class.ts` now refuses to build a graph for a
+      net carrying a `matchSpec`, because it is the fallback and the fallback is not sound for
+      quiescence
+- [x] Conformance re-measured: execution-engine and core both **40/44 loop-driving** (from 35/44)
+      with helpers back to 1613/1613 and 2080/2080, and **no restatement** — 4 regressions, all
+      registered divergences. Divergences #22–#24 added
+
+**The plan through M7 is done.** Everything below is what it left open.
 
 ---
 
@@ -184,8 +212,11 @@ an upstream ask, or work that was specified and deliberately not built.
       unlisted empties land on `ready_i` and `X_start` fires with them
 - [ ] `subNodeExecutionResults` is rebuilt per attempt; n8n creates it once per popped entry
       (`stack-scheduler.ts:53`) and passes the same populated object to every `runNode` of the retry
-      loop. Invisible at k = 1 with the AI path out of scope; fixing it means carrying the object on
-      the run/retry payload
+      loop. **Now reachable**: since M7 an agent's resumed activation carries
+      `metadata.subNodeExecutionData`, so a `retryOnFail` agent whose first attempt throws re-runs
+      with a response rebuilt from the same metadata rather than the same object. Equal in content
+      today because `collectSubNodeResults` is a pure read of `runData`; fixing it properly means
+      carrying the object on the run/retry payload
 - [ ] `X_start_unmet` priority is depth − 1 (−1 for a depth-0 node); shift all priorities by +1 if
       any consumer assumes non-negative priorities
 - [ ] Retry at k > 1 holds `_budget` across the wait (a waiting node counts as running); revisit if
@@ -198,63 +229,158 @@ an upstream ask, or work that was specified and deliberately not built.
 
 ### 3. Verifier
 
-- [x] **Proper completion does not close on a compiled net.** *Closed by M5*: the question is
-      routed to libpetri's state-class graph (VER-010) first and the SMT encoding is the fallback,
-      so it is `proven` in 1-110 ms on every acyclic fixture and `violated` in ~25 ms on
-      `ifBothOutputs`. M4's `unknown` at 30 s / 60 s / 600 s was the SMT route's, not the
-      question's. What is left is the graph's *shape* ceiling, below
-- [x] **The arrival bound closes only where it cannot fail.** *Closed by M5*: the OR-round form
-      (`placeBound(ready_i, n)`, the query divergence #8 names) is decided off the graph —
-      `proven` on `multiProducer`, complete at 245 classes, ~4 ms. The join-slot form still cannot
-      fail by construction (ADR 0003), which is a statement about the gadget rather than a gap
-- [ ] **The graph's shape ceiling is the real limit now, and it has three axes**: independent
-      branches (combinatorial, NU-053 — a 20-way switch truncates at 200 000 classes), cycles
-      (unbounded — answered with the `bounded` verdict rather than a proof), and the budget (the
-      41-node chain closes at k = 1 and k = 2 and truncates at k = 4). Partial-order reduction
-      upstream is the one change that would move the first
-- [ ] **The SMT route is refused above a measured net size** (12 join inputs / 450 flat places),
-      because libpetri's pre-solver pipeline exhausts the V8 heap and *aborts the process* on a
-      bigger branchy net. That turns an abort into an `unknown`, but the budget semiflow and the
-      per-node fallbacks are simply unavailable up there; the upstream fix is below
-- [ ] **Liveness is not provable** and is therefore reported `unknown`: libpetri's `violated` on
-      `unreachable` is a witness in a priority- and value-blind abstraction (VER-004). Bounded model
-      checking (unroll to depth d, one SAT call) is what would answer it. Consequence today: the
-      dead-nodes family lists every live node under "Unproven", which is honest but noisy and makes
-      `--strict` fail on essentially every real workflow
-- [ ] **Every verdict is about the fresh initial marking.** A resumed or retried execution starts
-      from a codec-decoded marking that need not be reachable from it, and nothing checks such a
-      marking against the validated P-invariants at resume time. The cheap guard was specified
-      (ADR 0007 §6a) and not implemented; today the limitation is documentation only
-- [ ] `verify()` has no per-report solver budget: on a truncated acyclic graph the dead-nodes
-      family still sends one `unreachable` query per unreached node, and on `switch20` that is 20
-      witness searches paying the full timeout each — minutes to return nothing. `--property`,
-      `--timeout` and `--smt-fallback off` are the workarounds; a `--max-queries` or a
-      per-family budget is the fix. (Since M5 the P-invariant pipeline is paid once rather than
-      per query, so the cost is the queries themselves.)
-- [ ] A **multi-trigger workflow is verified for one execution** — the one started from the chosen
-      start node. The other entry points and what only they feed are reported as such rather than as
-      dead nodes, but no run verifies the executions they start; `--start` does it by hand
-- [ ] The workflow-JSON shape heuristic cannot see an input nobody wired, which is exactly the
-      all-required-Merge-with-an-unwired-input shape the dead-join diagnostic exists for.
-      `--node-types` is required for such a workflow; the CLI warns per guessed node but cannot
-      detect this case specifically
-- [ ] `Counterexample.ordered` is false whenever libpetri's abstract replay does not confirm a
-      firing sequence; the renderer says so, but nothing here can turn an unordered derivation set
-      into a path
+- [ ] **`semiflowInvariants(true)` is what aborts the process, and it changes no verdict.** The
+      option is enabled because libpetri's guidance says to enable it on a net with an `all()`
+      arc on a busy place, which the OR gadget has. Measured 2026-09-09 against libpetri's
+      gated build, whole-net `deadlockFree` with the widenings and the state equation, 60 s:
+      the union changes **no verdict on any fixture** — `diamond` proven either way (35.8 s vs
+      35.7 s), `agentTwoTools` proven either way (1.4 s vs 0.9 s), `layers` 3/5/7 unknown either
+      way — and adds one invariant to the basis in every case but the agent net, which gains
+      five. What it costs: `layers7` (29 nodes) spends 145.5 s against 61.1 s, and **`layers9`
+      (37 nodes) aborts the process with it and completes without it.** That abort is the
+      `SMT_MAX_JOIN_INPUTS` / `SMT_MAX_FLAT_PLACES` ceiling's whole reason for existing
+      (ADR 0007 §12), and it is uncatchable, so the ceiling is a guard against an option that
+      buys nothing measurable here. The enumeration is worst-case exponential in branching
+      (upstream measured `2^k` minimal semiflows on `k` diamonds in series, hitting the
+      8192-row backstop past thirteen), which is exactly the `layers` shape.
+
+      **Re-measured 2026-09-09 against libpetri's bounded-candidate fix, and the case is now
+      much stronger.** The abort is gone: the pipeline completes at every size tried, 18.9 s at
+      37 nodes and 130.2 s at 81 nodes (870 places), where it used to kill the process at 37.
+      But turning the union off makes that phase almost **flat** — 1.8 s at 37 nodes, 2.2 s at
+      49, 2.6 s at 81 — so on this shape the union is essentially the whole cost of the
+      pipeline, 128 s of the 130 s at 81 nodes. What it buys there is **one invariant** (145
+      against 144; 68 against 67 at 37 nodes), and no invariant it has added moved a verdict on
+      any fixture measured. Upstream now states in the spec that enabling it is a *strength*
+      choice and not a *correctness* one: where the minimal set is exponential the survivors are
+      an arbitrary truncation, so a proof needing one particular law can miss it anyway.
+
+      **Upstream's own rule, applied here.** libpetri now says to enable the union when the
+      report carries `Dropped invariant:` / `Dropped semiflow:` lines naming a consume-all or
+      reset place, because that is when the basis is deficient, and to leave it off on a branchy
+      net that reports none. Measured: `diamond`, `agentTwoTools`, `loopOverItems` and `layers9`
+      report **no** dropped lines, so the rule says off — matching the pricing above. Exactly one
+      fixture reports a drop, `ifBothOutputs`, and it is an OR-input net: one invariant over
+      `C/in0_e2` / `C/in0_e3` and the terminal markers, dropped by the H1 guard. So the two
+      halves of the register disagree by *shape*, which argues against a flat default either way.
+
+      **The self-tuning option, and probably the right one**: run the pipeline once without the
+      union — about 2 s even at 81 nodes — and re-run it with the union only when that report
+      names a dropped law. That is upstream's rule evaluated rather than assumed, it costs the
+      cheap phase twice on the nets that need it and nothing on the rest, and it keeps working if
+      the compiler ever reintroduces a draining or reset arc on a busy place, which is the change
+      that would flip the calculation back (upstream's caveat, and a real possibility: the OR
+      gadget already has the `all()` arc that produced the one drop above).
+
+      **Recommended, in order**: turn the union off, or make it conditional as above; then delete `SMT_MAX_JOIN_INPUTS` (12) and
+      `SMT_MAX_FLAT_PLACES` (450) at `src/verify/verify.ts:321`, whose sole justification
+      (ADR 0007 §12) was an uncatchable abort that no longer exists and that the union caused
+      rather than net size — today they refuse a sound answer the pipeline would give in about
+      two seconds. Keeping the union instead is defensible; then the ceiling stays but belongs
+      at a far higher value than 450 places. Not done unilaterally: it reverses a default this
+      repo chose on libpetri's own guidance, and "no verdict moved on these fixtures" is not
+      "never helps"
+
+- [ ] **The SMT fallback's `unknown`s are all budget, and the default budget hides that.** Every
+      `unknown` in `docs/verification.md`'s fallback column proves when given minutes:
+      `diamond` 35.5 s, `switch20` 277.5 s, `chain40` 410.1 s, and a join-free chain proves at
+      every length measured (5.7 s at 12 nodes to 410 s at 40, roughly cubic in length). The
+      table runs at 30 s, so it reports three capability limits that are not capability limits.
+      Two things follow. The measured table should carry a second column at a large budget, or
+      say per row which kind of `unknown` it is — a verdict that means two different things is
+      the one thing this surface is not allowed to ship. And the CLI's default timeout is a
+      product decision worth revisiting: at 30 s a user gets `unknown` on a workflow the solver
+      would prove in four minutes, with nothing telling them more time would settle it.
+      Discovered twice over during the 2026-09-09 review, the second time *after* the first had
+      been written down — a 60 s sweep showed a clean monotone "wall" between 16 and 20 chain
+      nodes that a 300 s budget walked straight through
+
+- [ ] **A tool shared by two agents verifies as `violated`, and it is a false alarm.** The
+      tool's success branch is `xor` over its agents' `A/response` places, resolved at run time
+      by the dispatch token (`scheduler/actions.ts`, `succeed`, which throws if the named agent
+      is not wired). The state-class graph is value-blind (VER-004), so it explores the arm
+      that hands A1's response to A2 and reports the dispatcher stranded: `agentSharedTool`
+      quiesces on `A1/dispatched` + `A1/drained` + `A1/outstanding` with an uncollected
+      `A2/response`, 24 121 classes, whole-net `violated`, `ok: false`. Every other agent
+      fixture is `proven`. This is the one place the value-blind abstraction produces a red
+      report on a correct workflow rather than a weaker verdict, and no test or doc recorded it
+      until the 2026-09-09 review. **The fix that makes the abstraction exact**: compile the
+      tool's `T_start` / `T_run` / success chain once per dispatching agent — one `T/in_tool_a`
+      place and one run transition per agent, each writing that agent's `A/response` with no
+      `xor` — keeping the single `T/idle` so the tool still serialises across agents as n8n
+      does. Cost is a per-agent copy of three transitions on shared tools only; nets with one
+      agent per tool are unchanged. Until then, `docs/verification.md` tells the reader to read
+      that violation as unproven
+
+- [x] ~~**A round's size is a token count, and branch enumeration cannot see it.**~~ Closed by
+      the tool-call budget (ADR 0008 §2): `A/calls` is consumed one unit per `A_dispatch`, so the
+      count is a path the graph sees and `peak(A/outstanding)` reaches the budget. The
+      "N distinct places" fix this item first sketched was the wrong shape — a budget is one
+      place with K tokens, and the count is how many times a transition fired
+- [ ] **The SMT route returns `unknown` on an agent at the runtime default budget.** The net is
+      constant in K — 50 places, 23 transitions, 45 flat, at K = 2 or 1000; only `A/calls`' seed
+      moves — so the polynomial blow-up is the state-class graph's alone, and IC3 reasons over place
+      *counts* and should not care. Measured: with the graph off (`maxClasses: 0`) and z3 4.13,
+      proper completion on `agentTwoTools` at K = 64 is `unknown` via SMT in ~17 s, not a
+      timeout. The reason was not extracted. Worth chasing before the `bounded (K)` item below:
+      if the coloured or flat encoder decides this, the default-budget agent verifies without a
+      declared budget at all, and the graph is only the fast path
+- [ ] **A `bounded (K)` verdict for agents.** An agent left at the runtime default (64) verifies
+      as truncated. The graph could instead be explored at a smaller budget and the verdict
+      reported as "proven for every execution making at most K tool calls" — the agent analogue
+      of the cyclic prefix bound. It needs a compile at a different `A/calls` seed than the one
+      that runs (a different initial marking, same structure), which the cache already keys
+      apart; what it must not do is report that as a proof about the net that runs
 
 ### 4. Upstream (libpetri)
 
-- [ ] **No per-place quiescence property honours declared sinks.** `joinedOrDeadLettered` is
+- [x] **The declared dependency is wrong, and a clean `npm install` would silently weaken every
+      report.** *Closed 2026-09-09: libpetri 5.1.0 shipped the surface, `package.json` asks for
+      `^5.1.0`, the lock pins 5.1.0 with its integrity hash, and the suite is 869/869 against the
+      published tarball with the working-tree symlink gone — the configuration nothing had been
+      measured against until then. `verify()` asserts the surface at entry
+      (`assertLibpetriSurface`), so a downgrade or a stale lock now fails with a sentence naming
+      the missing methods rather than with a report that closes and proves nothing. The original
+      finding: the range `^5.0.0` was satisfied by a package missing every interface the verifier
+      calls, and against it each query threw, was caught, and became `unknown` — no crash, no
+      failing build, every proof gone.*
+- [ ] **Permutation symmetry for structurally interchangeable subnets.** The agent's per-tool
+      counters (`T/in_tool`, `T/done`) multiply the state space by about m^2.8 in the tool
+      count; on the real net a four-tool agent truncates at K = 8. The tools are identical gadgets
+      differing only in name, so markings that permute them are one orbit. That is the quotient
+      `nu-nets.md` §8 describes for Route B ("names are interchangeable symbols, quotiented under
+      permutation symmetry"), applied to subnet instances rather than to ν-names. Not `m^K`: the
+      graph is keyed on markings, and dispatch sequences of the same tools do not multiply — an
+      earlier note here said so and was wrong. Measured in `tests/spikes/agent-round.test.ts`
+- [ ] **Abstract `X/done` for nodes nothing references.** `done` is history a `$('X')` read arc
+      reads and nothing else; on the agent net it multiplies the state space by 3 (27 351
+      markings, 9 033 without the two tools' `done`). The compiler knows `analysis.referenced`,
+      so the verifier could drop unreferenced `done` places from the marking key — an
+      n8n-libpetri-side reduction, sound for every property here, since none reads them
+- [ ] **A note on `enumerateBranches` and multiplicity.** An `Out` branch is a `Set<Place>`, so a
+      firing that deposits `n` tokens into one place is one branch and one token to every
+      analysis that enumerates branches — the state-class graph, the flattener, `applyNuGuard`'s
+      fragment check. That is a sound *under*-approximation for a safety property, the direction
+      that yields a false `proven`, and nothing reports it. A doc note where the type is defined,
+      or a validation-time warning when an action writes a place its branch names once more than
+      once, would have made the first agent shape fail loudly instead of verifying quietly
+
+- [x] **No per-place quiescence property honours declared sinks.** `joinedOrDeadLettered` is
       sink-blind by design (NU-040 AC4) and `deadlockFree` is whole-net. Since M5 the whole-net
-      form *is* what the fallback asks, with the structural rest set as sinks — but it is false by
-      construction on any workflow with a reachable paused marking holding an arrival, so its
-      `proven` direction is unreachable there and `verify()` does not ask it. A sink-aware
-      per-place variant would ask the right question; today the graph classifies instead
+      form *is* what the fallback asks, with the structural rest set as sinks — and since
+      2026-09-08 with the pause / halt widenings as conditional sinks (VER-014, above), so it is
+      no longer false by construction and `verify()` asks it wherever the graph did not close.
+      The per-place variant is not needed: the whole-net question with the widenings *is* the
+      graph's classification
 - [ ] **Partial-order reduction in the state-class graph** (NU-053 names its absence). Independent
       branches are what a workflow engine produces, and they are the one truncation shape the
       `bounded` verdict cannot soften
-- [ ] **A coverability / cutoff route for cyclic workflows**, which would turn today's `bounded`
-      into a `proven` on Loop Over Items without changing the net
+- [x] **A coverability / cutoff route for cyclic workflows**, which would turn today's `bounded`
+      into a `proven` on Loop Over Items without changing the net. *Reached another way,
+      2026-09-08: the SMT fallback, asked as the graph's own question with the state equation on
+      (ADR 0007 §13), proves `loopOverItems` in 0.5 s — over every reachable marking, so the
+      report's headline is `proven`; the graph's `bounded` remains under `--smt-fallback off`.
+      A cutoff route would still be the solver-free way to the same answer*
 - [ ] **Intern the marking key.** It is ~12 kB of heap per class, which is what makes the default
       200 000-class cap a ~2.5 GB memory bound and forces the cap to be lowered on a small heap
 - [ ] **The P-invariant / P-semiflow enumeration runs on dense `number[][]`** and exhausts a 4 GB
@@ -313,9 +439,11 @@ an upstream ask, or work that was specified and deliberately not built.
       `StackScheduler`. It is the one place where a "libpetri" case is really a legacy case
 - [ ] `--scope=all` deliberately excludes `cli`: it needs its own `pnpm install` and a multi-minute
       turbo build, so a full-coverage CI leg has to invoke `--scope=cli` separately
-- [ ] The **classifier counts the six out-of-scope AI-agent "waiting tools" cases as loop-driving**,
-      so every headline needs the "excluding out-of-scope" restatement. Either add an exclusion list
-      to `src/conformance/classify.ts` or keep stating both figures
+- [x] ~~The **classifier counts the six out-of-scope AI-agent "waiting tools" cases as
+      loop-driving**, so every headline needs the "excluding out-of-scope" restatement.~~ Closed by
+      M7 the other way round: agent tool dispatch is implemented (ADR 0008), so those cases are
+      engine results like any other and no restatement is needed. Eight of the nine now pass; the
+      ninth is divergence #22
 - [ ] The **differ's candidate leg has no timeout** so a net that never quiesces hangs it. The
       reference leg has a 10 000-activation valve; the candidate leg has only the fixtures' own
       bounds. libpetri 5.0.0's `run(ms, 'close')` **is** the right tool here — a harness safety
@@ -325,7 +453,8 @@ an upstream ask, or work that was specified and deliberately not built.
       or cancelled run is attributed to it. A tighter rule needs the activation's trace start to fall
       after the halting activation's, and the halting instant is not observable from the trace
 - [ ] `FakeHost` mirrors `WorkflowExecute` at `441970b` closely but not fully (no
-      `convertBinaryData`, no `handleNodeErrorOutput`, no `sendChunk` hook, no AI-tool rewire, no
+      `convertBinaryData`, no `handleNodeErrorOutput`, no `sendChunk` hook, no AI-tool output
+      rewire (`planEngineRequest` is mirrored, `rewireOutputLog` is not), no
       expression evaluation, so divergence #7's `$('Y')` shape cannot be reproduced). Its verdicts
       are about the two schedulers, not about `WorkflowExecute`; only the real conformance run
       covers the rest

@@ -24,6 +24,9 @@ budget, marking codec) and the design principles live in the root
   the `status` / `timedOut` fields the caller reads, and n8n polls it between activations —
   see ADR 0004, "The timeout is n8n's, not the net's".
 - Every n8n behaviour we do not reproduce is recorded in `docs/divergences.md`. No silent skips.
+- An agent's `ai_tool` dispatch is a round in the net, not a host loop (ADR 0008). Only `ai_tool`
+  reaches the scheduler; every other `ai_*` connection is resolved by `supplyData` inside
+  `runNode` and the compiler is right not to model it.
 - Reporting rule: only a minority of n8n's cases drive the scheduler loop — 44 of the
   execution-engine suite's 1657 (`src/conformance/classify.ts`), 44 of `packages/core`'s 2124,
   and none of `packages/workflow`'s or `packages/cli`'s. Headline numbers are loop-driving
@@ -49,10 +52,17 @@ libpetri requirement IDs (`IO-015`, `EXEC-003`, `MOD-010`, …).
 
 ### libpetri
 
-`libpetri@^5.0.0` — the release that made [IO-015] an exact-explanation search (`And` unordered,
-an inner `Xor` no longer pre-empting an enclosing one), split [VER-002] into strict `DeadlockFree`
-and `TerminatesAtSink`, added the `run(ms, 'close')` timeout policy, and fixed sparse enablement at
-bit 31. The compiler and the verifier both depend on those semantics; do not downgrade.
+`libpetri@^5.1.0`. 5.0.0 made [IO-015] an exact-explanation search (`And` unordered, an inner
+`Xor` no longer pre-empting an enclosing one), split [VER-002] into strict `DeadlockFree` and
+`TerminatesAtSink`, added the `run(ms, 'close')` timeout policy, and fixed sparse enablement at
+bit 31. **5.1.0 is the floor** because the verifier calls its surface directly:
+`sinkPlacesWhen` conditional sinks [VER-014], the linear state-equation bound [VER-015], the
+state equation with firing counters [VER-016], bounded enumeration [VER-017] with
+`enumerationMaxClasses`, `semiflowInvariants('auto')`, `SmtVerificationResult.route`, and the
+canonical state-class key that five pinned class counts rest on. The compiler and the verifier
+both depend on those semantics; do not downgrade. `verify()` checks the surface at entry
+(`assertLibpetriSurface`) and refuses an install that predates it, because the alternative is a
+report that closes with every proof silently missing.
 
 ### n8n conformance (`scripts/`)
 

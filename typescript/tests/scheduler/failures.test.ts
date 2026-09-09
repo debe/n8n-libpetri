@@ -1,12 +1,12 @@
 /**
  * Failures the scheduler raises itself: an unmet `$('Y')` reference fails before `runNode`
  * with n8n's own "node is unexecuted" error under the node's `onError` policy, an
- * AI-agent `EngineRequest` is out of scope and fails the node with a clear error, a fatal
+ * an `EngineRequest` the compiled net has no dispatch branch for fails the node by name, a fatal
  * error (one n8n's loop would have thrown out of `run()`) rejects `run()` after the net
  * quiesced, and a stranded join arrival is written to `waitingExecution` (divergence #2).
  */
 import { PetriScheduler, UNMET_REFERENCE_MESSAGE_TEMPLATE } from '../../src/scheduler/index.js';
-import { conn, expressionRef, fanOut, linear, node, workflow } from '../fixtures/workflows.js';
+import { agentOneTool, conn, expressionRef, fanOut, linear, node, workflow } from '../fixtures/workflows.js';
 import {
   FakeHost, callsOf, execute, fakeHooks, fakeNodeHelpers, fakeWorkflow, items, newRunExecutionData, ranNodes,
   transitionsFailed, transitionsStarted, tokensResting,
@@ -59,17 +59,28 @@ describe('unmet expression reference', () => {
   });
 });
 
-describe('EngineRequest (AI-agent tool dispatch) is out of scope', () => {
-  it('a node returning an engine request fails with a NodeOperationError-style error naming the limitation', async () => {
+describe('an engine request the compiled net has no round for', () => {
+  it('a node with no ai_tool connections fails by name instead of opening a round', async () => {
     const wf = workflow('agent', [node('Trigger', 'trigger', [0, 0]), node('Agent', 'set', [200, 0])], [conn('Trigger', 0, 'Agent', 0)], 'Trigger');
     const r = await execute(wf, { Agent: () => ({ actions: [], metadata: {} }) }, { startItems: START });
     expect(r.error).toBeUndefined();
     expect(r.scheduler.executionError?.name).toBe('NodeOperationError');
-    expect(r.scheduler.executionError?.message).toContain('engine request');
-    expect(r.scheduler.executionError?.message).toContain('PetriScheduler does not support');
+    expect(r.scheduler.executionError?.message).toContain('no ai_tool connections');
+    // The round is the net's, never the host's: nothing was enqueued on n8n's stack.
     expect(r.calls).not.toContain('handleEngineRequest(Agent)');
     expect(r.runData.Agent![0]!.executionStatus).toBe('error');
     expect(r.scheduler.outcome).toBe('halted');
+  });
+
+  it('an action naming a node that is not one of the agent\'s tools fails by name', async () => {
+    const r = await execute(agentOneTool, {
+      Agent: () => ({
+        actions: [{ actionType: 'ExecutionNodeAction' as const, nodeName: 'End', input: {}, type: 'ai_tool' as const, id: 'a1', metadata: {} }],
+        metadata: {},
+      }),
+    }, { startItems: START });
+    expect(r.scheduler.executionError?.message).toContain('"End" is not connected to it');
+    expect(r.runData.Calculator).toBeUndefined();
   });
 });
 

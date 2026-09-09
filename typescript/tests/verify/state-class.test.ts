@@ -70,11 +70,11 @@ describe('the solver-free route (VER-010)', () => {
       // record: 50, 393, 99, 245, 108, 889, 2048, 6151. Removing one place and one
       // transition per node removed a class per activation, most on the join-heavy shapes.
       ['linear', linear, 43, 'proven'],
-      ['diamond', diamond, 330, 'proven'],
+      ['diamond', diamond, 306, 'proven'],
       ['fanOut', fanOut, 90, 'proven'],
-      ['multiProducer', multiProducer, 218, 'proven'],
+      ['multiProducer', multiProducer, 211, 'proven'],
       ['chooseBranch', chooseBranch, 77, 'proven'],
-      ['ifBothOutputs', ifBothOutputs, 732, 'violated'],
+      ['ifBothOutputs', ifBothOutputs, 697, 'violated'],
       ['chain40 (41 nodes)', generateChain(40), 1967, 'proven'],
       ['wide8 (9 nodes)', generateFanOut(8), 5894, 'proven'],
     ];
@@ -101,7 +101,7 @@ describe('the solver-free route (VER-010)', () => {
     // closes in 106 ms" is a statement about k = 1 and must not be read as a general ceiling.
     // Before the collapse: 1551 and 31448.
     const atBudgetTwo: ReadonlyArray<readonly [string, Parameters<typeof verify>[0], number]> = [
-      ['diamond', diamond, 1094],
+      ['diamond', diamond, 963],
       ['chain40 (41 nodes)', generateChain(40), 29767],
     ];
     for (const [label, workflow, classes] of atBudgetTwo) {
@@ -188,15 +188,23 @@ describe('the solver-free route (VER-010)', () => {
 
     it('the rest sets are the documented ones, and each widening matches the codec mode of its terminal', () => {
       // The structural rest set: a token here is residue of a finished run.
+      // `rounds` and `calls` are here for the reason `tries` and `budget` are: they are budgets,
+      // so a run that finishes without spending every round or every tool call it was allowed
+      // leaves the rest behind.
       expect([...REST_ROLES].sort()).toEqual([
-        'budget', 'done', 'free', 'halt', 'idle', 'nil', 'pause', 'ran', 'skipped', 'stopped', 'tries', 'waiting',
+        'budget', 'calls', 'done', 'free', 'halt', 'idle', 'nil', 'pause', 'ran', 'rounds', 'skipped',
+        'stopped', 'tries', 'waiting',
       ]);
       expect([...TERMINAL_ROLES].sort()).toEqual(['halt', 'pause', 'stopped', 'waiting']);
       // A *paused* class is encoded in codec mode `pause`, which pushes back the arrivals and
       // the retry unit and throws a CodecError on `X/in_empty` and on an OR input's edge
       // places. So the pause widening is exactly the four it writes back — no more.
+      // The agent round adds five: a round the pause caught mid-flight rests on them, and
+      // `encodeMarking` writes every one back onto `nodeExecutionStack` in n8n's own shape.
       const pauseWidening = [...PAUSE_REST_ROLES].filter((r) => !REST_ROLES.has(r)).sort();
-      expect(pauseWidening).toEqual(['hasdata', 'in-data', 'ready', 'retry']);
+      expect(pauseWidening).toEqual([
+        'dispatched', 'drained', 'hasdata', 'in-data', 'in-tool', 'outstanding', 'queue', 'ready', 'retry',
+      ]);
       // A *halted* class is encoded in mode `cancelled`, the one mode that legitimately sees
       // an undrained marking: it also handles the empty and the edge places, which a halt
       // stops draining (X_skip and the arms inhibit on _halt, not on _pause).
@@ -318,12 +326,12 @@ describe('the solver-free route (VER-010)', () => {
       // The cap is checked per expansion, so the class that trips it can carry its own
       // successors past the bound: what it promises is O(cap), not exactly cap.
       expect(space.classes).toBeLessThanOrEqual(1_000 + 8);
-      expect(space.truncationCause({ hasCycle: true, independentBranches: false })).toBe('cycle');
-      expect(space.truncationCause({ hasCycle: false, independentBranches: true })).toBe('parallelism');
+      expect(space.truncationCause({ hasCycle: true, independentBranches: false, agents: [] })).toBe('cycle');
+      expect(space.truncationCause({ hasCycle: false, independentBranches: true, agents: [] })).toBe('parallelism');
       // Neither shape: the cap was simply set below what the workflow needs. Reporting
       // "independent parallel branches" for a workflow that has none sends a reader looking
       // for a fan-out that is not there.
-      expect(space.truncationCause({ hasCycle: false, independentBranches: false })).toBe('cap');
+      expect(space.truncationCause({ hasCycle: false, independentBranches: false, agents: [] })).toBe('cap');
     });
 
     it('`maxClasses: 0` turns the route off entirely, which is M4\'s surface — and says so', { timeout: CASE_TIMEOUT_MS }, async () => {

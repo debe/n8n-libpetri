@@ -6,7 +6,7 @@
  * the required-input facts of the join gadget and the k-safety facts the budget check needs.
  */
 import type {
-  EdgeRef, JoinForm, NodeDescription, NodeTypeShape, OnError, WorkflowDescription,
+  EdgeRef, JoinForm, NodeDescription, NodeTypeShape, OnError, ToolConnection, WorkflowDescription,
 } from './types.js';
 
 /**
@@ -22,6 +22,51 @@ export const MIN_MAX_TRIES = 2;
 export const MAX_MAX_TRIES = 5;
 export const DEFAULT_WAIT_BETWEEN_TRIES_MS = 1000;
 export const MAX_WAIT_BETWEEN_TRIES_MS = 5000;
+
+/**
+ * The seed of `A/rounds` when the adapter could not read `options.maxIterations` statically —
+ * n8n's own default for that parameter (`agents/ToolsAgent/options.ts`), so an agent left at
+ * the default compiles to the bound it actually runs under.
+ *
+ * When the fallback is used the agent is marked {@link AnalysedNode.roundsAssumed}: the place
+ * might then bind before the node's own `checkMaxIterations` does, so the verifier must not
+ * claim a bound it cannot justify. It stays a *runtime* safety net either way — an agent that
+ * exhausts an assumed budget stops rather than looping forever.
+ */
+export const DEFAULT_MAX_AGENT_ROUNDS = 10;
+
+/**
+ * The seed of `A/calls` when a workflow declares no `options.maxToolCalls`: the tool calls an
+ * agent may dispatch in one execution, across every round. n8n has no such bound, so this is
+ * not a fallback for one — it is the bound, and the scheduler's.
+ *
+ * Two pressures set it, in opposite directions, and the number serves the runtime one.
+ *
+ * At run time it must not bite a legitimate agent: n8n's `maxIterations` default is 10, a model
+ * may make several tool calls per turn, and an agent that trips a cap it never asked for is an
+ * agent whose scheduler gets switched off. Sixty-four is above any ordinary execution and still
+ * a runaway guard; a run that reaches it fails by name, with the knob in the message.
+ *
+ * For verification it is far too large. The state-class graph explores every round size up to
+ * the budget, and the state space is a product of independent counters — `A/calls`,
+ * `A/outstanding`, `A/response`, and `T/in_tool` and `T/done` per tool, each 0…K — so it grows
+ * polynomially, about K^3.7 in the budget and m^2.8 in the tool count: on the real two-tool
+ * net, K = 4 is 7 968 classes, K = 6 is 41 697, K = 8 is 149 958, and a four-tool agent
+ * truncates at 8 (`tests/spikes/agent-round.test.ts`, `docs/verification.md`). So an agent left
+ * at this default verifies as `unknown` — truncated, with a report that names the assumed
+ * budget and says to declare a small `options.maxToolCalls` for a complete graph. A declared
+ * budget is both the runtime cap the workflow chose and the width of the claim its `proven`
+ * makes; the compiler marks an assumed one so the verifier never reports a bound it invented.
+ */
+export const DEFAULT_MAX_AGENT_TOOL_CALLS = 64;
+
+/** Options `analyse` reads. Kept separate from `CompileOptions`, which carries the action binder. */
+export interface AnalysisOptions {
+  /** Fallback seed for `A/rounds`; default {@link DEFAULT_MAX_AGENT_ROUNDS}. */
+  readonly maxAgentRounds?: number;
+  /** Default seed for `A/calls`; default {@link DEFAULT_MAX_AGENT_TOOL_CALLS}. */
+  readonly maxAgentToolCalls?: number;
+}
 
 export interface RetryParams {
   readonly maxTries: number;
@@ -81,6 +126,23 @@ export interface AnalysedNode {
    * models them as inputs that never receive a token.
    */
   readonly deadInputs: readonly number[];
+  /**
+   * The node is dispatched by an agent over `ai_tool` and has no `main` producer, so it
+   * compiles in the `tool` form. A node wired both ways keeps its `main` form and its tool
+   * connections are diagnosed and dropped — the agent then has no branch for it and a dispatch
+   * naming it fails loudly rather than half-working.
+   */
+  readonly isTool: boolean;
+  /** Tool nodes this node may dispatch, canvas order. Non-empty exactly when it is an agent. */
+  readonly tools: readonly string[];
+  /** Seed of `A/rounds` for an agent; `null` when the node is not an agent. */
+  readonly maxRounds: number | null;
+  /** `maxRounds` came from the compiler's fallback, not from the workflow: unbounded for verification. */
+  readonly roundsAssumed: boolean;
+  /** Seed of `A/calls` for an agent; `null` when the node is not an agent. */
+  readonly maxToolCalls: number | null;
+  /** `maxToolCalls` is the scheduler's default rather than a value the workflow declared. */
+  readonly toolCallsAssumed: boolean;
 }
 
 export interface MultiProducerInput {
@@ -117,6 +179,12 @@ export interface WorkflowAnalysis {
   readonly referenced: ReadonlySet<string>;
   /** Referenced nodes unreachable from every start node: `Y/skipped` is seeded. */
   readonly seededSkipped: ReadonlySet<string>;
+  /** Deduplicated `ai_tool` connections in canonical order (agent canvas index, then tool). */
+  readonly toolConnections: readonly ToolConnection[];
+  /** Agents that may dispatch each tool node. Only tool-form nodes appear. */
+  readonly agentsOf: ReadonlyMap<string, readonly string[]>;
+  /** Any node compiles in the `tool` form: the workflow has agent tool dispatch. */
+  readonly hasAgents: boolean;
   readonly diagnostics: readonly string[];
 }
 
@@ -143,6 +211,9 @@ export function requiredInputsOf(shape: NodeTypeShape): readonly number[] | null
  * not count); otherwise the join gadget, `choose-branch` when some inputs are required.
  */
 export function joinFormOf(a: AnalysedNode, incoming: readonly EdgeRef[]): JoinForm {
+  // A tool node has no `main` producer by construction (`analyse` only sets `isTool` when
+  // `incoming` is empty), so its input side is the agent's dispatch place and nothing else.
+  if (a.isTool) return 'tool';
   const indexes = new Set<number>(a.deadInputs);
   for (const e of incoming) indexes.add(e.inputIndex);
   if (indexes.size <= 1) {
@@ -164,6 +235,10 @@ function compareCanvas(a: NodeDescription, b: NodeDescription): number {
 
 function nonNegativeInt(v: number, what: string): void {
   if (!Number.isInteger(v) || v < 0) throw new Error(`${what} must be a non-negative integer, got ${v}`);
+}
+
+function positiveInt(v: number, what: string): void {
+  if (!Number.isInteger(v) || v < 1) throw new Error(`${what} must be a positive integer, got ${v}`);
 }
 
 /** Nodes reachable from any of `starts` over `succ`, never entering `avoid`. */
@@ -202,7 +277,7 @@ interface RawNode {
   readonly requiredInputs: readonly number[] | null;
 }
 
-export function analyse(workflow: WorkflowDescription): WorkflowAnalysis {
+export function analyse(workflow: WorkflowDescription, options: AnalysisOptions = {}): WorkflowAnalysis {
   const diagnostics: string[] = [];
   if (workflow.nodes.length === 0) throw new Error('compile: workflow has no nodes');
 
@@ -316,8 +391,75 @@ export function analyse(workflow: WorkflowDescription): WorkflowAnalysis {
     outgoing.get(e.from)!.push(e);
   }
 
+  // ---- ai_tool connections: which agent may dispatch which tool ----
+  // Kept out of `succ` deliberately. `succ` carries the main graph, and the SCC decomposition
+  // over it is what the emission rule reads (ADR 0002); a dispatch edge is not a data edge and
+  // must not turn an agent and its tool into one SCC. Reachability and depth are propagated
+  // separately below.
+  const toolsOf = new Map<string, string[]>();
+  const agentsOf = new Map<string, string[]>();
+  const toolConnections: ToolConnection[] = [];
+  const seenTool = new Set<string>();
+  for (const c of workflow.toolConnections ?? []) {
+    const agent = rawByName.get(c.agent);
+    const tool = rawByName.get(c.tool);
+    if (agent === undefined) throw new Error(`compile: ai_tool connection to unknown node '${c.agent}'`);
+    if (tool === undefined) throw new Error(`compile: ai_tool connection from unknown node '${c.tool}'`);
+    if (c.agent === c.tool) {
+      diagnostics.push(`node '${c.agent}' is wired as its own ai_tool; ignored`);
+      continue;
+    }
+    const key = `${c.tool} -> ${c.agent}`;
+    if (seenTool.has(key)) {
+      diagnostics.push(`duplicate ai_tool connection ${c.tool} -> ${c.agent}; ignored`);
+      continue;
+    }
+    // A tool node has no main producer in n8n: its only input is the agent's dispatch. One that
+    // has both is malformed, and half-compiling it would give the agent a branch whose input
+    // place is also fed by a main edge. Drop the tool wiring, say so, and let a dispatch naming
+    // the node fail by name at run time.
+    if (incoming.get(c.tool)!.length > 0) {
+      diagnostics.push(
+        `node '${c.tool}' is wired as an ai_tool of '${c.agent}' but also has a main producer; ` +
+        'the tool connection is ignored and a dispatch naming it will fail');
+      continue;
+    }
+    seenTool.add(key);
+    toolConnections.push({ agent: c.agent, tool: c.tool });
+  }
+  toolConnections.sort((x, y) =>
+    (rawByName.get(x.agent)!.index - rawByName.get(y.agent)!.index) ||
+    (rawByName.get(x.tool)!.index - rawByName.get(y.tool)!.index));
+  for (const c of toolConnections) {
+    let tools = toolsOf.get(c.agent);
+    if (tools === undefined) toolsOf.set(c.agent, tools = []);
+    tools.push(c.tool);
+    let agents = agentsOf.get(c.tool);
+    if (agents === undefined) agentsOf.set(c.tool, agents = []);
+    agents.push(c.agent);
+  }
+  for (const tool of agentsOf.keys()) {
+    if (outgoing.get(tool)!.length > 0) {
+      diagnostics.push(
+        `ai_tool node '${tool}' has main consumers; a tool's output goes to its agent, ` +
+        'so those connections never carry a token');
+    }
+  }
+
   // ---- reachability from the union of the start nodes ----
+  // A tool is reachable exactly when an agent that can dispatch it is: it has no main producer,
+  // so nothing else could reach it. Iterated to a fixpoint because a tool may itself be an agent
+  // (n8n's AgentTool — an agent used as another agent's tool).
   const reachable = reachFrom(startNodes, succ, null);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const c of toolConnections) {
+      if (reachable.has(c.agent) && !reachable.has(c.tool)) {
+        reachable.add(c.tool);
+        changed = true;
+      }
+    }
+  }
 
   // ---- depth: longest path over the condensation from any start node, in topological order ----
   // Tarjan emits SCCs in reverse topological order, so walking them backwards visits every
@@ -337,12 +479,28 @@ export function analyse(workflow: WorkflowDescription): WorkflowAnalysis {
     }
   }
   const depth = new Map<string, number>();
-  let maxDepth = 0;
-  for (const r of raws) {
-    const d = Math.max(0, sccDepth[sccOf.get(r.node.name)!]!);
-    depth.set(r.node.name, d);
-    if (d > maxDepth) maxDepth = d;
+  for (const r of raws) depth.set(r.node.name, Math.max(0, sccDepth[sccOf.get(r.node.name)!]!));
+  // A tool is not on the main graph, so the condensation gave it 0. It runs one step below the
+  // agent that dispatches it, and `X_start` priority is depth, so it must sort below its agent
+  // and above nothing else. Iterated for the agent-as-tool case; `toolConnections.length` passes
+  // is enough for any acyclic dispatch graph, and a cyclic one (an agent reachable from its own
+  // tool) is diagnosed and left at the depth it reached.
+  for (let pass = 0; pass <= toolConnections.length; pass++) {
+    let changed = false;
+    for (const c of toolConnections) {
+      const want = depth.get(c.agent)! + 1;
+      if (depth.get(c.tool)! < want) {
+        depth.set(c.tool, want);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+    if (pass === toolConnections.length) {
+      diagnostics.push('ai_tool dispatch has a cycle (an agent is reachable from its own tool); depths are truncated');
+    }
   }
+  let maxDepth = 0;
+  for (const d of depth.values()) if (d > maxDepth) maxDepth = d;
 
   // ---- references: classified by reachability avoiding the referencing node ----
   const referenced = new Set<string>();
@@ -403,13 +561,36 @@ export function analyse(workflow: WorkflowDescription): WorkflowAnalysis {
     deadInputsOf.set(r.node.name, dead);
   }
 
-  const analysed: AnalysedNode[] = raws.map((r) => ({
-    node: r.node, shape: r.shape, index: r.index, outputCount: r.outputCount,
-    errorOutputIndex: r.errorOutputIndex, onError: r.onError, retryOnFail: r.retryOnFail,
-    maxTries: r.maxTries, waitBetweenTries: r.waitBetweenTries,
-    references: referencesOf.get(r.node.name)!,
-    allRequired: r.allRequired, requiredInputs: r.requiredInputs, deadInputs: deadInputsOf.get(r.node.name)!,
-  }));
+  const fallbackRounds = options.maxAgentRounds ?? DEFAULT_MAX_AGENT_ROUNDS;
+  positiveInt(fallbackRounds, 'maxAgentRounds');
+  const defaultCalls = options.maxAgentToolCalls ?? DEFAULT_MAX_AGENT_TOOL_CALLS;
+  positiveInt(defaultCalls, 'maxAgentToolCalls');
+  const analysed: AnalysedNode[] = raws.map((r) => {
+    const tools = toolsOf.get(r.node.name) ?? [];
+    const isAgent = tools.length > 0;
+    const declared = r.node.maxRounds;
+    if (isAgent && declared !== undefined) positiveInt(declared, `node '${r.node.name}' maxRounds`);
+    if (isAgent && declared === undefined) {
+      diagnostics.push(
+        `agent '${r.node.name}' does not declare a static maxIterations; A/rounds is seeded with ` +
+        `${fallbackRounds} and the agent counts as unbounded for verification`);
+    }
+    const declaredCalls = r.node.maxToolCalls;
+    if (isAgent && declaredCalls !== undefined) positiveInt(declaredCalls, `node '${r.node.name}' maxToolCalls`);
+    return {
+      node: r.node, shape: r.shape, index: r.index, outputCount: r.outputCount,
+      errorOutputIndex: r.errorOutputIndex, onError: r.onError, retryOnFail: r.retryOnFail,
+      maxTries: r.maxTries, waitBetweenTries: r.waitBetweenTries,
+      references: referencesOf.get(r.node.name)!,
+      allRequired: r.allRequired, requiredInputs: r.requiredInputs, deadInputs: deadInputsOf.get(r.node.name)!,
+      isTool: agentsOf.has(r.node.name),
+      tools,
+      maxRounds: isAgent ? (declared ?? fallbackRounds) : null,
+      roundsAssumed: isAgent && declared === undefined,
+      maxToolCalls: isAgent ? (declaredCalls ?? defaultCalls) : null,
+      toolCallsAssumed: isAgent && declaredCalls === undefined,
+    };
+  });
   const byName = new Map<string, AnalysedNode>();
   for (const a of analysed) byName.set(a.node.name, a);
 
@@ -427,7 +608,8 @@ export function analyse(workflow: WorkflowDescription): WorkflowAnalysis {
   return {
     startNode: primaryStart, startNodes,
     nodes: analysed, byName, edges, incoming, outgoing, sccOf, sccs, cyclic, reachable,
-    depth, maxDepth, hasCycle: cyclic.size > 0, multiProducerInputs, referenced, seededSkipped, diagnostics,
+    depth, maxDepth, hasCycle: cyclic.size > 0, multiProducerInputs, referenced, seededSkipped,
+    toolConnections, agentsOf, hasAgents: toolConnections.length > 0, diagnostics,
   };
 }
 

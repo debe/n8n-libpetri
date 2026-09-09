@@ -47,7 +47,7 @@
  * Milestones M4 (the surface) and M5 (the solver-free route).
  */
 export {
-  verify, verifyCompiled, DEFAULT_PROPERTIES, DEFAULT_TIMEOUT_MS, SMT_MAX_FLAT_PLACES,
+  verify, verifyCompiled, assertLibpetriSurface, DEFAULT_PROPERTIES, DEFAULT_TIMEOUT_MS, SMT_MAX_FLAT_PLACES,
   SMT_MAX_JOIN_INPUTS, alternativeEntryReach, budgetSemiflowOf, exclusionPairs, invariantTerms,
   markingStateOf, producersOf, renderInvariant, resolveSolver, selectProperties, smtRefusalFor,
   truncationShapeOf,

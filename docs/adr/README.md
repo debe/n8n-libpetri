@@ -9,6 +9,7 @@
 | [0005](0005-marking-codec.md) | The marking codec and Wait-node resume | accepted (amended M2 with the landed mapping) |
 | [0006](0006-concurrency.md) | Payload safety and the k > 1 semantics | accepted |
 | [0007](0007-verification.md) | The verification surface: what the property table proves, and what it cannot | accepted (amended M5: the state-class graph is the primary route, z3 the fallback) |
+| [0008](0008-agent-tool-dispatch.md) | Agent tool dispatch: the round is a marking | accepted |
 
 Each ADR has Context / Decision / Consequences / Evidence; Evidence names the spike under
 `typescript/tests/spikes/` that pins the behaviour it rests on.
