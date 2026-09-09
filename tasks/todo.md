@@ -450,15 +450,14 @@ an upstream ask, or work that was specified and deliberately not built.
       makes parallel breadth the one place where all three proof mechanics are slow or absent,
       and it prices the two fixes: interning the marking key (~12 kB per class today) buys a
       constant factor, while partial-order reduction is what would change the exponent.
-      **Surveyed in [`docs/research-wide-nets.md`](../docs/research-wide-nets.md)** (2026-09-09)
-      against the literature: the load-bearing observation is that proper completion is a
-      property of *quiescent markings only*, which is exactly what a deadlock-preserving stubborn
-      set preserves — so partial-order reduction is sound for this property, and TAPAAL has
-      already published and implemented the inhibitor-arc extension we would need. Structural
-      reduction ranks first for cost, since these nets come from a fixed gadget and are full of
-      systematically reducible intermediate places, though our property's large support caps the
-      win at a constant factor. Unfoldings are the best theoretical fit for breadth and are
-      blocked by our inhibitor arcs
+      **Surveyed against the literature, 2026-09-09**: the load-bearing observation is that proper
+      completion is a property of *quiescent markings only*, which is exactly what a
+      deadlock-preserving stubborn set preserves — so partial-order reduction is sound for this
+      property, and TAPAAL has already published and implemented the inhibitor-arc extension we
+      would need. Structural reduction ranks first for cost, since these nets come from a fixed
+      gadget and are full of systematically reducible intermediate places, though our property's
+      large support caps the win at a constant factor. Unfoldings are the best theoretical fit for
+      breadth and are blocked by our inhibitor arcs
 - [x] **A coverability / cutoff route for cyclic workflows**, which would turn today's `bounded`
       into a `proven` on Loop Over Items without changing the net. *Reached another way,
       2026-09-08: the SMT fallback, asked as the graph's own question with the state equation on
