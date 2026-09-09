@@ -255,6 +255,16 @@ an upstream ask, or work that was specified and deliberately not built.
       choice and not a *correctness* one: where the minimal set is exponential the survivors are
       an arbitrary truncation, so a proof needing one particular law can miss it anyway.
 
+      **Refinement, and it qualifies the recommendation**: everything above priced the
+      *pipeline*. Fewer invariants can leave the solver more work, and on `switch20` — the
+      branchiest fixture, 22 nodes and 238 places — the whole query is **slower** under
+      `'auto'`: proven in 442.5 s with 44 invariants, against 351.3 s with 64 when the union is
+      forced. Still no verdict moved either way. So `'auto'` is right where preprocessing
+      dominates (the `layers` family, 135 s against 2.6 s) and costs about a quarter of the wall
+      clock where the proof dominates. The total is what a caller waits for, not the phase, and
+      neither setting wins on every shape — which is an argument for measuring per shape rather
+      than for changing the default again.
+
       **Upstream's own rule, applied here.** libpetri now says to enable the union when the
       report carries `Dropped invariant:` / `Dropped semiflow:` lines naming a consume-all or
       reset place, because that is when the basis is deficient, and to leave it off on a branchy
@@ -374,7 +384,24 @@ an upstream ask, or work that was specified and deliberately not built.
       graph's classification
 - [ ] **Partial-order reduction in the state-class graph** (NU-053 names its absence). Independent
       branches are what a workflow engine produces, and they are the one truncation shape the
-      `bounded` verdict cannot soften
+      `bounded` verdict cannot soften. **Measured 2026-09-09, and the cap is not the binding
+      constraint**: `switch20` (22 nodes, 238 places) is still truncated at a 400 000-class cap
+      after 183.6 s and 4.07 GB, and aborts a 12 GB heap at 1 000 000 — so its graph is not
+      "just above the default", and raising `maxClasses` does not reach it. libpetri's own
+      enumeration route (VER-017) is the same mechanism at a 50 000 budget, so it declines
+      sooner. On this shape the **only** route that decides is the solver, at 351-442 s. That
+      makes parallel breadth the one place where all three proof mechanics are slow or absent,
+      and it prices the two fixes: interning the marking key (~12 kB per class today) buys a
+      constant factor, while partial-order reduction is what would change the exponent.
+      **Surveyed in [`docs/research-wide-nets.md`](../docs/research-wide-nets.md)** (2026-09-09)
+      against the literature: the load-bearing observation is that proper completion is a
+      property of *quiescent markings only*, which is exactly what a deadlock-preserving stubborn
+      set preserves — so partial-order reduction is sound for this property, and TAPAAL has
+      already published and implemented the inhibitor-arc extension we would need. Structural
+      reduction ranks first for cost, since these nets come from a fixed gadget and are full of
+      systematically reducible intermediate places, though our property's large support caps the
+      win at a constant factor. Unfoldings are the best theoretical fit for breadth and are
+      blocked by our inhibitor arcs
 - [x] **A coverability / cutoff route for cyclic workflows**, which would turn today's `bounded`
       into a `proven` on Loop Over Items without changing the net. *Reached another way,
       2026-09-08: the SMT fallback, asked as the graph's own question with the state equation on

@@ -341,9 +341,15 @@ raw numbers are in [`docs/differential.md`](docs/differential.md).
   can differ when actions complete concurrently.
 - An in-flight sibling may finish after another node halts the execution.
 - Verification does not prove general liveness, value properties, timing or order.
-- The verifier returns `unknown` on large parallel state spaces, and `bounded` on cyclic
-  searches the SMT fallback does not close — the graph alone can only bound a cycle; the
-  fallback proves the Loop Over Items fixture and is what a `proven` there rests on.
+- On a large parallel shape the state-class graph truncates, and at the default 60 s budget the
+  report says `unknown`. That is the budget, not a boundary: `switch20` (22 nodes, 238 places)
+  is **proven** by the SMT fallback in about 6 minutes. Read an `unknown` as "not within the
+  time given" and raise `--timeout` before concluding anything about the workflow. Raising
+  `--max-classes` does *not* help on this shape: the graph is still truncated at 400,000
+  classes and 4 GB, so the solver is the only route that decides it.
+- A cyclic search is `bounded` where the fallback does not close it — the graph alone can only
+  ever bound a cycle; the fallback proves the Loop Over Items fixture in 0.5 s, and that is what
+  a `proven` there rests on.
 
 [`docs/divergences.md`](docs/divergences.md) and
 [`docs/state-of-the-project.md`](docs/state-of-the-project.md) track these constraints.
