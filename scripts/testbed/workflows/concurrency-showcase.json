@@ -1,0 +1,377 @@
+{
+  "name": "Concurrency Showcase",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        300
+      ],
+      "id": "0dea2ac8-f71a-5e3c-adce-a5b43e5bf2e6",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "legs",
+              "type": "number",
+              "value": 4
+            },
+            {
+              "id": "2",
+              "name": "note",
+              "type": "string",
+              "value": "four independent legs, each sleeping 1.2 s"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -240,
+        300
+      ],
+      "id": "c2db7e4a-2c8a-5323-815f-c558ef91b73a",
+      "name": "Seed"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c9936ecf-9e92-5fb3-85f4-f470be5a7a10",
+              "leftValue": "={{ $json.legs }}",
+              "rightValue": 4,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -20,
+        300
+      ],
+      "id": "b29c0589-8d7b-5590-a156-f9984c7281f9",
+      "name": "Route"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        200,
+        160
+      ],
+      "id": "9d28c87d-33bf-58f2-a6e7-d6d79fd8d112",
+      "name": "Fan"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "note",
+              "type": "string",
+              "value": "fewer than four legs — nothing to fan out"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -20,
+        560
+      ],
+      "id": "e97c78fa-9c1b-5909-ba67-f1b32f7e8c2b",
+      "name": "Skipped"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 1200));\nreturn [{ json: { leg: 'A' } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        -100
+      ],
+      "id": "39437b8e-45b1-597a-8475-27d2c6bb68ff",
+      "name": "Fetch A"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 1200));\nreturn [{ json: { leg: 'B' } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        60
+      ],
+      "id": "874c3877-4ba5-5182-b4e8-ed01f74d6b56",
+      "name": "Fetch B"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 1200));\nreturn [{ json: { leg: 'C' } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        220
+      ],
+      "id": "eccd6cbe-693b-58a2-a31c-e5a7c38e2109",
+      "name": "Fetch C"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 1200));\nreturn [{ json: { leg: 'D' } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        380
+      ],
+      "id": "c3db0b0b-6d85-5cc0-a066-e6941c5d410e",
+      "name": "Fetch D"
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        680,
+        -20
+      ],
+      "id": "f3b529ae-7e56-56f8-95ae-614586173412",
+      "name": "Merge AB"
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        680,
+        300
+      ],
+      "id": "595071d2-5ece-513f-9d1b-8cc50f4a8559",
+      "name": "Merge CD"
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        900,
+        140
+      ],
+      "id": "ec1696b0-db2b-593a-8d68-23af951afd6e",
+      "name": "Merge All"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Deterministic by construction: Merge in `append` mode concatenates input 0 then\n// input 1 whatever order the branches finished in, so this string is the same at\n// every budget and under either engine.\nconst legs = $input.all().map((item) => item.json.leg);\nreturn [{ json: { legs: legs.length, order: legs.join(',') } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        140
+      ],
+      "id": "2153f842-acbd-5533-ae66-3dace1a47279",
+      "name": "Summarise"
+    }
+  ],
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Seed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seed": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "Fan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan": {
+      "main": [
+        [
+          {
+            "node": "Fetch A",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch B",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch C",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch D",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch A": {
+      "main": [
+        [
+          {
+            "node": "Merge AB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch B": {
+      "main": [
+        [
+          {
+            "node": "Merge AB",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Fetch C": {
+      "main": [
+        [
+          {
+            "node": "Merge CD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch D": {
+      "main": [
+        [
+          {
+            "node": "Merge CD",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge AB": {
+      "main": [
+        [
+          {
+            "node": "Merge All",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge CD": {
+      "main": [
+        [
+          {
+            "node": "Merge All",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge All": {
+      "main": [
+        [
+          {
+            "node": "Summarise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

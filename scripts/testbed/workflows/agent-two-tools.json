@@ -1,0 +1,173 @@
+{
+  "name": "Agent · Two Tools",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -360,
+        0
+      ],
+      "id": "99b4cb40-2959-5c81-b78a-309789deab96",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "Work out 23 * 19 with the calculator and, in the same turn, ask the fact lookup tool about it. Use both tools.",
+        "hasOutputParser": false,
+        "needsFallback": false,
+        "options": {
+          "maxIterations": 4,
+          "enableStreaming": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -100,
+        0
+      ],
+      "id": "ebb9337b-ace5-561f-b800-1e0b2f5f50a4",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "answer",
+              "type": "string",
+              "value": "={{ $json.output }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        260,
+        0
+      ],
+      "id": "a1dd3ac4-97d2-570b-b0a3-c204c0e47500",
+      "name": "Answer"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "stub-model",
+          "mode": "list",
+          "cachedResultName": "stub-model"
+        },
+        "options": {},
+        "responsesApiEnabled": false
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -200,
+        220
+      ],
+      "id": "23bf6f30-67ef-5d8f-93c7-1cb5d8c22a7a",
+      "name": "Stub Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "testbed-stub-openai",
+          "name": "Stub OpenAI (testbed)"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.toolCalculator",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        220
+      ],
+      "id": "027eb8d7-cd26-5f0b-a299-45605fabfa68",
+      "name": "Calculator"
+    },
+    {
+      "parameters": {
+        "description": "Call this tool to look up a note about an arithmetic expression. The input is the expression as a string.",
+        "language": "javaScript",
+        "jsCode": "// Deterministic: the answer depends only on the query the model supplied.\nreturn 'fact lookup saw: ' + query;\n"
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.3,
+      "position": [
+        120,
+        220
+      ],
+      "id": "3151483b-64f4-5f28-b751-82fa7c504534",
+      "name": "Fact_Lookup"
+    }
+  ],
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stub Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculator": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fact_Lookup": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

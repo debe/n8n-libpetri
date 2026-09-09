@@ -154,7 +154,44 @@
       with helpers back to 1613/1613 and 2080/2080, and **no restatement** — 4 regressions, all
       registered divergences. Divergences #22–#24 added
 
-**The plan through M7 is done.** Everything below is what it left open.
+## M8 — The live testbed
+
+- [x] **The engine runs inside the process n8n ships.** `scripts/testbed/preload.mjs` is the
+      server-side equivalent of the vitest shim: an `--import` preload that resolves `n8n-core`
+      and `n8n-workflow` through a `createRequire` rooted at `packages/cli/package.json` — the
+      same realpath, so the same CJS registry instance `WorkflowExecute` reads — and calls
+      `registerPetriScheduler`. It throws rather than falling back, and registration ("scheduler
+      registered") is logged separately from entry (`ENGINE_ENTERED_DIAGNOSTIC`), because only an
+      execution establishes the second
+- [x] **`packages/core/dist` was stale and is now rebuilt by the launcher.** The server loads
+      `dist`, not `src`, and the committed `dist` predated M7: no `planEngineRequest`, which is
+      what an agent round calls. `n8n-testbed.sh` rebuilds through `.n8n/node_modules/.bin/tsc`
+      + `tsc-alias` (no pnpm needed) when `dist` is older than the patched source, then asserts
+      both `getWorkflowSchedulerFactory` and `planEngineRequest` are in the built file
+- [x] **Two seeded workflows, both real n8n exports** (the repo previously had none — every
+      fixture is a `WorkflowDescription` of structural stubs). *Concurrency Showcase*: 13 nodes,
+      an If, a four-way fan of 1.2 s Code legs and three Merge joins, acyclic with one producer
+      per input index so k-safety leaves the budget alone. *Agent · Two Tools*: AgentV3 with a
+      Calculator and a Code tool over `ai_tool`, driven by `stub-llm.mjs`, a local
+      OpenAI-compatible model with a fixed script — one `tool_calls` message naming both tools,
+      then an answer, so the round is a genuine two-outstanding fan-out with no key or network
+- [x] **Measured 2026-09-10, best of two, n8n 2.37.0 @ `441970b2`, Node 26.8.1**: Concurrency
+      Showcase at legacy 4944 ms, libpetri k = 1 4944 ms, **k = 4 1284 ms**; Agent · Two Tools at
+      131 / 129 / 130 ms. `runData` **identical** on every leg, all 14 (resp. 2) realised
+      dependency edges respected, and the k = 4 order reordered exactly as expected — n8n runs
+      `Merge AB` before it starts `Fetch C`, the net starts all four legs first
+- [x] `diff-engines.sh` boots one server per engine (the preload reads the engine once, at start)
+      and `run.mjs` drives `POST /rest/workflows/:id/run`, the editor's own manual-execution path.
+      `tests/testbed/compare-run.ts` reuses `firstDifference`, `dependencyEdges`, `activationKey`
+      and `executionOrder` from `src/conformance/differ.ts`; it lives under `tests/` so
+      `npm run check` typechecks it and vitest does not collect it
+- [x] `browser-check.sh` drives the editor with `agent-browser` — sign in, execute, wait for
+      n8n's own success toast, screenshot the canvas — and fails if nothing entered the engine
+- [x] `docs/testbed.md` records what it demonstrates and what it does not: it is an integration
+      harness, not a conformance measurement, divergence #17 is unreachable on these two
+      workflows, and the k > 1 agent leg exercises divergence #23 on purpose
+
+**The plan through M8 is done.** Everything below is what it left open.
 
 ---
 
@@ -193,6 +230,22 @@ an upstream ask, or work that was specified and deliberately not built.
       per-input order-determined/multi-firing analysis in `src/compiler/graph.ts`, changes
       `effectiveBudget` for cyclic fixtures and re-pins `tests/compiler/budget.test.ts`. This is
       what would let the most common cyclic workflow in n8n use the budget at all
+
+- [ ] **The testbed has no cyclic workflow.** Both seeded workflows are acyclic on purpose, so
+      nothing there shows the compiler lowering `k` to 1 on a cycle and saying so. A Loop Over
+      Items demo would make the honest half of the concurrency story visible in the editor
+      rather than only in `docs/divergences.md` — and it is the shape the k-safety relaxation
+      above would change
+- [ ] **The testbed's happens-before check is millisecond-resolution.** A live server produces no
+      `runNode` trace, so `tests/testbed/compare-run.ts` reads n8n's own per-task `startTime` and
+      `executionTime`. Two activations inside the same millisecond cannot be ordered by it, so an
+      inversion between two sub-millisecond nodes would not be seen. The `FakeHost` differ has a
+      real sequence counter and does not have this limit; the live leg is the weaker instrument
+      and should be read as such
+- [ ] **`stub-llm.mjs` does not speak the Responses API.** The workflow sets
+      `responsesApiEnabled: false` to avoid it, which is a documented step rather than a
+      limitation of the engine — but it means the testbed never exercises whatever an
+      `EngineRequest` looks like when it comes out of that path
 
 ### 2. Model and compiler corners
 

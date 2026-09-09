@@ -13,6 +13,9 @@ coverage/
 # Conformance artefacts
 conformance-results/
 
+# Live testbed runtime state (sqlite db, logs, pids, screenshots)
+.testbed/
+
 # IDE / OS
 .idea/
 .vscode/

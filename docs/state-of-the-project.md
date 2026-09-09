@@ -66,6 +66,12 @@ cases without finding another failure class.
 The exact case matrix is in [`conformance-final.md`](conformance-final.md). Do not infer
 full n8n compatibility from the summary table.
 
+The `cli` row still reads "registered, never entered", and that is still true *of that suite*:
+`packages/cli`'s tests mock `n8n-core`'s `WorkflowExecute` before they reach a scheduler, so its
+junit is evidence of patch neutrality. The engine is nonetheless entered by a cli-shaped
+process — just not by that suite. [`testbed.md`](testbed.md) boots the real `packages/cli` with
+the scheduler installed and records the run.
+
 ### Differential harness
 
 The current sweep runs 25 fixtures at budgets 1, 2 and 4:

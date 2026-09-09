@@ -8,6 +8,7 @@ ignored `conformance-results/` directory.
 | `bootstrap-n8n.sh` | Fetch, install, build and test the pinned unpatched n8n commit. |
 | `verify-patch.sh` | Reset the patch scope, apply both integration patches and optionally build it. |
 | `run-conformance.sh` | Run selected n8n suites under the legacy or Petri scheduler and compare junit results. |
+| `testbed/` | Boot the real n8n editor with the Petri scheduler installed, seed two demo workflows, and compare both engines in a live server. See [`testbed/README.md`](testbed/README.md). |
 
 All scripts use `set -euo pipefail`, validate their postconditions and fail if expected junit
 or build artifacts are missing.

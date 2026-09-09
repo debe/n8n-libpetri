@@ -32,6 +32,8 @@ budget, marking codec) and the design principles live in the root
   and none of `packages/workflow`'s or `packages/cli`'s. Headline numbers are loop-driving
   cases passed; pure-helper cases are stated separately. A scope whose tests never construct a
   scheduler is a patch-neutrality leg, not an engine result — say which one a number is.
+  The live testbed (`scripts/testbed/`, `docs/testbed.md`) is neither: it is an integration
+  harness, and its wall clocks and data-equivalence results are never conformance numbers.
 
 ## Build and test commands
 
@@ -73,6 +75,19 @@ scripts/verify-patch.sh       # re-apply patches to the pinned commit; fails on 
 ```
 
 Pinned n8n commit: `441970b` (master; the release tag predates n8n's helper extraction).
+
+### Live testbed (`scripts/testbed/`)
+
+```bash
+scripts/testbed/n8n-testbed.sh     # real n8n editor on the net at http://127.0.0.1:5678
+scripts/testbed/diff-engines.sh    # both engines in a live server, compared on data and order
+scripts/testbed/browser-check.sh   # drive the editor, screenshot the canvas
+```
+
+The engine reaches a running server through an `--import` preload (`scripts/testbed/preload.mjs`),
+not the vitest shim. It rebuilds `packages/core` when `dist` is older than the patched source,
+because the server loads `dist` and `planEngineRequest` lives only in the patch. Everything
+runtime is in the gitignored `.testbed/`. See `docs/testbed.md`.
 
 ### Verification
 
