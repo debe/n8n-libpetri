@@ -557,8 +557,11 @@ scripts/testbed/record-demo.sh                       # Resilient Fan-Out at k = 
 scripts/testbed/record-demo.sh --workflow="Agent · Two Tools" --budget=1
 ```
 
-Video: `.testbed/video/<workflow>-<engine>-k<budget>.webm`, continuous at 10 fps. The clips above
-are these recordings, converted to GIF.
+Video: `.testbed/video/<workflow>-<engine>-k<budget>.webm`, continuous at 10 fps.
+`scripts/testbed/make-gifs.sh` converts them to the GIFs this document embeds — GitHub sanitises
+`<video>` out of Markdown, so a committed WebM would render as a download link. Each GIF holds its
+final frame for two or three seconds, because a GIF loops without pausing and the shortest run
+here finishes in about 700 ms; without the hold the result is gone before it can be read.
 
 Three things the script has to get right.
 
