@@ -8,7 +8,8 @@
  * *when*: the round is a marking, so a paused or halted execution keeps it, the budget bounds
  * how many tools are in flight, and `A/rounds` bounds how many times the agent may go round.
  */
-import { agentOneTool, agentTwoTools, conn, node } from '../fixtures/workflows.js';
+import { agentOneTool, agentToolPolicy, agentTwoTools, conn, node } from '../fixtures/workflows.js';
+import { compile } from '../../src/compiler/index.js';
 import { execute, items, ranNodes, sleep } from './support.js';
 
 const START = items({ n: 1 });
@@ -302,5 +303,109 @@ describe('the tool-call budget', () => {
     const ran = (name: string) => (r.runData[name] ?? []).filter((t) => t.data !== undefined).length;
     expect(ran('Calculator')).toBe(2);
     expect(ran('Search')).toBe(1);
+  });
+});
+
+/**
+ * An `onFailure` chain on the **tool**, which is the node that calls the flaky service. n8n has
+ * `retryOnFail` there and no deadline at any level, so this is the shape where a per-node policy
+ * buys an agent something n8n cannot express.
+ *
+ * A tool's outcome is its agent's `A/response`, not a main edge, so only three actions mean
+ * anything on one — and the fourth has to be refused rather than compiled into something
+ * incoherent.
+ */
+describe('a policy on an agent\'s tool', () => {
+  const asking = () => {
+    let asked = false;
+    return () => {
+      if (asked) return { data: [items({ answer: 'done' })] };
+      asked = true;
+      return {
+        actions: [{
+          actionType: 'ExecutionNodeAction' as const, nodeName: 'Calculator', input: { q: 1 },
+          type: 'ai_tool' as const, id: 'c0', metadata: {},
+        }],
+        metadata: { requestId: 'r1' },
+      };
+    };
+  };
+
+  it('retries the tool on its own delay and the agent never sees the failure', async () => {
+    const r = await execute(agentToolPolicy({
+      onFailure: [{ action: 'retry', waitMs: 5 }, { action: 'retry', waitMs: 5 }, { action: 'continue' }],
+    }), {
+      Agent: asking(),
+      Calculator: ({ call }) => {
+        if (call < 2) throw new Error(`flaky ${call}`);
+        return { data: [items({ result: 42 })] };
+      },
+    }, { startItems: START });
+
+    expect(r.error).toBeUndefined();
+    expect(r.scheduler.outcome).toBe('completed');
+    // Three calls for one dispatch: the chain is per activation, and the agent resumed once.
+    expect(ranNodes(r.calls).filter((n) => n === 'Calculator')).toHaveLength(3);
+    expect(r.runData.Calculator![0]!.executionStatus).toBe('success');
+    expect(r.runData.End).toHaveLength(1);
+  });
+
+  it('continue hands the error to the agent as its tool response, which is n8n\'s own default', async () => {
+    // `workflow-execute.ts`: "AI tools default to continue-on-fail so the agent receives the
+    // error as a tool response", and it surfaces `{ json: { error } }` on the ai_tool channel.
+    const r = await execute(agentToolPolicy({ onFailure: [{ action: 'continue' }] }), {
+      Agent: asking(),
+      Calculator: () => { throw new Error('service down'); },
+    }, { startItems: START });
+
+    expect(r.error).toBeUndefined();
+    expect(r.scheduler.outcome).toBe('completed');
+    expect(r.runData.Calculator![0]!.executionStatus).toBe('error');
+    // On `main`, not `ai_tool`: the mirror records `rewireOutputLog` and no-ops it, so the
+    // channel move n8n's own host performs afterwards is out of scope here. What matters is
+    // the payload — the error itself, not the tool's input passed through.
+    expect(r.runData.Calculator![0]!.data!.main![0]![0]!.json).toEqual({ error: 'service down' });
+    expect(r.runData.End).toHaveLength(1);
+  });
+
+  it('stop halts the execution on the tool, which n8n reaches only through onError', async () => {
+    const r = await execute(agentToolPolicy({ onFailure: [{ action: 'stop' }] }), {
+      Agent: asking(),
+      Calculator: () => { throw new Error('fatal'); },
+    }, { startItems: START });
+
+    expect(r.error).toBeUndefined();
+    expect(r.scheduler.outcome).toBe('halted');
+    expect(r.runData.Calculator![0]!.executionStatus).toBe('error');
+    expect(r.runData.End).toBeUndefined();
+  });
+
+  it('abandons a tool that never answers at its own deadline, and the agent carries on', async () => {
+    // The thing n8n has at no level: a per-tool deadline. Without one a hung tool holds the
+    // agent — and therefore the execution — until n8n's whole-execution timeout. [IO-013]
+    // abandons the firing and the chain's `continue` hands the agent an error tool response,
+    // which is the same shape a thrown tool failure takes.
+    let resolvedLate = false;
+    const r = await execute(agentToolPolicy({
+      timeoutMs: 40,
+      onFailure: [{ action: 'continue' }],
+    }), {
+      Agent: asking(),
+      Calculator: async () => { await sleep(400); resolvedLate = true; return { data: [items({ never: true })] }; },
+    }, { startItems: START });
+
+    expect(r.error).toBeUndefined();
+    expect(r.scheduler.outcome).toBe('completed');
+    expect(r.runData.Calculator![0]!.executionStatus).toBe('error');
+    expect(r.runData.Calculator![0]!.error?.message).toMatch(/deadline|timeout|40/i);
+    // The agent resumed and the workflow finished while the tool was still working: IO-013 is
+    // explicit that abandoning a firing is not cancelling the work behind it.
+    expect(r.runData.End).toHaveLength(1);
+    expect(resolvedLate).toBe(false);
+  });
+
+  it('refuses route: a tool has no output to route to', () => {
+    expect(() => compile(agentToolPolicy({ onFailure: [{ action: 'route', output: 0 }] })))
+      .toThrow(/Calculator.*no output to route to.*goes to its agent/s);
   });
 });

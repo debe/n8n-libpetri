@@ -582,8 +582,18 @@ export class FakeHost implements SchedulerHost {
     taskData.executionStatus = 'error';
     const node = executionData.node;
     const continues = node.continueOnFail === true || ['continueRegularOutput', 'continueErrorOutput'].includes(node.onError ?? '');
-    if (continues) {
-      if (Object.hasOwn(executionData.data, 'main') && executionData.data.main!.length > 0) {
+    // n8n's own two-part tool rule (`workflow-execute.ts`): "AI tools default to continue-on-fail
+    // so the agent receives the error as a tool response. Explicit `onError: 'stopWorkflow'`
+    // still wins." A failing tool therefore continues with **no** `onError` at all, and what it
+    // hands back is the error itself rather than its input passed through. The tag is the one
+    // `planEngineRequest` set when it reserved the slot.
+    const isAiToolExecution =
+      (executionNode as INode & { rewireOutputLogTo?: string }).rewireOutputLogTo === 'ai_tool';
+    const aiToolDefaultsToContinue = isAiToolExecution && node.onError !== 'stopWorkflow';
+    if (continues || aiToolDefaultsToContinue) {
+      if (isAiToolExecution) {
+        nodeSuccessData = [[{ json: { error: executionError.message } }]];
+      } else if (Object.hasOwn(executionData.data, 'main') && executionData.data.main!.length > 0) {
         if (executionData.data.main![0] !== null) nodeSuccessData = [executionData.data.main![0]!];
       }
       return { continueExecution: true, nodeSuccessData };

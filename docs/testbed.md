@@ -79,9 +79,9 @@ launcher rebuilds when `dist` is older than the patched source and then asserts 
 shared state with `scripts/run-conformance.sh --scope=cli`, whose own guard greps the same
 built file; rebuilding from the patched source can only make that leg more correct.
 
-## The five workflows
+## The six workflows
 
-All five set `settings.executionOrder: "v1"`. Without it `PetriScheduler` delegates straight to
+All six set `settings.executionOrder: "v1"`. Without it `PetriScheduler` delegates straight to
 n8n's `StackScheduler` (divergence #3) and the testbed would silently demonstrate the thing it
 replaces.
 
@@ -191,6 +191,44 @@ Two details worth stating rather than smoothing over:
 
 `tests/scheduler/agent.test.ts` pins the same mechanism against `FakeHost`, deterministically
 and without a server.
+
+### Agent · Tool Deadline — 5 nodes
+
+```
+Manual Trigger → AI Agent (maxIterations 3) → Answer
+Stub Chat Model  --ai_languageModel-->  AI Agent
+Slow_Service     --ai_tool---------->   AI Agent      (HTTP Request Tool -> stub /hang)
+```
+
+The policy is on the **tool**, which is the node that actually calls the service:
+
+```jsonc
+"executionPolicy": { "v": 1, "timeoutMs": 3000, "onFailure": [ { "action": "continue" } ] }
+```
+
+`/hang` never answers and the socket is deliberately left open — [IO-013] is explicit that
+abandoning a firing is a capability, not a guarantee, and this is where that shows. The workflow
+sets `settings.executionTimeout: 20`, because n8n's whole-execution timeout is the *only* bound
+it has here: there is no per-tool deadline at any level, and `maxIterations` does not help, since
+the agent never gets as far as a second iteration.
+
+Only three of the four actions mean anything on a tool. A tool's outcome is its agent's
+`A/response`, not a main edge, so `route` has nowhere to go and the compiler refuses it by name.
+`continue` is n8n's own default for a failing tool — `workflow-execute.ts`: *"AI tools default to
+continue-on-fail so the agent receives the error as a tool response"* — and `retry` and `stop`
+behave as they do anywhere else.
+
+**Measured, one leg each:**
+
+| leg | `Slow_Service` | `AI Agent` | execution | wall |
+|---|---|---|---|---|
+| legacy | never completes, status unset | never recorded | **canceled**, `finished: false` | **20,083 ms** |
+| libpetri k=4 | `error` — *"Attempt 1 of \"Slow_Service\" did not finish within 3000 ms and was abandoned"* | `success` | **success** | **3,592 ms** |
+
+Same workflow, same hung service. n8n's only bound is global and it takes the whole execution
+with it; the per-tool deadline loses the tool call and nothing else — the agent receives the
+error as its tool response, answers, and `Answer` runs. `tests/scheduler/agent.test.ts` pins the
+same four behaviours against `FakeHost` without a server.
 
 ### Failure Policy Showcase — 5 nodes
 

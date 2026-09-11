@@ -141,7 +141,7 @@ async function workflow(file, cred) {
 await authenticate();
 const cred = await credential();
 const workflows = [];
-for (const file of ['concurrency-showcase.json', 'agent-two-tools.json', 'agent-budget-showcase.json', 'failure-policy-showcase.json', 'resilient-fan-out.json']) {
+for (const file of ['concurrency-showcase.json', 'agent-two-tools.json', 'agent-budget-showcase.json', 'agent-tool-deadline.json', 'failure-policy-showcase.json', 'resilient-fan-out.json']) {
   workflows.push(await workflow(file, cred));
 }
 

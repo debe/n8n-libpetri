@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **`FakeHost` did not mirror n8n's rule for a failing `ai_tool` node.** n8n continues such a
+  node even with no `onError` at all, and hands the agent `{ json: { error } }` rather than the
+  tool's input passed through — `isAiToolExecution` keys on the `rewireOutputLogTo` tag that
+  `planEngineRequest` sets when it reserves the slot. The mirror set the tag and never read it,
+  so it halted where the host would have continued. Every conformance measurement involving a
+  failing tool was being taken against a mirror that diverged from the host; it is faithful now,
+  and no existing case moved.
 - **A `--node-types` entry silently dropped `loopNode`.** `shapeOf` applied `LOOP_NODE_TYPES`
   on the built-in and guessed paths but not on the two supplied-shape paths, so cataloguing
   `splitInBatches` would have changed its emission semantics. It is applied on every path now,
@@ -84,6 +91,20 @@ All notable changes to this project are documented here. The format follows
   the same failure, thrown or timed out, down the error arc carrying `{ json: { error } }`, and
   applies the branch inside `record()` so what is recorded is what was routed. Divergence #27
   is rewritten around the measurement.
+- **A failure policy on an agent's tool**, which is the node that actually calls the flaky
+  service. Only three of the four actions mean anything there: a tool's outcome is its agent's
+  `A/response` rather than a main edge, so `route` has nowhere to go and the compiler now refuses
+  it by name instead of leaving the author to decode an out-of-range index. `continue` is n8n's
+  own default for a failing tool (`workflow-execute.ts`: *"AI tools default to continue-on-fail so
+  the agent receives the error as a tool response"*), and `retry` and `stop` behave as anywhere.
+
+  `timeoutMs` is the half n8n has at **no** level. Measured in a live n8n against a service that
+  never answers, with the workflow's own `executionTimeout` at 20 s because that is n8n's only
+  bound here: n8n's leg is **canceled at 20,083 ms** with the agent never recorded and nothing
+  downstream run; the net's is **success at 3,592 ms**, the tool alone marked
+  `error — "Attempt 1 of \"Slow_Service\" did not finish within 3000 ms and was abandoned"`, the
+  agent answering from that error and `Answer` running. Same workflow, same hung service: n8n's
+  bound takes the execution with it, ours loses one tool call.
 - **The agent that will not stop** (`scripts/testbed/workflows/agent-budget-showcase.json`), the
   one shape where the tool-call budget of divergence #25 is visible. Its prompt carries a
   `[stub:loop]` marker that makes the testbed stub answer every call with tool calls and never

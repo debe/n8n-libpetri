@@ -153,6 +153,15 @@ export function resolveFailureChain(
 
   /** An output name or index into a connected output index. */
   const outputOf = (raw: string | number, at: string): number => {
+    // A node with no outputs at all cannot route anywhere, and the commonest one by far is an
+    // `ai_tool` node — whose result is its agent's response, not a main edge — so the message
+    // names that rather than leaving the author to work out why an index is out of range.
+    if (outputCount === 0) {
+      throw new Error(
+        `${where}: ${at} declares action 'route', but this node has no output to route to ` +
+        "(a tool's result goes to its agent rather than down a main edge). Use 'retry', " +
+        "'stop' or 'continue'");
+    }
     let index: number;
     if (typeof raw === 'number') {
       index = raw;
