@@ -237,6 +237,22 @@ function countFrom(report: string, pattern: RegExp): number | null {
   return m === null ? null : Number(m[1]);
 }
 
+/**
+ * Whether `report` came from a run that actually unioned the semiflows into the invariants.
+ *
+ * **The presence of the line is the signal; its value is not.** libpetri pushes
+ * `Semiflows encoded as invariants: N` only inside `if (unionWanted)`, and `N` is the count of
+ * semiflows that were not already identical to a basis row. So `0` is the ordinary case "the
+ * union ran and the basis already covered every law it found" — reading it as "no union" makes
+ * {@link collectInvariants} decline its own cache and re-run the whole pipeline on every net
+ * whose semiflows happen to be in the basis.
+ *
+ * `SEMIFLOW_LINE` carries `m` but not `g`, so `test` keeps no `lastIndex` between calls.
+ */
+function unionedSemiflows(report: string): boolean {
+  return SEMIFLOW_LINE.test(report);
+}
+
 /** Place name → weight for one invariant, over the flattened net's place order. */
 export function invariantTerms(invariant: PInvariant, flat: FlatNet): Map<string, number> {
   const terms = new Map<string, number>();
@@ -353,8 +369,12 @@ interface Context {
    * run asks `'auto'`, which *skips* the union whenever the basis is complete, and
    * {@link collectInvariants} needs the union's non-negative form. Without this flag the cache
    * hands it a basis-only list and the budget semiflow is reported missing on a net that has
-   * one — see the comment in `collectInvariants`, and `nested agent` in
-   * `tests/verify/invariants.test.ts`.
+   * one — see the comment in `collectInvariants`, and "reports the same semiflow whether or not
+   * the class cap let the graph close" in `tests/verify/properties.test.ts`.
+   *
+   * Set from {@link unionedSemiflows}, which tests for the *presence* of libpetri's
+   * `Semiflows encoded as invariants:` line rather than for a non-zero count: the line appears
+   * exactly when the union ran, and a count of zero means the basis already covered it.
    */
   invariantsUnionedSemiflows: boolean;
 }
@@ -455,7 +475,7 @@ async function query(
     if (ctx.invariants === null && result.invariants.length > 0) {
       ctx.invariants = result.invariants;
       ctx.invariantReport = result.report;
-      ctx.invariantsUnionedSemiflows = (countFrom(result.report, SEMIFLOW_LINE) ?? 0) > 0;
+      ctx.invariantsUnionedSemiflows = unionedSemiflows(result.report);
     }
     return {
       verdict: result.verdict.type,
@@ -1328,6 +1348,23 @@ export function producersOf(flat: FlatNet, place: Place<unknown>): string[] {
  *
  * Read off the flattened net, so it costs no route and cannot come back `unknown`.
  */
+/**
+ * The weaker of two verdicts, for a claim that is the conjunction of several checks.
+ *
+ * `violated` dominates: one counterexample refutes the conjunction whatever the rest say. Among
+ * the others the order is `unknown` < `bounded` < `proven`, because `bounded` carries a real
+ * statement (it holds within the explored bound) where `unknown` carries none.
+ *
+ * Written as a rank rather than a chain of ternaries: the chain this replaced kept the *last*
+ * non-proven verdict instead of the weakest, so an `unknown` attempt followed by a `bounded` one
+ * reported `bounded` for the pair and over-claimed.
+ */
+function weakerVerdict(a: CheckVerdict, b: CheckVerdict): CheckVerdict {
+  if (a === 'violated' || b === 'violated') return 'violated';
+  const rank: Record<CheckVerdict, number> = { violated: 0, unknown: 1, bounded: 2, proven: 3 };
+  return rank[a] <= rank[b] ? a : b;
+}
+
 async function runAttemptBound(ctx: Context): Promise<void> {
   for (const g of ctx.map.nodes) {
     if (g.attempts.length === 0) continue;
@@ -1336,10 +1373,7 @@ async function runAttemptBound(ctx: Context): Promise<void> {
       const property = placeBound(attempt.failed, 1);
       const decision = graphBound(ctx, attempt.failed, 1)
         ?? boundedOrUnknown(ctx, await smtDecision(ctx, property));
-      if (decision.verdict !== 'proven') {
-        weakest = decision.verdict === 'violated' ? 'violated'
-          : weakest === 'violated' ? 'violated' : decision.verdict;
-      }
+      weakest = weakerVerdict(weakest, decision.verdict);
       record(ctx, {
         property: 'retry-bound',
         name: `${g.node} attempt ${attempt.index} has at most one failure outstanding`,
@@ -1590,6 +1624,11 @@ async function collectInvariants(ctx: Context): Promise<readonly PInvariant[] | 
   }
   // Same guard as {@link query}: this *is* the pipeline, so on a net above the ceiling it is
   // the call that would abort the process.
+  // `null`, where the two failure paths below return `ctx.invariants` instead. Not an
+  // inconsistency: `smtRefusal` is decided once when the context is built and never changes, and
+  // `query()` returns on it before it can touch the cache — so on this path `ctx.invariants` is
+  // provably still `null` and the two spellings agree. Stated because the reasoning is not
+  // local: a future `smtRefusal` set lazily would turn this line into silent data loss.
   if (ctx.smtRefusal !== null) return null;
   try {
     const result = await SmtVerifier.forNet(ctx.compiled.net)
@@ -1624,7 +1663,11 @@ async function collectInvariants(ctx: Context): Promise<readonly PInvariant[] | 
     if (result.invariants.length === 0 && result.route !== 'smt') return ctx.invariants;
     ctx.invariants = result.invariants;
     ctx.invariantReport = result.report;
-    ctx.invariantsUnionedSemiflows = (countFrom(result.report, SEMIFLOW_LINE) ?? 0) > 0;
+    // A run that asked for the union and got no line back means libpetri's wording drifted, and
+    // {@link unionedSemiflows} would then read `false` forever — a repeated pipeline rather than
+    // a wrong answer, so nothing at run time would show it. `tests/verify/libpetri-surface.test.ts`
+    // pins the line instead, which fails on upgrade rather than degrading quietly in production.
+    ctx.invariantsUnionedSemiflows = unionedSemiflows(result.report);
     return result.invariants;
   } catch (e) {
     // Same rule as {@link query}: an invariant pipeline that failed is `null`, a bug is not.

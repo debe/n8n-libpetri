@@ -401,7 +401,19 @@ describe('a policy on an agent\'s tool', () => {
     // The agent resumed and the workflow finished while the tool was still working: IO-013 is
     // explicit that abandoning a firing is not cancelling the work behind it.
     expect(r.runData.End).toHaveLength(1);
-    expect(resolvedLate).toBe(false);
+
+    // Then let the abandoned tool land, and confirm it changed nothing. Asserting
+    // `resolvedLate === false` here instead would have been an *upper* bound on how long the
+    // whole round may take — two agent runs, a dispatch, a resume and `End`, all inside 400 ms —
+    // which a loaded machine breaks for reasons that have nothing to do with the code. Waiting
+    // for the late write and finding it dropped is a lower bound, which `setTimeout` cannot
+    // violate, and it tests the stronger claim: the guard refused the write, rather than the
+    // write merely not having arrived yet.
+    await sleep(450);
+    expect(resolvedLate).toBe(true);
+    expect(r.runData.Calculator).toHaveLength(1);
+    expect(r.runData.Calculator![0]!.executionStatus).toBe('error');
+    expect(r.runData.End).toHaveLength(1);
   });
 
   it('refuses route: a tool has no output to route to', () => {
@@ -537,11 +549,18 @@ describe('an agent that dispatches another agent', () => {
 
     // One initial run plus `maxRounds` resumes, at either depth.
     expect([inner, outer]).toEqual([3, 3]);
+    // Each outcome asserted concretely, then their equality. Asserting only that the two agree
+    // would pass just as well if both regressed to `completed`, which is the failure this test
+    // is meant to catch: `A_rounds_out` deposits `_pause`, so the execution stops rather than
+    // finishing, and the codec writes the open round back onto n8n's stack.
+    expect(nested.scheduler.outcome).toBe('cancelled');
+    expect(flat.scheduler.outcome).toBe('cancelled');
     expect(nested.scheduler.outcome).toBe(flat.scheduler.outcome);
     expect(nested.error).toBeUndefined();
     expect(flat.error).toBeUndefined();
     // Neither completes: the agent that ran out of rounds never answered, so nothing downstream
     // of it can run, and the marking is kept rather than discarded.
     expect(nested.runData.End).toBeUndefined();
+    expect(flat.runData.End).toBeUndefined();
   });
 });

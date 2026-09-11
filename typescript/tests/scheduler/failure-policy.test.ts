@@ -69,8 +69,14 @@ describe('the chain runs the node once per attempt', () => {
     expect(stamps).toHaveLength(3);
     // The first escalation is immediate, the second waits — which one uniform `waitBetweenTries`
     // cannot express.
-    expect(stamps[1]! - stamps[0]!).toBeLessThan(100);
+    //
+    // Both assertions are *lower* bounds or relative, deliberately. `setTimeout` never fires
+    // early, so "the 120 ms delay was honoured" is safe to assert directly; "the first was
+    // immediate" is not, because an upper bound on elapsed time is an assertion about the
+    // machine rather than about the scheduler. The claim the test exists for — the two delays
+    // differ — is the comparison, and it holds without bounding either one absolutely.
     expect(stamps[2]! - stamps[1]!).toBeGreaterThanOrEqual(110);
+    expect(stamps[2]! - stamps[1]!).toBeGreaterThan(stamps[1]! - stamps[0]!);
   });
 });
 

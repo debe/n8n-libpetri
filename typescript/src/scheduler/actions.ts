@@ -293,9 +293,22 @@ async function postRun(
   taskStartedData: ITaskStartedData,
   runIndex: number,
   runNodeData: IRunNodeResponse | EngineRequest,
+  /** The attempt this output belongs to, where one can be abandoned by a deadline. */
+  payload?: RunPayload,
 ): Promise<INodeExecutionData[][] | null | undefined> {
   if (isEngineRequest(runNodeData)) throw engineRequestUnsupported(executionNode);
   const nodeOutput = await env.host.processNodeOutput(runNodeData, env.workflow, executionData, taskStartedData, runIndex);
+  // `processNodeOutput` is awaited, so an `executionPolicy.timeoutMs` can expire inside it and
+  // the attempt be disowned before this line runs. `env.state.closeFunction` is shared
+  // execution state: letting a disowned attempt write it lets attempt 1, abandoned at its
+  // deadline, replace the close function that the attempt now actually running registered.
+  //
+  // The cost of guarding it is that a resource the abandoned attempt opened is not closed at
+  // the end of the execution. That is the same residual IO-013 already names — abandoning a
+  // firing does not cancel the work behind it — and the same one divergence #17 and the
+  // per-node cancellation ask in `tasks/todo.md` record. Losing the live attempt's handle is
+  // the worse of the two, so the live one wins.
+  if (payload !== undefined && isAbandoned(env, payload)) return nodeOutput.nodeSuccessData;
   // Keep the close function of an earlier node if this one registered none (line 185).
   env.state.closeFunction = nodeOutput.closeFunction ?? env.state.closeFunction;
   return nodeOutput.nodeSuccessData;
@@ -552,8 +565,19 @@ async function softAttempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload
  * and on the error path. The residual window is the inside of those awaits, which is the same
  * shape as divergence #15's `waitTill` race and is recorded with it.
  */
+/**
+ * Whether the net disowned this attempt, **without announcing it**.
+ *
+ * {@link abandoned} is the announcing form and belongs at the points that decide what to return.
+ * A guard that only has to suppress a write wants the question without the diagnostic, or the
+ * same abandonment is reported twice for one attempt.
+ */
+function isAbandoned(env: ExecutionEnv, payload: RunPayload): boolean {
+  return env.state.abandoned.has(payload);
+}
+
 function abandoned(env: ExecutionEnv, payload: RunPayload): boolean {
-  if (!env.state.abandoned.has(payload)) return false;
+  if (!isAbandoned(env, payload)) return false;
   env.diagnostic(
     `node '${payload.executionData.node.name}': attempt ${payload.attempt + 1} finished after its ` +
     'deadline abandoned it; the late result is discarded and nothing is recorded for it');
@@ -663,7 +687,7 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
       if (canRetry && checkFailure(runNodeData)) {
         return retryOutcome({ executionData, attempt: payload.attempt + 1, taskStartedData, waitTillBefore, reason: { kind: 'soft', runNodeData: runNodeData as IRunNodeResponse } });
       }
-      nodeSuccessData = await postRun(env, executionNode, executionData, taskStartedData, runIndex, runNodeData);
+      nodeSuccessData = await postRun(env, executionNode, executionData, taskStartedData, runIndex, runNodeData, payload);
     }
     if (abandoned(env, payload)) return { kind: 'ok', nodeSuccessData: [], runIndex };
     return await finishSuccess(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, wait);

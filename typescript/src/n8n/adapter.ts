@@ -228,14 +228,34 @@ export function workflowPolicyOf(workflow: Workflow, diagnostics: string[]): Exe
   const settings = workflow.settings as Record<string, unknown> | undefined;
   const parsed = parseExecutionPolicy(settings?.['executionPolicy'], 'workflow settings');
   diagnostics.push(...parsed.diagnostics);
-  return parsed.policy;
+  const policy = parsed.policy;
+  if (policy === undefined) return undefined;
+
+  // **The failure policy does not inherit from workflow scope.** The resource knobs do —
+  // `concurrency`, `rate`, `maxRuns`, `maxToolCalls`, `maxRounds` all mean something sensible as
+  // a workflow-wide default. `onFailure` and `timeoutMs` do not, for the reason this ADR gives
+  // for refusing `onFailure` beside `retryOnFail`: it would invent "a precedence a workflow
+  // author cannot see". A single `timeoutMs` here would otherwise arm a deadline on every node,
+  // and since a deadline needs a chain to say what an expired attempt does, the *whole workflow*
+  // would fail to compile over a key the author set as a default. A workflow-wide `onFailure`
+  // would likewise rewrite the failure behaviour of every node, and throw on the first one that
+  // declares `retryOnFail` or lacks the output a `route` step names.
+  //
+  // Declared per node, or per group where a node names one. Said once here rather than per node.
+  const { onFailure, timeoutMs, ...rest } = policy;
+  if (onFailure === undefined && timeoutMs === undefined) return policy;
+  diagnostics.push(
+    'workflow settings: executionPolicy' +
+    `${onFailure !== undefined ? '.onFailure' : ''}${timeoutMs !== undefined ? '.timeoutMs' : ''}` +
+    ' is not inherited by every node — a failure chain and its deadline are declared on the node ' +
+    'they govern, or on a group a node names. The rest of the workflow policy still applies.');
+  return rest;
 }
 
 /** A group's policy from `settings.executionPolicy.groups`, by name. */
 function groupPolicyOf(
-  workflowPolicy: ExecutionPolicy | undefined, raw: unknown, group: string, diagnostics: string[],
+  raw: unknown, group: string, diagnostics: string[],
 ): ExecutionPolicy | undefined {
-  void workflowPolicy;
   const settings = raw as Record<string, unknown> | undefined;
   const declared = settings?.['executionPolicy'] as Record<string, unknown> | undefined;
   const groups = declared?.['groups'];
@@ -266,7 +286,7 @@ export function nodePolicyOf(
   const group = own?.concurrency?.group ?? own?.rate?.group;
   const groupPolicy = group === undefined
     ? undefined
-    : groupPolicyOf(workflowPolicy, workflow.settings, group, diagnostics);
+    : groupPolicyOf(workflow.settings, group, diagnostics);
   return mergePolicies(workflowPolicy, groupPolicy, own);
 }
 
@@ -367,6 +387,10 @@ export function describeWorkflow(
     shapes.set(node.name, nodeShapeOf(workflow, node, options));
     references.set(node.name, scanExpressionReferences(node.parameters, names));
     const policy = nodePolicyOf(node, workflow, workflowPolicy, policyDiagnostics);
+    // Both read parameters and the policy; computing each once keeps the spread below to one
+    // evaluation per field rather than two.
+    const maxRounds = maxRoundsOf(node);
+    const maxToolCalls = maxToolCallsOf(node, policy);
     return {
       id: prefixOf(node, index, used),
       name: node.name,
@@ -378,9 +402,8 @@ export function describeWorkflow(
       ...(node.retryOnFail === undefined ? {} : { retryOnFail: node.retryOnFail }),
       ...(node.maxTries === undefined ? {} : { maxTries: node.maxTries }),
       ...(node.waitBetweenTries === undefined ? {} : { waitBetweenTries: node.waitBetweenTries }),
-      ...(maxRoundsOf(node) === undefined ? {} : { maxRounds: maxRoundsOf(node) }),
-      ...(maxToolCallsOf(node, policy) === undefined
-        ? {} : { maxToolCalls: maxToolCallsOf(node, policy) }),
+      ...(maxRounds === undefined ? {} : { maxRounds }),
+      ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
       ...(policy === undefined ? {} : { executionPolicy: policy }),
     };
   });

@@ -112,6 +112,12 @@ const ACTIONS: ReadonlySet<string> = new Set<FailureAction>(['retry', 'route', '
 /** Keys a known `v` defines. Anything else is a diagnostic, never an error. */
 const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'v', 'timeoutMs', 'onFailure', 'concurrency', 'rate', 'maxRuns', 'maxToolCalls', 'maxRounds',
+  // Known here so it is not diagnosed as unknown, but deliberately not parsed here: `groups`
+  // holds one nested policy per name, and each is parsed on demand against the node that names
+  // it (`groupPolicyOf` in `n8n/adapter.ts`, `groupsOf` in `verify/workflow-json.ts`). Without
+  // this entry a workflow that uses groups was told on every compile that they were ignored,
+  // which was the opposite of what happened.
+  'groups',
 ]);
 const KNOWN_STEP_KEYS: ReadonlySet<string> = new Set(['waitMs', 'action', 'output']);
 
