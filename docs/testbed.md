@@ -134,6 +134,11 @@ unguarded. And `responsesApiEnabled` defaults to **true** at typeVersion ≥ 1.3
 turns it off explicitly; otherwise the node calls `POST /v1/responses` rather than chat
 completions.
 
+<img alt="The Agent Two Tools workflow running. The model is asked once, both tools run in the same round, the model is asked again, and the agent answers." src="media/agent-two-tools.gif" width="900" />
+
+*One round, two outstanding calls. `Calculator` and `Fact_Lookup` are both dispatched before
+either answers, and `A/pending` is what closes the round when the last one lands.*
+
 ### Agent · Tool-Call Budget — 7 nodes
 
 ```
@@ -193,6 +198,11 @@ Two details worth stating rather than smoothing over:
 
 `tests/scheduler/agent.test.ts` pins the same mechanism against `FakeHost`, deterministically
 and without a server.
+
+<img alt="The Agent Tool-Call Budget workflow running. A model that never stops asking for tools spends its call budget, the agent turns red, and the Budget Exhausted branch runs while Answer stays grey." src="media/agent-tool-call-budget.gif" width="900" />
+
+*The model never says stop. What stops it is the budget: `Confused Agent` ends red, `Budget
+Exhausted` runs off its error output, and `Answer` stays grey.*
 
 ### Agent · Tool Deadline — 5 nodes
 
@@ -402,6 +412,11 @@ Neither node sets `retryOnFail` or `onError`; each carries an `executionPolicy` 
 ```
 
 The stub keys `/flaky` on `$execution.id`, so every run starts from a fresh failure count.
+
+<img alt="The Failure Policy Showcase running. One branch retries a flaky service and recovers, the other is abandoned at its deadline and continues down the give-up branch, and both finish." src="media/failure-policy-showcase.gif" width="900" />
+
+*Two branches, two declared chains. `Flaky Service` retries on its own delays and recovers;
+`Hung Service` is abandoned at 1.5 s, `continue` carries the branch on, and the run finishes.*
 
 ### Resilient Fan-Out — 7 nodes
 

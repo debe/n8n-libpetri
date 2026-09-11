@@ -25,6 +25,9 @@ FPS=10
 CLIPS="
 concurrency-showcase:1.5
 resilient-fan-out:1.5
+failure-policy-showcase:1.5
+agent-two-tools:1.5
+agent-tool-call-budget:1.5
 agent-tool-deadline:1.5
 agent-nested-agents:1.5
 agent-escalation-ladder:1.5

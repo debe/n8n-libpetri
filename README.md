@@ -378,10 +378,11 @@ n8n's own agent node rather than by a fixture. The third puts an agent inside an
 tools sleep 400 ms each, one of them behind a second agent, and at k = 4 the outer tool runs while
 the inner agent is still working.
 
-### Three runs, recorded
+### Five runs, recorded
 
 `scripts/testbed/record-demo.sh` signs in, frames the canvas, presses Execute workflow and records
-until n8n's own REST API reports the execution finished. Each clip below is that recording.
+until n8n's own REST API reports the execution finished. Each clip below is that recording. Every
+seeded workflow has one; [`docs/testbed.md`](docs/testbed.md) carries the rest.
 
 <img alt="The Concurrency Showcase workflow running in the n8n editor at k = 4. Four Code nodes on
 independent branches turn green together rather than one after another, and the run finishes."
@@ -395,6 +396,22 @@ abandoned when its deadline expires, and the merge still receives data and the r
 
 *Resilient Fan-Out. One branch retries on its own delay, one is abandoned at its deadline, and the
 run still reaches `Merge`. Both behaviours are declared in the workflow JSON (ADR 0009).*
+
+<img alt="The Agent Tool Deadline workflow running. A tool calls a service that never answers and
+turns red at its own deadline, and the agent receives the error as its tool response and answers
+anyway." src="docs/media/agent-tool-deadline.gif" width="900" />
+
+*Agent · Tool Deadline. `Slow_Service` calls something that never answers. The firing is abandoned
+at the tool's own deadline (IO-013 — the firing, not the work behind it), the agent gets the error
+as its tool response, and `Answer` still runs.*
+
+<img alt="The Agent Nested Agents workflow running. An agent calls a second agent wired as its
+tool, that second agent calls a tool of its own, and every node turns green."
+  src="docs/media/agent-nested-agents.gif" width="900" />
+
+*Agent · Nested Agents. `Sub Agent` is an agent wired as another agent's tool, with a tool of its
+own. Depth is graph, not a special case: each level spends its own call budget and z3 validates one
+conservation law across both.*
 
 <img alt="The Agent Escalation Ladder workflow running. The first agent turns red when its
 tool-call budget is spent, its error output leads to a second agent, which answers, and the give-up
