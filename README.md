@@ -394,10 +394,12 @@ the harness cannot see are in [`docs/testbed.md`](docs/testbed.md).
 
 - An `EngineRequest` action naming a node with no `ai_tool` connection to its agent cannot be
   routed and fails by name (divergence #22). No real agent emits one.
-- An agent may make at most `options.maxToolCalls` tool calls per execution, 64 unless declared;
-  n8n has no such bound (divergence #25). Verification explores every round size up to that
-  budget, so an agent that declares none verifies as truncated, and the report says which value
-  to declare.
+- An agent may make at most `executionPolicy.maxToolCalls` tool calls per execution, 64 unless
+  declared; n8n has no such bound (divergence #25). Verification explores every round size up to
+  that budget, so an agent that declares none verifies as truncated, and the report says which
+  value to declare. It is declared on the node, **not** in `parameters.options`: n8n rebuilds a
+  node's `parameters` from its type's declared options, so the older `options.maxToolCalls`
+  spelling never survived a live editor save (ADR 0009 §2).
 - Cyclic and multi-producer-input workflows currently run with an effective budget of one.
 - OR-input rounds do not yet carry activation lineage.
 - Completion-order fields such as `lastNodeExecuted`, `waitTill` and the selected fatal error

@@ -5,6 +5,163 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **A `--node-types` entry silently dropped `loopNode`.** `shapeOf` applied `LOOP_NODE_TYPES`
+  on the built-in and guessed paths but not on the two supplied-shape paths, so cataloguing
+  `splitInBatches` would have changed its emission semantics. It is applied on every path now,
+  and a shape that sets the flag explicitly still wins in either direction. The same change lets
+  a supplied shape keep the `outputNames` the built-in knows and it does not carry: n8n's own
+  type file lists a port as the bare string `"main"`, so a generated catalogue can never carry
+  names, and without this `route: 'true'` on an IF would have stopped resolving. Counts from the
+  supplied shape always win; names are grafted on only while the two agree on how many ports
+  there are.
+
+### Added
+- **Execution policy in workflow JSON: the attempt chain** (ADR 0009). A node may declare
+  `executionPolicy.onFailure`, an attempt-indexed list of `retry` / `route` / `stop` /
+  `continue` steps, and `executionPolicy.timeoutMs`, a per-attempt deadline. It is n8n's own
+  `onError` generalised over attempts — `stopWorkflow` / `continueErrorOutput` /
+  `continueRegularOutput` are `stop` / `route` / `continue`, and `retryOnFail` + `maxTries` +
+  `waitBetweenTries` is the all-`retry` case — so one list subsumes four existing n8n fields.
+  **The patches are unchanged**: both carriers (`node.executionPolicy`,
+  `workflow.settings.executionPolicy`) already round-trip through n8n's DTO, database and editor
+  and arrive on the `Workflow` object the existing seam passes.
+
+  The chain is **unrolled, not counted**: one `X/running_i` / `X/failed_i` pair per attempt, so
+  every token lives inside one activation. `X/tries` does not — nothing produces it, so a node
+  that activates twice inherits its leftover allowance where n8n gives it a fresh one. Attempt 1
+  reuses `X/running` and keeps the name `run`, so a policy-free node compiles byte-identically
+  and no existing verdict moves. The deadline is libpetri's output timeout [IO-013] with its own
+  `X/timedout_i` place (the timeout child is an `Xor` sibling, and a child claiming the failure
+  place would make every failing firing ambiguous under [IO-015]) funnelled into `X/failed_i`,
+  so one step answers both a thrown error and an expired budget. Cost is linear in the attempt
+  count and measured in the ADR.
+
+  **The scheduler runs it**, reusing n8n's own error handling rather than reimplementing it: a
+  `retry` step *is* `X_retry_wait` with the step's delay, a terminal step *is* `X_exhausted`
+  with the outcome the workflow chose, and `handleNodeExecutionError` is driven by cloning
+  `executionData` with `node.onError` set to the step's action. Measured against the
+  `WorkflowExecute` mirror on `multiProducer`, whose `C` activates twice and fails twice per
+  activation: `retryOnFail` with `maxTries: 3` calls the node **4** times and **halts**, because
+  the first activation spends both retry tokens and the second has none left; the equivalent
+  three-attempt chain calls it **6** times and **completes**. Still open, in `tasks/todo.md` §1:
+  The **codec** round-trips `X/failed_i`, `X/timedout_i` and the later `X/running_i` exactly as
+  it does `X/retry` and `X/running`, and the `failurePolicy` fixture joined `ALL` so the
+  200-seed property suite covers the shape. The **verifier** proves `placeBound(X/failed_i, 1)`
+  per attempt plus a structural check that the chain is a line rather than a loop — the half a
+  compiler change would break — both solver-free. And the chain is measured *equal* to
+  `retryOnFail` where the two express the same policy: identical `runData` on the recovering and
+  the never-recovering script.
+
+  **Measured in a live n8n** (`scripts/testbed/workflows/failure-policy-showcase.json`, with new
+  `/flaky` and `/hang` endpoints on the testbed stub). One branch calls a service that fails
+  twice then recovers; the other calls one that never answers. Under n8n's own scheduler the
+  execution **errors in 70 ms** on the first 503 and nothing downstream runs. On the net with
+  the chain declared it **succeeds in 3,086 ms**: the flaky branch recovers on its third call
+  with 250 ms and 1,000 ms waits between attempts, the hung branch is abandoned twice at its
+  1,500 ms deadline and the `continue` terminal carries the workflow on. The policy also comes
+  back out of n8n's REST API and database byte-for-byte, and the legacy leg ran the same
+  document without complaint — the layering test, which is what makes the carrier an interface
+  rather than a leak.
+
+  **Resilient Fan-Out** (`scripts/testbed/workflows/resilient-fan-out.json`) puts both halves
+  together: four ordinary HTTP branches, two of them declaring a policy, run in the real editor.
+  **5,123 ms at k = 4 against 12,654 ms at k = 1**, every branch starting within 2 ms of the
+  others, one of them abandoned twice on its 2.5 s deadline and carrying on anyway — and the
+  same document **failing in 3,106 ms** under n8n's own loop, which stops at the first 503.
+  `scripts/testbed/record-demo.sh` records it; `docs/testbed.md` has the timeline.
+- **`onError` declares the port, `onFailure` decides the policy.** A `route` step needs a
+  connected output, and a node with one main output has none — but
+  `NodeHelpers.getNodeOutputs` appends n8n's error output on `onError === 'continueErrorOutput'`
+  alone, which is what makes the editor draw the arc. The two are therefore allowed together on
+  one node (`continueRegularOutput` is not), and a step may name `output: 'error'`.
+
+  This does something n8n cannot: **its error output never catches a thrown failure.**
+  `handleNodeErrorOutput` runs on the success path and sorts *per-item* errors out of an
+  otherwise-successful run; a node that actually throws is continued down output 0 with its
+  input passed through, identically under both continue modes. Measured on the
+  `continueErrorOutput` fixture — n8n runs `Trigger, A, B` and `Err` never runs. A chain sends
+  the same failure, thrown or timed out, down the error arc carrying `{ json: { error } }`, and
+  applies the branch inside `record()` so what is recorded is what was routed. Divergence #27
+  is rewritten around the measurement.
+- **The agent that will not stop** (`scripts/testbed/workflows/agent-budget-showcase.json`), the
+  one shape where the tool-call budget of divergence #25 is visible. Its prompt carries a
+  `[stub:loop]` marker that makes the testbed stub answer every call with tool calls and never
+  with `stop` — the failure users report against the real thing ("it enters an infinite
+  loop—calling the same tools repeatedly") made deterministic and offline — and the agent
+  declares `onError: continueErrorOutput` with
+  `executionPolicy: { maxToolCalls: 6, onFailure: [{ action: 'route', output: 'error' }] }`.
+
+  **Measured in a live n8n, one leg each.** Under n8n's own scheduler the run ends on
+  `maxIterations` — left at n8n's default of 30 on purpose, because it is the wrong bound: it
+  caps *rounds*, and a model may request any number of calls in one — after **30 model calls and
+  60 tool executions**, in 378 ms. On the net it ends on `Tool-call budget (6) reached` after
+  **4 model calls and 6 tool executions**, in 579 ms. Both take the same declared error branch
+  and both finish the execution as `success`; what differs is the price of finding out, and in a
+  real workflow those 60 are billed API calls. `tests/scheduler/agent.test.ts` pins the same
+  mechanism against `FakeHost` without a server.
+
+  Two honest differences fall out and are recorded rather than smoothed over. The node's
+  `executionStatus` differs — `success` under n8n, `error` on the net — because
+  `checkMaxIterations` throws *inside* the agent's `Promise.allSettled` batch
+  (`ToolsAgent/V3/helpers/executeBatch.ts:81`) and `continueOnFail` turns the rejection into a
+  per-item error on the success path, which is divergence #27's mechanism, while an engine-level
+  budget goes through `handleNodeExecutionError`. And **divergence #29** is new: n8n's
+  `handleRequest` reserves a `runData` slot per requested action before anything runs, so a round
+  the budget cannot pay for leaves its undispatched slots behind with `startTime: 0`.
+- **A node-type catalogue, so the corpus numbers stop resting on guesses**
+  (`scripts/node-types/extract.mjs`). A workflow JSON export carries no node-type descriptions,
+  so the verify CLI guessed every port count from the connections — and a guess is only ever a
+  lower bound, since an unwired output is invisible in an export and one miscounted port changes
+  the compiled net. On the 200-template corpus that was **4,805 of ~5,114 nodes guessed (94%)**,
+  which is an asterisk on every number measured over it.
+
+  The extractor reads n8n's own generated `dist/types/nodes.json`, so the counts are n8n's.
+  Ports declared by an expression are **evaluated**, not parsed — they are full JavaScript IIFEs
+  over `$parameter` — against probes derived from the expression itself: the parameter names it
+  reads, varied over structural values *and over the expression's own string literals*, because
+  `'checkIfEvaluating'` is not a value a generic probe would invent. A count that moves with a
+  parameter is withheld and left to `BUILT_IN_SHAPES`, which is parameter-aware. Tool variants
+  (`<name>Tool`, synthesised by n8n for every node with `usableAsTool` and never present in that
+  file) are derived: no `main` port at either end. Result on the 200-template corpus: **236 of ~5,114
+  nodes still guessed (4.6%), against 4,805 (94%) before** — and what is left is nearly all
+  community nodes that no catalogue built from n8n's own packages can carry.
+
+  **The two headline numbers did not move**: 199/200 templates compile (99.5%) and 101/199
+  (50.8%) keep k > 1, exactly as they read when 94% of shapes were guesses. What moved is the
+  noise: workflows reporting a violated check fell from **85 to 27**, and dead-node violations
+  from **652 to 22** — almost all of them Sticky Notes, which a catalogue knows have no ports.
+
+  Two rules the first version got wrong, both now pinned by anchors the extractor asserts on
+  every run — it is generated, so nothing else would notice. A fixed probe list called
+  `textClassifier` a zero-output node and `evaluation` a one-output node, which turned two real
+  templates into `output index out of range` compile failures; probes are derived from the
+  expression now. And an early return on the first *name* disagreement stopped the count check,
+  which catalogued Webhook as one output when it has as many as it has HTTP methods.
+
+  `canWait` — whether an activation can suspend the execution — is derived the same way, from
+  `known/nodes.json` plus a search of each node's built directory for `putExecutionToWait`, so
+  it comes from the code that runs rather than from a list that rots. **24 types**, plus
+  `executeWorkflow` by hand because a waiting sub-workflow suspends its parent from inside the
+  engine. Nothing reads it yet; it is what lets the gadget stop offering a `waiting` outcome to
+  the ~94% of nodes that can never take one.
+- `docs/adr/0009-execution-policy.md`, and the three-layer rule it opens with — workflow JSON,
+  structural IR, net encoding — with the test that keeps them apart: *a workflow carrying this
+  JSON must stay meaningful if n8n's own stack scheduler runs it*.
+- `tasks/todo.md` §4b, **Upstream (n8n)**: nowhere to persist an engine-owned counter across a
+  Wait (why `A/calls` re-seeds), no per-node cancellation (desirable, not required — [IO-013]
+  keeps the marking correct without it), and `options.maxToolCalls` never having had a working
+  carrier. Two new libpetri asks in §4: expose the ν quotient (Route B, `nu-scg`, [VER-012]) as
+  a public `ClassView`, which is what blocks activation lineage, and a threshold inhibitor arc.
+
+### Fixed
+- **`options.maxToolCalls` could not be set in a live n8n.** `getNodeParameters` rebuilds a
+  `collection` from the node type's *declared* options, so an undeclared key inside
+  `parameters.options` is dropped on the editor's save path and again in the `Workflow`
+  constructor; it survived only in the verify CLI's raw-JSON path. The README's known limits and
+  divergence #25 both told users to declare a knob they could not declare. It moves to
+  `node.executionPolicy.maxToolCalls`, with the old read kept as a deprecated fallback.
+
 ### Changed
 - **libpetri 5.1.0 is the floor** (`^5.0.0` → `^5.1.0`, lock relocked). The verifier calls
   `sinkPlacesWhen` [VER-014], `stateEquation` [VER-016], `enumerationMaxClasses` [VER-017] and

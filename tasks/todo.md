@@ -205,8 +205,67 @@ One list, most valuable first. Each item says what it is, why it is not done, an
 it needs. Nothing here is a regression: every item is either a known limit with a pinned test,
 an upstream ask, or work that was specified and deliberately not built.
 
+### 0. Closing the four conformance regressions
+
+The engine passes **40 of 44** loop-driving cases in n8n's own execution-engine suite. All four
+failures are registered divergences, and each was traced to a root cause rather than to a
+symptom, so the list below is a plan and not a wish. It is ordered by what unblocks what.
+
+- [x] **Phase 0 — the node-type catalogue.** *Closed 2026-09-11.* `scripts/node-types/extract.mjs`
+      reads n8n's own generated `dist/types/nodes.json`; expression-declared ports are evaluated
+      against probes derived from the expression itself, and a count that moves with a parameter
+      is withheld for the parameter-aware `BUILT_IN_SHAPES`. **236 of ~5,114 corpus nodes still guessed
+      (4.6%), against 4,805 (94%) before** — and 199/200 compiling and 101/199 keeping k > 1 both
+      held exactly, so the numbers were right and are now defensible. Blocking, because every number measured over the corpus rested
+      on a guess, and because `canWait` (also derived — `putExecutionToWait` in each node's built
+      directory) is what Phase 1's second half needs
+- [ ] **Phase 1 — the partial-fire, and it is not global quiescence.** Divergence #2: n8n re-runs
+      a stuck join with its missing inputs padded to `[]`, and the net strands instead. The
+      condition looked like it needed a pre-emptive priority libpetri does not have — its
+      priority orders a firing cycle, it does not gate enablement — but n8n's own condition is
+      **local**: `stack-scheduler.ts:422`, `parentNodes.some((v) => waitingNodes.includes(v))`,
+      i.e. *fire once no ancestor is itself a stuck join*. Join gadgets already carry
+      `X/hasdata_i`, which is exactly "I hold a partial arrival", so a drain transition with
+      inhibitors on ancestor joins' `hasdata` places encodes it in the net — no libpetri change,
+      no host policy. Spike it, then measure the cost (one inhibitor per ancestor join). Closes
+      four things at once if it holds: conformance #2; the numeric `requiredInputs` stranding
+      (a default-mode Merge declares the *number* 1 and `requiredInputsOf` maps a number to
+      `null`, so it compiles as a full AND-join — **27 of 199** corpus workflows); the loop-cycle
+      stranding (a skipped producer inside a cycle emits nothing, never `empty`); and
+      divergence #1's abandonment of R6's partial fire.
+
+      Second half, needing Phase 0's `canWait`: `outcomeOf()` puts `waitingBranch` and
+      `stoppedBranch` on **every** node's `X_run` Xor, and `X_start` inhibits on `_pause`. A Set
+      or an If can never call `putExecutionToWait`, so those branches are a value-blind
+      over-approximation that manufactures reachable paused markings — and because
+      `PAUSE_REST_ROLES` omits `edge-data`, an arrival queued behind an armed one under that fake
+      pause is then classified as a stranding. It is the generator behind most of the false
+      strandings the corpus survey reports
+- [ ] **Phase 2 — token selection order (libpetri).** Divergences #11 and #12 are one ask:
+      n8n's `unshift`/`shift` is LIFO and `X/hasdata_i` is FIFO, so the two runs of a
+      two-input node carry n8n's payloads in the other order (#11), and a completed multi-input
+      entry n8n `unshift`s runs ahead of every queued sibling (#12). Both need a **newest-token
+      arc**, already §4 below. This is the one piece that cannot be closed in this repo
+- [ ] **Phase 3 — decide #22, do not fix it.** An `EngineRequest` naming a node the workflow
+      never wired to its agent. A real agent cannot emit it — its actions come from the same
+      connections the compiler built the tool arcs from — so the honest outcome is 43/44 plus one
+      declared non-goal, stated wherever the number is
+- [ ] **Phase 4 — re-measure, then publish.** Corpus and conformance re-run on real shapes.
+      No number leaves the repo before this
+
 ### 1. Behaviour a user can see
 
+- [x] **The `onFailure` chain (ADR 0009) is complete.** *Closed 2026-09-10.* The compiler, both
+      carriers, the structural hash, the scheduler (`retry` steps, all three terminals, the
+      deadline and its abandonment guard), the codec (`X/failed_i`, `X/timedout_i` and the later
+      `X/running_i` round-trip as `X/retry` and `X/running` do, and the `failurePolicy` fixture
+      joined `ALL`, so the 200-seed property suite covers it), and the verifier
+      (`placeBound(X/failed_i, 1)` per attempt plus a structural check that the chain is a line
+      and not a loop — both `proven`, solver-free). Equivalence measured rather than claimed: a
+      uniform chain and `retryOnFail` produce **identical** `runData` on the recovering and the
+      never-recovering script, and on `multiProducer` the chain spends 6 calls and completes
+      where `retryOnFail` spends 4 and halts. Divergence rows 26–28 record what the feature
+      changes; the live legs are in `docs/testbed.md`
 - [ ] **Divergence #17 has no guard.** At k ≥ 2 a `responseMode: responseNode` webhook answers the
       caller where n8n's `break` would have left it unanswered, because the net cannot un-start an
       action. The recommendation ("keep k = 1 where a failure must suppress a ready sibling") is in
@@ -401,6 +460,76 @@ an upstream ask, or work that was specified and deliberately not built.
 
 ### 4. Upstream (libpetri)
 
+- [ ] **No public solver-free route for a ν-net, so adopting `matchSpec` costs the M5 route.**
+      libpetri exports `ClassView` and `decideOverClasses`, and `verifyViaStateClassGraph` for
+      the plain bounded enumeration (VER-017) — but Route B, the ν name-partition quotient
+      (`nu-scg`, VER-012), is reachable only *inside* `SmtVerifier.verify()`, which answers one
+      `SmtProperty` with a verdict. `src/verify/state-class.ts` does not ask a property: it
+      enumerates classes and **classifies** each quiescent one as resting / a designed terminal /
+      a stranding (ADR 0007 §10), which is what produces the node-and-path report. There is no
+      surface that hands back the ν quotient as a `ClassView` to classify, so a ν net can only be
+      asked yes/no questions — which is why `state-class.ts:588-593` refuses one outright rather
+      than answering quiescence off the match-blind over-approximation (`nu-nets.md` §8: "a
+      `Proven` on a quiescence property never comes from the fallback"). **The ask: expose the
+      Route B quotient the way `verifyViaStateClassGraph` exposes the plain graph.** This is the
+      single item blocking activation lineage (`docs/state-of-the-project.md`, "Activation
+      identity"), which is the project's own stated next concurrency step
+- [ ] **The plain state-class graph has no priority mode, so the quiescence drain cannot be
+      *verified* the way it *runs*.** Measured, `tests/spikes/quiescence-drain.test.ts`: libpetri's
+      executor resolves priority by **conflict-only pre-emption** — a lower-priority transition is
+      dominated by a strictly-higher-priority, no-later-ready one that `sharesConsumedInput` with
+      it, i.e. shares an input place whose marking cannot satisfy both demands. That is exactly
+      what a divergence #2 drain needs: `exactly(k, _budget)` always out-demands the marking
+      against any `X_start`'s `one(_budget)`, so every startable node dominates the drain, and the
+      drain fires only at genuine quiescence. **Nothing upstream is needed to run it.**
+
+      The analyzer models the same rule — `SmtVerifier.prioritySemantics('conflict')` (NU-052),
+      whose documented purpose is "removing spurious dead-letter-drain stalls the eager,
+      priority-ordered executor never produces", which is this pattern by name. But it lives on
+      `NameStateClassGraph.build(…, prioritySemantics)`, the **Route B** builder; the public
+      `StateClassGraph.build(net, initialMarking, maxClasses, environmentPlaces, environmentMode)`
+      takes no such argument and the plain graph's only mode is `'none'`. So the M5 solver-free
+      route would explore drain firings the executor never performs. **Built and measured, then
+      reverted** — the runtime half works and the verification half does not:
+
+      - **Runtime: divergence #2 closes.** `X_pad_i` per join input, `one(X/free_i)` +
+        `read(X/hasdata)` + `exactly(k, _budget)` at `PAD_PRIORITY`, filling one unfilled slot
+        with an empty token exactly as `arm_e_empty` would. `tests/scheduler/failures.test.ts`'s
+        stranded-join case ran `Trigger, A, B, Merge` instead of stranding, and `ifBothOutputs`
+        left the differ's pinned divergent set entirely: both engines run `Merge` twice, and the
+        only residual difference is **which run carries which payload** — n8n's LIFO `unshift`
+        against our FIFO, which is divergence #11. #2 closing exposes #11 underneath it, exactly
+        as the phase order predicted. ~40 lines across `gadget.ts`, `compile.ts`, `actions.ts`,
+        plus hash v11 (the budget stops being a property of the initial marking alone once a
+        transition counts it)
+      - **Verification: three ways, all blocking.** `proven` → **`violated`** on
+        `proper-completion` for edges that are fine, because the priority-blind graph pads a slot
+        whose arrival is still in flight and then strands the arrival — the executor cannot, the
+        abstraction can. State space **306 → 712** classes on one fixture and **697 → 4,607** on
+        another, against a corpus that already truncates. And the **budget P-semiflow is lost**:
+        Farkas returns no law giving `_budget` and every `X/running` the same positive weight
+        once a transition consumes `exactly(k)` and produces `k`, so `nodeCarriesUnit` has
+        nothing to stand on
+
+      **The ask, now with a reproducible failing test rather than a prediction:
+      `prioritySemantics` on the plain `StateClassGraph.build` too.** Same wall as the item
+      above, reached from the other side: the capability exists and only Route B can see it. The
+      compiler change is small and can be redone in an hour once it lands; what cannot be worked
+      around here is an abstraction that cannot see the pre-emption the executor performs
+- [ ] **`inhibitorArc` is a zero test only**, with no threshold: `ArcInhibitor` is
+      `{ type, place }` and `inhibitorArc(place)` takes no count. Every capacity encoding
+      therefore needs a complementary place that *every* writer has to keep in step — the
+      `bucket` / `bucket_free` pair of ADR 0009 §5, and the same again for a per-group
+      concurrency limit and for a circuit breaker's failure count. `inhibitorArc(place, n)`
+      ("fewer than *n* tokens") collapses each of them to one arc and removes the class of bug
+      where one writer forgets the complement. Wanted by the `rate`, `concurrency` and
+      `circuitBreaker` behaviours in ADR 0009's roadmap; not needed by anything shipped today
+- [ ] **CORE-073 (marking snapshot and restore) has no TypeScript surface**, is still
+      `Proposed`, and the coverage matrix shows no test reference in *any* language. Low priority
+      and fidelity-only: ADR 0009 §5 decides that policy timers are recomputed from n8n's own
+      `runData` timestamps rather than resumed, so nothing here depends on it. What its absence
+      costs is token ordering on resume — `tokenAt` can set a `created_at`, but there is no
+      round-trip to pin that the decoder and a snapshot agree
 - [x] **The declared dependency is wrong, and a clean `npm install` would silently weaken every
       report.** *Closed 2026-09-09: libpetri 5.1.0 shipped the surface, `package.json` asks for
       `^5.1.0`, the lock pins 5.1.0 with its integrity hash, and the suite is 869/869 against the
@@ -492,6 +621,69 @@ an upstream ask, or work that was specified and deliberately not built.
       routing moved back inside `X_run` (ADR 0004's M6 amendment), pinned by
       `tests/spikes/out-spec.test.ts` and `tests/spikes/collapsed-outcome.test.ts`. Java/Rust
       validators still unchecked for the same behaviour
+
+### 4b. Upstream (n8n)
+
+Nothing here blocks anything shipped: `patches/n8n/0001` and `0002` are unchanged by ADR 0009
+and `scripts/verify-patch.sh` is the gate that proves it. These are asks the policy work found.
+
+- [ ] **There is nowhere to persist a counter that has no n8n analogue.** `A/calls` re-seeds on
+      resume for exactly this reason (divergence #25: "n8n has nowhere to persist the count"),
+      and every future budget — `maxRuns`, a rate bucket's level, a per-group counter — has the
+      same problem. The codec writes pending work to `nodeExecutionStack` as `IExecuteData`, and
+      no field on it carries an engine-owned integer. **The ask: an engine-owned opaque slot on
+      `IRunExecutionData`**, which is already persisted whole for a waiting execution, so the
+      round trip costs nothing new. Prefer deriving from `runData` wherever that reaches (ADR
+      0009 §5 does exactly that for attempt timers, and it keeps n8n the system of record); this
+      is for what derivation cannot express
+- [ ] **`runNode` cannot be cancelled per node**, only per execution (`host.abortSignal`).
+      **Desirable, not required**: IO-013 abandons the *firing* and discards its output, so the
+      marking is correct while the node's own work runs on — the deadline of ADR 0009 §4 is sound
+      without this. What cancellation would buy is not wasting the work and not letting the side
+      effect land. Same root cause as divergence #17, "the net cannot un-start an action"
+- [ ] **`options.maxToolCalls` never had a working carrier.** `getNodeParameters` rebuilds a
+      `collection` from the node type's declared options, so an undeclared key inside
+      `parameters.options` is dropped on the editor's save path and again in the `Workflow`
+      constructor; it survived only in the verify CLI's raw-JSON path. Worked around here by
+      moving it to `node.executionPolicy.maxToolCalls` (ADR 0009 §2). The upstream fix would be
+      to declare it on the agent node type. **The README's known-limits entry and divergence #25
+      both told users to declare a knob they could not declare**
+- [ ] **Worth proposing, not just asking**: `onFailure` subsumes `onError` + `retryOnFail` +
+      `maxTries` + `waitBetweenTries` (ADR 0009 §1). If it holds up in use here it is a candidate
+      for n8n's own schema, which is the outcome that would make the layering pay off beyond this
+      engine
+- [ ] **The tool-call budget is missing from n8n's *new* agent runtime too, so the ask is not a
+      legacy-node oversight.** `packages/@n8n/agents` (in the pinned tree at `441970b`, ~31.7k
+      lines) is a second scheduler: `runtime/loop/agent-runtime.ts:857` is
+      `for (; iterationCount < maxIterations; iterationCount++)` with `MAX_LOOP_ITERATIONS = 30`
+      (`:143`), `runtime/tools/tool-call-executor.ts` batches a turn's calls by a `concurrency`
+      field (default 1) under `Promise.allSettled`, and `runtime/tools/delegate-sub-agent-tool.ts`
+      fans out to sub-agents at `DEFAULT_SUB_AGENT_MAX_CHILDREN = 10`. Three observations, each
+      one an argument for the same upstream change:
+      - **Rounds are bounded; tool calls are not.** `runtime/loop/execution-counter.ts` counts
+        them and says so outright — "Aggregate execution counters are best-effort instrumentation
+        and must never affect agent execution." The only `maxToolCalls` in the tree is the OpenAI
+        node forwarding `max_tool_calls` to the vendor API, and a post-hoc *eval grader*
+        (`@n8n/instance-ai/evaluations/computer-use/graders/trace.ts:176`). The community request
+        for a runtime bound — "it enters an infinite loop—calling the same tools repeatedly",
+        May 2026, 20+ replies — is open and unanswered. `A/calls` is that bound, and divergence
+        \#25 is the same gap in the classic node
+      - **Delegation depth is capped at 1 by a regex on a path string**:
+        `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/`
+        (`runtime/tools/sub-agent-task-path.ts`), and `maxChildren` is documented as limiting
+        "parallelism, not the total number of delegated tasks". A recursion bound expressed as a
+        parse failure is the shape ν-nets would carry as a marking (§4, Route B)
+      - **Exhaustion presents as completion**: `agent-runtime.ts:975` sets
+        `lastFinishReason = 'max-iterations'` and then calls `sink.finishComplete(...)`, leaving
+        three downstream call sites to check the string. Issue #22771 (Dec 2025, fixed in
+        PR #23218) was the classic node making that mistake visibly — max iterations routing to
+        the Success output under `continueErrorOutput`. `A_calls_out` and `A_rounds_out` are
+        designed terminals precisely so exhaustion is a marking the author routes, not a
+        finish-reason a consumer may forget to read
+      Not a blocker and not reachable through our seam — `@n8n/agents` does not go through
+      `WorkflowExecute.processRunExecutionData()`, so it is a separate integration, and it is
+      Preview with queue mode unsupported. Recorded because it is the strongest evidence the
+      budget/exhaustion-routing ask is real: the same gap survived a from-scratch rewrite
 
 ### 5. Harness and CI
 
