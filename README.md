@@ -9,16 +9,15 @@ n8n executes a workflow by running a scheduling loop over an explicit stack of p
 The loop is compact and effective, and it carries a complete scheduling model: the states a node
 passes through, the condition under which it may run, the number of nodes that may run at once,
 and the conditions under which an execution ends. That model is expressed as control flow and as
-a small number of execution-global fields — a form a reader of the source can follow, and one
-that tooling cannot easily consult.
+a small number of execution-global fields. A reader of the source can follow it; a tool cannot
+read it.
 
-n8n-libpetri restates the same model as a coloured time Petri net. n8n retains the editor, the
-workflow format, credentials, node implementations, persistence, webhooks, hooks and queue mode.
-The scheduling model becomes an object in its own right.
+n8n-libpetri restates that model as a coloured time Petri net, registered through the seam the
+patches under `patches/n8n/` add. n8n keeps the editor, the workflow format, credentials, node
+implementations, persistence, webhooks, hooks and queue mode.
 
-The execution model is a Petri net. Concurrency, cycles, joins, retries, resource limits and
-terminal states therefore have explicit semantics. The scheduler executes that net. The
-verifier analyses the same net.
+Concurrency, cycles, joins, retries, resource limits and terminal states gain explicit semantics.
+The scheduler executes that net; the verifier analyses the same net.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/workflow-to-net-dark.svg" />
@@ -53,22 +52,20 @@ pending entries, plus a side table holding the partly arrived inputs of multi-in
 iteration takes one entry, runs that node, and appends the successors of every output that
 produced items, sorted by canvas position.
 
-Two conditions make it work, and the loop satisfies both by construction. A successor is
-enqueued only when its output carried data, so a recovery pass completes any node still waiting
-once the stack drains. Exactly one node runs at a time, which keeps the execution-global fields
-safe.
+Two conditions make it work, and the loop satisfies both by construction. It enqueues a
+successor only when the output carried data, so a recovery pass completes any node still waiting
+once the stack drains. One node runs at a time, which keeps the execution-global fields safe.
 
 ## What formalisation provides
 
-Restating the model changes nothing about the work n8n performs. It changes what can be said
-about that work before it runs. Three conditions the loop holds implicitly become objects in the
-net, and analysability follows from having them.
+Restating the model changes none of the work n8n performs. It changes what you can say about
+that work before it runs. Three conditions the loop holds implicitly become objects in the net,
+and analysis follows from having them.
 
 **Waiting becomes a place.** A join in the net holds one slot per input and fires when the last
-slot is claimed. An edge with no data for this activation claims its slot with an `empty` token,
-so "produced nothing" arrives as a fact. A stack of pending entries carries arrivals but not
-absences, so a waiting join there needs a
-recovery pass after the stack drains; the net needs none.
+slot is claimed. An edge with no data for this activation claims its slot with an `empty` token, so "produced
+nothing" arrives as a fact. A stack of pending entries carries arrivals but not absences, so a
+waiting join there needs a recovery pass once the stack drains. The net needs none.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/empty-token-dark.svg" />
@@ -82,18 +79,17 @@ recovery pass after the stack drains; the net needs none.
 still emits an `empty` token, `B`'s skip passes that empty on, and `Merge` starts with both slots
 claimed and one holding data.*
 
-**The bound becomes a number.** One node at a time is what keeps `executionError`, `waitTill`
-and `lastNodeExecuted` correct, and it holds as a property of the control flow rather than as a
-stated number. The net states it as `_budget`, k
-tokens in one place, and the `budget` property checks the law that follows. Two independent
-500 ms branches take 1,006 ms today and 507 ms at k = 2.
+**The bound becomes a number.** One node at a time keeps `executionError`, `waitTill` and
+`lastNodeExecuted` correct, and it holds as a property of the control flow rather than as a stated
+number. The net states it as `_budget`: k tokens in one place, with the `budget` property checking
+the law that follows. Two independent 500 ms branches take 1,006 ms today and 507 ms at k = 2.
 
 **Execution state becomes data.** Progress is the marking, and `MarkingCodec` writes it into
 n8n's own `nodeExecutionStack` and `waitingExecution`. Wait, resume and queue-mode handoff
 therefore move a marking with a defined encoding, and nothing new is persisted.
 
-**The model becomes analysable.** Whether a join can be left permanently unsatisfied is a
-question about reachable states, which control flow alone cannot answer. `proper-completion`
+**The model becomes analysable.** Whether a join can stay permanently unsatisfied is a question
+about reachable states, and control flow alone cannot answer it. `proper-completion`
 decides it on the state-class graph: `violated` on `ifBothOutputs` in 42 ms, with the firing
 sequence named in nodes.
 
@@ -137,9 +133,9 @@ n8n-libpetri supports v1 execution order only, and deliberately leaves v0 on n8n
 An AI Agent's tool calls are part of the scope, and they are the one place the model changes what
 a user sees rather than only what can be said about it. `AgentV3` returns an `EngineRequest`
 instead of data when its model wants a tool; the compiler turns each `ai_tool` connection into a
-dispatch arm, so a round of tool calls is a marking — bounded by the agent's own
-`options.maxIterations`, resumable if the execution pauses inside it, and run `k`-wide where n8n
-runs it one call at a time ([ADR 0008](docs/adr/0008-agent-tool-dispatch.md)). Every other `ai_*`
+dispatch arm, so a round of tool calls is a marking: bounded by the agent's own
+`options.maxIterations`, resumable if the execution pauses inside it, and run `k`-wide
+([ADR 0008](docs/adr/0008-agent-tool-dispatch.md)). Every other `ai_*`
 connection is resolved by `supplyData` inside `runNode` and never reaches a scheduler.
 
 ## Execution model
@@ -314,32 +310,30 @@ measurements, and [ADR 0007](docs/adr/0007-verification.md) for the decision.
 | n8n CLI package | 20,328 cases pass; the scheduler is registered but never runs there. |
 | Differential sweep | 25 fixtures at k=1,2,4: 55 pass, 20 registered divergences, 0 failures. |
 
-The classifier marks 44 of the execution-engine suite's 1,657 cases as loop-driving, so those 44
-measure the engine; the remaining 1,613 are helpers and guard the seam against perturbation. All
-four remaining regressions are loop-driving, and every one is a registered divergence: three are
-the documented semantic differences in stuck-join handling and OR/join ordering (#2, #11, #12),
-and the fourth is an `EngineRequest` naming a node the workflow never wired to its agent (#22) —
-a shape a real agent cannot emit, since its actions come from the same connections. M7 took this
-from 35/44 with an eight-case restatement to 40/44 with none. Widening to `packages/workflow` and
-`packages/cli` added 29,931 further cases with no new failure class. The exact cases and
-evidence are in [`docs/conformance-final.md`](docs/conformance-final.md).
+The classifier marks 44 of the suite's 1,657 cases as loop-driving, so those 44 measure the
+engine and the remaining 1,613 guard the seam against perturbation. All four regressions are
+loop-driving and every one is a registered divergence: three are semantic differences in
+stuck-join handling and OR/join ordering (#2, #11, #12); the fourth is an `EngineRequest` naming a
+node the workflow never wired to its agent (#22), a shape a real agent cannot emit because its
+actions come from those same connections. M7 took this from 35/44 with an eight-case restatement
+to 40/44 with none. Widening to `packages/workflow` and `packages/cli` added 29,931 cases and no
+new failure class. See [`docs/conformance-final.md`](docs/conformance-final.md).
 
-The benchmark is useful as a cost check, not as an architectural argument. A warm 100-node
-zero-work chain adds about 16 µs of scheduler overhead per node over n8n's loop on the
-measured machine. A 185-node workflow compiles to a cached `PrecompiledNet` in under 9 ms.
-Independent 500 ms branches fill the configured budget as expected. Full methodology and
-raw numbers are in [`docs/differential.md`](docs/differential.md).
+The benchmark is a cost check, not an architectural argument. A warm 100-node zero-work chain
+adds about 16 µs per node over n8n's loop on the measured machine. A 185-node workflow compiles to
+a cached `PrecompiledNet` in under 9 ms. Independent 500 ms branches fill the configured budget.
+Methodology and raw numbers are in [`docs/differential.md`](docs/differential.md).
 
 ## In a real n8n
 
-Every number above is measured against `FakeHost`, a structural mirror of the patched host. It
-runs n8n's own execution-engine cases, and it is deliberately not n8n:
+Every number above comes from `FakeHost`, a structural mirror of the patched host. It runs n8n's
+own execution-engine cases and it is deliberately not n8n:
 [`docs/conformance-final.md`](docs/conformance-final.md) records the `cli` scope as *registered,
-never entered*. Until the testbed, the engine had never been constructed by the process n8n ships.
+never entered*. Until the testbed, the process n8n ships had never constructed the engine.
 
 `scripts/testbed/` boots that process — the real `packages/cli`, with the editor, node types, task
-runner, credentials and persistence around it — and installs `PetriScheduler` into it through an
-`--import` preload, then seeds two workflows so there is something to press.
+runner, credentials and persistence around it — installs `PetriScheduler` through an `--import`
+preload, and seeds workflows so there is something to press.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/fanout-dark.svg" />
@@ -362,9 +356,9 @@ n8n             Fan → Fetch A → Fetch B → Merge AB → Fetch C  → Fetch 
 libpetri k = 4  Fan → Fetch A → Fetch B → Fetch C  → Fetch D  → Merge AB → Merge CD → Merge All → …
 ```
 
-n8n enqueues `Merge AB` as soon as both its inputs have arrived, and runs it before it starts
-`Fetch C`. The net starts all four legs, because nothing in the net orders them. Every node still
-runs exactly once on the same input, and every realised dependency edge still holds.
+n8n enqueues `Merge AB` as soon as both inputs arrive and runs it before starting `Fetch C`. The
+net starts all four legs, because nothing in the net orders them. Every node still runs once on
+the same input, and every realised dependency edge still holds.
 
 | Workflow | Leg | Wall clock | Data vs n8n | Happens-before | Order |
 |---|---|---|---|---|---|
@@ -379,18 +373,39 @@ The second workflow is an AI Agent with two tools on `ai_tool` connections, driv
 model, so the dispatch round of [ADR 0008](docs/adr/0008-agent-tool-dispatch.md) is exercised by
 n8n's own agent node rather than by a fixture.
 
-<img alt="The n8n editor showing the Concurrency Showcase workflow after a successful run: every
-node carries a green check and n8n's own toast reads workflow executed successfully."
-  src="docs/img/testbed-canvas.png" width="960" />
+### Three runs, recorded
 
-*The k = 4 execution in the editor, after `scripts/testbed/browser-check.sh` signed in, pressed
-Execute workflow and waited for n8n's own success toast.*
+`scripts/testbed/record-demo.sh` signs in, frames the canvas, presses Execute workflow and records
+until n8n's own REST API reports the execution finished. Each clip below is that recording.
 
-The testbed is an integration harness, not a conformance measurement: `scripts/run-conformance.sh`
-stays the authority on case counts, and neither seeded workflow reaches divergence #17, the one
-k > 1 behaviour change with a user-visible shape. A green table here is not a licence to raise `k`
-everywhere. How the engine gets into the process, what the three columns above decide, and what
-the harness cannot see are in [`docs/testbed.md`](docs/testbed.md).
+<img alt="The Concurrency Showcase workflow running in the n8n editor at k = 4. Four Code nodes on
+independent branches turn green together rather than one after another, and the run finishes."
+  src="docs/media/concurrency-showcase.gif" width="900" />
+
+*Concurrency Showcase at k = 4. Four legs hold a budget token each, so they start together.*
+
+<img alt="The Resilient Fan-Out workflow running. One branch retries after a failure, another is
+abandoned when its deadline expires, and the merge still receives data and the run completes."
+  src="docs/media/resilient-fan-out.gif" width="900" />
+
+*Resilient Fan-Out. One branch retries on its own delay, one is abandoned at its deadline, and the
+run still reaches `Merge`. Both behaviours are declared in the workflow JSON (ADR 0009).*
+
+<img alt="The Agent Escalation Ladder workflow running. The first agent turns red when its
+tool-call budget is spent, its error output leads to a second agent, which answers, and the give-up
+node stays grey." src="docs/media/agent-escalation-ladder.gif" width="900" />
+
+*Agent · Escalation Ladder. `Research Agent` spends a declared budget of two tool calls and routes
+the exhaustion down its error output; `Last Try Agent`, reached only once that budget is empty,
+answers. `Answer` and `Give Up` stay grey because neither path was taken — which is the point.
+`Calculator` ran twice and carries no badge, which is divergence #29: n8n reserves a `runData` slot
+for every requested call, and the slot the budget refused leaves the node reading as unexecuted.*
+
+The testbed is an integration harness, not a conformance measurement. `scripts/run-conformance.sh`
+stays the authority on case counts, and no seeded workflow reaches divergence #17, the one k > 1
+behaviour change with a user-visible shape. Treat a green table here as evidence the seam holds,
+not as licence to raise `k` everywhere. [`docs/testbed.md`](docs/testbed.md) covers how the engine
+gets into the process, what the columns decide, and what the harness cannot see.
 
 ## Known limits
 
