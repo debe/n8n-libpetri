@@ -79,9 +79,9 @@ launcher rebuilds when `dist` is older than the patched source and then asserts 
 shared state with `scripts/run-conformance.sh --scope=cli`, whose own guard greps the same
 built file; rebuilding from the patched source can only make that leg more correct.
 
-## The six workflows
+## The eight workflows
 
-All six set `settings.executionOrder: "v1"`. Without it `PetriScheduler` delegates straight to
+All eight set `settings.executionOrder: "v1"`. Without it `PetriScheduler` delegates straight to
 n8n's `StackScheduler` (divergence #3) and the testbed would silently demonstrate the thing it
 replaces.
 
@@ -229,6 +229,51 @@ Same workflow, same hung service. n8n's only bound is global and it takes the wh
 with it; the per-tool deadline loses the tool call and nothing else — the agent receives the
 error as its tool response, answers, and `Answer` runs. `tests/scheduler/agent.test.ts` pins the
 same four behaviours against `FakeHost` without a server.
+
+### Waiting Child + Parent Waits On Child — 3 nodes each
+
+```
+Parent:  Manual Trigger → Call The Child (Execute Workflow) → Parent Result
+Child:   Execute Workflow Trigger → Wait 70s → Child Result
+```
+
+The parent cannot know the child's id before the child is seeded, so it carries
+`__WORKFLOW_ID:Waiting Child__` and `seed.mjs` binds it — the same rule as the stub's port and
+the credential: nothing under `workflows/` hardcodes instance state.
+
+**70 seconds is the point, not an accident.** `Wait.node.ts`:
+
+```js
+if (waitValue < 65000) {
+  // If wait time is shorter than 65 seconds leave execution active because
+  const timer = setTimeout(() => resolve([context.getInputData()]), waitValue);
+}
+// If longer than 65 seconds put execution to wait
+return await this.putToWait(context, waitTill);
+```
+
+Under the cliff n8n **holds the execution active**; over it, it suspends. Measured both ways, and
+the node's own `executionTime` is what tells them apart:
+
+| child waits | `Call The Child` executionTime | what happened |
+|---|---|---|
+| 4 s | **4,036 ms** | the node was held for the whole wait; nothing suspended |
+| 70 s | **0 ms** | the node suspended, the marking was written, and it re-ran on resume |
+
+At 70 s the parent suspends on `putExecutionToWait(WAIT_INDEFINITELY)`
+(`base-execute-context.ts:193`), n8n's `WaitTracker.resumeParentExecution` wakes it once the
+child finishes, and the child's output crosses the boundary intact.
+
+**Both engines, 70 s child:** legacy 70,161 ms, libpetri 70,143 ms, **data equal**, every node's
+payload identical. This leg is parity, not advantage — n8n handles nested waits correctly and so
+do we. What it establishes is that a suspended parent survives the marking round trip in a real
+server, which every resume claim rests on.
+
+The advantage is next door, and it is the sub-cliff case: a node held by `setTimeout` holds its
+`_budget` unit for the entire wait, and `executionPolicy.timeoutMs` is the only thing in either
+engine that can bound it (see **Agent · Tool Deadline**). n8n has a second cliff of the same
+shape in its agent bridge — `WAIT_POLL_ELIGIBLE_MS = 60_000`, under which it polls the database
+every two seconds and over which it asks a human to press a button.
 
 ### Failure Policy Showcase — 5 nodes
 

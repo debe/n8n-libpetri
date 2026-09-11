@@ -91,6 +91,25 @@ All notable changes to this project are documented here. The format follows
   the same failure, thrown or timed out, down the error arc carrying `{ json: { error } }`, and
   applies the branch inside `record()` so what is recorded is what was routed. Divergence #27
   is rewritten around the measurement.
+- **A suspended parent survives the marking round trip in a real server.** `Waiting Child` and
+  `Parent Waits On Child` — a workflow calling a sub-workflow that waits. The parent is bound to
+  the child by a `__WORKFLOW_ID:<name>__` placeholder the seeder resolves, so nothing under
+  `workflows/` hardcodes instance state.
+
+  70 seconds is the point. `Wait.node.ts` suspends only past a cliff — *"If wait time is shorter
+  than 65 seconds leave execution active"* — and under it holds the execution with a `setTimeout`.
+  The node's own `executionTime` is what tells the two apart, measured both ways: a 4-second
+  child left `Call The Child` at **4,036 ms**, held for the whole wait; a 70-second child left it
+  at **0 ms**, suspended and re-run on resume. At 70 s the parent goes to
+  `putExecutionToWait(WAIT_INDEFINITELY)` and `WaitTracker.resumeParentExecution` wakes it.
+
+  Both engines at 70 s: legacy 70,161 ms, libpetri 70,143 ms, **data equal**, every payload
+  identical. Parity, not advantage — and that is the point, because every resume claim in this
+  project rests on it. The advantage is the sub-cliff case: a node held by `setTimeout` holds its
+  `_budget` unit for the entire wait, and `executionPolicy.timeoutMs` is the only thing in either
+  engine that bounds it. n8n has a second cliff of the same shape in its agent bridge —
+  `WAIT_POLL_ELIGIBLE_MS = 60_000`, under which it polls the database every two seconds and over
+  which it renders a button for a human to press.
 - **A failure policy on an agent's tool**, which is the node that actually calls the flaky
   service. Only three of the four actions mean anything there: a tool's outcome is its agent's
   `A/response` rather than a main edge, so `route` has nowhere to go and the compiler now refuses

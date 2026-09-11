@@ -56,7 +56,7 @@
     {
       "parameters": {
         "toolDescription": "Ask the slow service for a status. Input is ignored.",
-        "url": "http://127.0.0.1:5699/hang",
+        "url": "http://127.0.0.1:__LLM_PORT__/hang",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequestTool",

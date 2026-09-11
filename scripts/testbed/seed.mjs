@@ -97,8 +97,18 @@ async function credential() {
 }
 
 /** Repoints every credential reference in the workflow at the id n8n actually assigned. */
-function rebind(workflow, cred) {
+function rebind(workflow, cred, seeded) {
   for (const node of workflow.nodes) {
+    // A workflow that calls another one cannot know its id until that one is seeded, so it
+    // carries `__WORKFLOW_ID:<name>__` and the loop below seeds callees first. Same reason as
+    // the port and the credential: nothing in `workflows/` may hardcode instance state.
+    const ref = node.parameters?.workflowId;
+    if (ref && typeof ref.value === 'string' && ref.value.startsWith('__WORKFLOW_ID:')) {
+      const wanted = ref.value.slice('__WORKFLOW_ID:'.length, -2);
+      const target = seeded.find((w) => w.name === wanted);
+      if (!target) throw new Error(`${workflow.name}: no seeded workflow called '${wanted}' to bind to`);
+      node.parameters.workflowId = { __rl: true, mode: 'list', value: target.id, cachedResultName: wanted };
+    }
     // The stub's port is chosen by the launcher (`--llm-port`), so a workflow that calls it
     // carries a placeholder rather than a hardcoded number — the same reason the credential's
     // `url` is rewritten below.
@@ -113,8 +123,8 @@ function rebind(workflow, cred) {
   return workflow;
 }
 
-async function workflow(file, cred) {
-  const parsed = rebind(JSON.parse(await readFile(resolve(here, 'workflows', file), 'utf8')), cred);
+async function workflow(file, cred, seeded) {
+  const parsed = rebind(JSON.parse(await readFile(resolve(here, 'workflows', file), 'utf8')), cred, seeded);
   const body = {
     name: parsed.name,
     nodes: parsed.nodes,
@@ -141,8 +151,11 @@ async function workflow(file, cred) {
 await authenticate();
 const cred = await credential();
 const workflows = [];
-for (const file of ['concurrency-showcase.json', 'agent-two-tools.json', 'agent-budget-showcase.json', 'agent-tool-deadline.json', 'failure-policy-showcase.json', 'resilient-fan-out.json']) {
-  workflows.push(await workflow(file, cred));
+// Order matters where one workflow calls another: `waiting-child` before `parent-waits-on-child`.
+for (const file of ['concurrency-showcase.json', 'agent-two-tools.json', 'agent-budget-showcase.json',
+  'agent-tool-deadline.json', 'failure-policy-showcase.json', 'resilient-fan-out.json',
+  'waiting-child.json', 'parent-waits-on-child.json']) {
+  workflows.push(await workflow(file, cred, workflows));
 }
 
 await mkdir(dirname(out), { recursive: true });

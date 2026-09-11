@@ -1,0 +1,47 @@
+{
+  "name": "Parent Waits On Child",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-420, 0],
+      "id": "dd44ee55-ff66-4077-b188-2233ccddeeff",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "workflowId": { "__rl": true, "mode": "list", "value": "__WORKFLOW_ID:Waiting Child__" },
+        "workflowInputs": { "mappingMode": "defineBelow", "value": {}, "matchingColumns": [], "schema": [] },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [-160, 0],
+      "id": "ee55ff66-0077-4188-9299-3344ddeeff00",
+      "name": "Call The Child"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "1", "name": "parentSaw", "type": "string", "value": "={{ $json.childSaid }}" }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [120, 0],
+      "id": "ff660077-1188-4299-a3aa-4455eeff0011",
+      "name": "Parent Result"
+    }
+  ],
+  "connections": {
+    "When clicking ‘Execute workflow’": { "main": [[{ "node": "Call The Child", "type": "main", "index": 0 }]] },
+    "Call The Child": { "main": [[{ "node": "Parent Result", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false,
+  "pinData": {}
+}
