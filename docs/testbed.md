@@ -1,14 +1,13 @@
 # The live testbed
 
-Everything else in this repository measures the engine against `FakeHost` — a structural mirror
-of patch 0001, good enough to run n8n's own execution-engine cases and to diff two schedulers
-against each other, and deliberately not n8n. `docs/conformance-final.md` records the `cli`
-scope as **registered, never entered**: the engine had never once been constructed by the
-process n8n actually ships.
+Everything else in this repository measures the engine against `FakeHost`, a structural mirror of
+patch 0001. It runs n8n's own execution-engine cases and diffs two schedulers against each other,
+and it is deliberately not n8n: `docs/conformance-final.md` records the `cli` scope as
+**registered, never entered**. The process n8n ships had never constructed the engine.
 
-The testbed closes that gap. It boots the real `packages/cli`, with the real editor, the real
-node types, the real task runner, real credentials and real persistence, and installs
-`PetriScheduler` into it. Two workflows are seeded so there is something to press.
+The testbed closes that gap. It boots the real `packages/cli` — editor, node types, task runner,
+credentials, persistence — installs `PetriScheduler`, and seeds workflows so there is something
+to press.
 
 ```bash
 scripts/testbed/n8n-testbed.sh                 # libpetri, k = 4, http://127.0.0.1:5678
@@ -18,11 +17,11 @@ scripts/testbed/browser-check.sh               # drive the editor, screenshot th
 
 ## What it is, and what it is not
 
-It is an **integration and demonstration harness**. It is not a conformance measurement, and no
-number here belongs in a headline: `scripts/run-conformance.sh` remains the authority on case
-counts, and the reporting rule in `CLAUDE.md` applies to it, not to this. What the testbed adds
-is a different kind of evidence — that the seam holds in the process that has n8n's own
-dependency injection, module loading, credential decryption and task-runner IPC around it.
+An **integration and demonstration harness**, not a conformance measurement. No number here
+belongs in a headline: `scripts/run-conformance.sh` remains the authority on case counts, and
+`CLAUDE.md`'s reporting rule applies to it rather than to this. What the testbed adds is evidence
+of a different kind — that the seam holds in the process carrying n8n's own dependency injection,
+module loading, credential decryption and task-runner IPC.
 
 ## How the engine gets in
 
@@ -47,8 +46,8 @@ the process. `NODE_OPTIONS` would also load it into the internal task-runner chi
 constructs a scheduler.
 
 **No fallback.** If any of that fails the preload throws and n8n does not start. A testbed that
-quietly runs n8n's stack loop while claiming to run the net would be worse than one that
-refuses to boot. Both directions are checked:
+quietly runs n8n's stack loop while reporting on the net is worse than one that refuses to boot.
+Both directions are checked:
 
 ```
 $ N8N_EXECUTION_ENGINE=legacy   node --import scripts/testbed/preload.mjs -e "0"
@@ -105,6 +104,10 @@ Every payload is deterministic. The legs return `{ leg: 'A' }` and not a timesta
 whatever order the branches finished in. The wall clock is measured from outside, so nothing
 time-dependent has to travel through the data channel that the legacy/libpetri comparison reads.
 
+<img alt="The Concurrency Showcase running at k = 4. The four Code nodes on independent branches turn green together rather than one after another." src="media/concurrency-showcase.gif" width="900" />
+
+*k = 4. Four legs hold a budget token each, so they start together.*
+
 ### Agent · Two Tools — 6 nodes
 
 ```
@@ -142,10 +145,9 @@ Fact_Lookup      --ai_tool---------->   Confused Agent
 ```
 
 An agent that keeps asking. Its prompt carries the marker `[stub:loop]`, which makes
-`stub-llm.mjs` answer **every** call with tool calls and never with `finish_reason: "stop"` —
-a model that never decides it is done, which is the shape a call bound exists for,
-made deterministic and offline. The marker travels in the workflow's own prompt, so nothing
-outside the workflow arms it.
+`stub-llm.mjs` answer **every** call with tool calls and never with `finish_reason: "stop"`: a
+model that never decides it is done, made deterministic and offline. The marker travels in the
+workflow's own prompt, so nothing outside the workflow arms it.
 
 The agent declares:
 
@@ -230,6 +232,10 @@ execution, so it ends the whole execution; the per-tool deadline loses the tool 
 error as its tool response, answers, and `Answer` runs. `tests/scheduler/agent.test.ts` pins the
 same four behaviours against `FakeHost` without a server.
 
+<img alt="The Agent Tool Deadline workflow running. The tool turns red when its deadline expires and the agent still answers, so the run completes." src="media/agent-tool-deadline.gif" width="900" />
+
+*`Slow_Service` goes red at its 3 s deadline. The agent receives the error as its tool response and `Answer` still runs.*
+
 ### Agent · Nested Agents — 8 nodes
 
 ```
@@ -294,6 +300,10 @@ classes at `maxToolCalls` 2 and 202,164 at 3; at 4 the solver-free route runs ou
 it closes (`effectiveMaxClasses` clamps to what the heap affords — 263,737 on this machine). The
 SMT route still answers past that point, which is what it is for.
 
+<img alt="The Agent Nested Agents workflow running. An agent calls a second agent wired as its tool, which calls a tool of its own, and every node turns green." src="media/agent-nested-agents.gif" width="900" />
+
+*Depth 2. `Sub Agent` is an agent wired as a tool, with a tool of its own.*
+
 ### Waiting Child + Parent Waits On Child — 3 nodes each
 
 ```
@@ -306,12 +316,12 @@ The parent cannot know the child's id before the child is seeded, so it carries
 the credential: nothing under `workflows/` hardcodes instance state.
 
 **70 seconds is the point, not an accident.** n8n's Wait node has a threshold a little over a
-minute: a wait shorter than that is held in process on a timer, and only a longer one suspends
-the execution and writes a `waitTill`. The threshold applies to the computed remaining wait, so
-it governs both the interval and the fixed-time forms of the node.
+minute. A shorter wait is held in process on a timer; only a longer one suspends the execution and
+writes a `waitTill`. The threshold applies to the computed remaining wait, so it governs both the
+interval and the fixed-time forms.
 
-Under that threshold n8n **holds the execution active**; over it, it suspends. Measured both ways, and
-the node's own `executionTime` is what tells them apart:
+Under it n8n **holds the execution active**; over it, n8n suspends. Measured both ways, with the
+node's own `executionTime` telling them apart:
 
 | child waits | `Call The Child` executionTime | what happened |
 |---|---|---|
@@ -322,10 +332,10 @@ At 70 s the parent suspends on `putExecutionToWait(WAIT_INDEFINITELY)`
 (`base-execute-context.ts:193`), n8n's `WaitTracker.resumeParentExecution` wakes it once the
 child finishes, and the child's output crosses the boundary intact.
 
-**Both engines, 70 s child:** legacy 70,161 ms, libpetri 70,143 ms, **data equal**, every node's
-payload identical. This leg is parity, not advantage — n8n handles nested waits correctly and so
-do we. What it establishes is that a suspended parent survives the marking round trip in a real
-server, which every resume claim rests on.
+**Both engines, 70 s child:** legacy 70,161 ms, libpetri 70,143 ms, **data equal**, every payload
+identical. This leg is parity: n8n handles nested waits correctly and so does the net. What it
+establishes is that a suspended parent survives the marking round trip in a real server, which
+every resume claim rests on.
 
 The sub-cliff case is where the two differ: a node held by `setTimeout` holds its
 `_budget` unit for the entire wait, and `executionPolicy.timeoutMs` is the only thing in either
@@ -345,11 +355,10 @@ Last Try Chat Model  --ai_languageModel--> Last Try Agent
 ```
 
 An escalation written as graph rather than as a branch inside a node. The first agent carries
-`[stub:loop]`, so the stub answers every call with more tool calls and it never finishes on its
-own. Its declared budget is two, and the `onFailure` step routes the exhaustion to its error
-output rather than ending the execution. That output goes to a *second* agent with a different
-instruction — "you have one attempt left, answer from what you already know" — whose own error
-output is the give-up path.
+`[stub:loop]`, so it never finishes on its own. Its declared budget is two, and the `onFailure`
+step routes the exhaustion to its error output instead of ending the execution. That output feeds
+a *second* agent with a different instruction — "you have one attempt left, answer from what you
+already know" — whose own error output is the give-up path.
 
 Measured, one run: `Calculator` ran twice, `Research Agent` ended `error` with
 `Tool-call budget (2) reached`, `Last Try Agent` answered without calling a tool, and
@@ -360,6 +369,10 @@ place, the second agent is reached only when that place is empty, and the give-u
 edge nothing takes until the one above it is spent. Each of the three outcomes is a different
 region of the graph, so each is something the verifier can reason about.
 
+<img alt="The Agent Escalation Ladder running. The first agent turns red when its tool-call budget is spent, its error output reaches a second agent which answers, and the give-up node stays grey." src="media/agent-escalation-ladder.gif" width="900" />
+
+*`Research Agent` spends its budget of two and routes the exhaustion down its error output. `Answer` and `Give Up` stay grey because neither path was taken. `Calculator` ran twice and carries no badge — divergence #29, below.*
+
 ### Failure Policy Showcase — 5 nodes
 
 Two branches off the trigger, each calling the testbed's own stub over HTTP:
@@ -369,10 +382,9 @@ Trigger ─┬─ Flaky Service (/flaky?fail=2) ── Recovered
          └─ Hung Service  (/hang)         ── Gave Up
 ```
 
-`Flaky Service` returns 503 twice for a given key and then 200, so it is a real non-2xx and a
-real n8n node error rather than a `throw` in a Code node. `Hung Service` never answers at all.
-Neither node sets `retryOnFail` or `onError`; each carries an `executionPolicy` instead
-(ADR 0009):
+`Flaky Service` returns 503 twice for a given key and then 200, so the failure is a real non-2xx
+and a real n8n node error rather than a `throw` in a Code node. `Hung Service` never answers.
+Neither node sets `retryOnFail` or `onError`; each carries an `executionPolicy` (ADR 0009):
 
 ```jsonc
 "Flaky Service": { "v": 1, "onFailure": [
@@ -386,8 +398,8 @@ The stub keys `/flaky` on `$execution.id`, so every run starts from a fresh fail
 
 ### Resilient Fan-Out — 7 nodes
 
-The one that puts both halves together: concurrency *and* resilience, declared in the workflow
-rather than arranged by the engine's configuration.
+Both halves together: concurrency and resilience, declared in the workflow rather than arranged
+by the engine's configuration.
 
 ```
 Trigger ─┬─ Inventory API (/slow?ms=3000) ─┐
@@ -397,8 +409,7 @@ Trigger ─┬─ Inventory API (/slow?ms=3000) ─┐
 ```
 
 Four independent branches, so the budget has something to spend. Two are healthy and slow, one
-fails twice before recovering, and one never answers at all. The two that need a policy declare
-one; the other two declare nothing:
+fails twice before recovering, one never answers. The two that need a policy declare one:
 
 ```jsonc
 "Pricing API":  { "v": 1, "onFailure": [
@@ -410,6 +421,10 @@ one; the other two declare nothing:
 
 Every node is an ordinary `n8n-nodes-base.httpRequest` against the testbed's own stub, and the
 Merge is n8n's own. Nothing here is a Petri net concept: the workflow reads as a workflow.
+
+<img alt="The Resilient Fan-Out running. Four branches start together, one retries after failing, one goes red at its deadline, and Merge still receives data so the run completes." src="media/resilient-fan-out.gif" width="900" />
+
+*Four branches at once. `Pricing API` retries, `Shipping API` is abandoned at its deadline, and `Merge` still runs.*
 
 ## What was measured
 
@@ -510,8 +525,8 @@ The legacy leg is the same document under the engine that ignores the policy.
 
 ### Reading the canvas: why the Error arc is grey
 
-Shipping API's Error arc is labelled **1 item** and drawn **grey**. Both are correct, and they
-answer different questions — worth knowing before anyone films it and worries.
+Shipping API's Error arc is labelled **1 item** and drawn **grey**. Both are correct; they answer
+different questions. Worth knowing before anyone films it and worries.
 
 The label comes from `runDataTotal` on the connection. The stroke comes from the *source node's*
 status, through four steps in n8n's own editor:
@@ -526,38 +541,45 @@ status, through four steps in n8n's own editor:
    (`useCanvasMapping.ts`).
 4. `CanvasEdge.vue` colours only `success` and `pinned`; everything else falls through to grey.
 
-So **grey means "the source node has issues", not "no data flowed"** — which is why *both* of
-Shipping API's arcs are grey, including the Success one. It is n8n's rendering, not the engine's:
-in the ordinary n8n case an error-output arc *is* green, because the node emitted per-item errors
-and its own status stayed `success`, so `hasIssues` is false and `success` wins. A whole-node
+So **grey means "the source node has issues", not "no data flowed"**, which is why *both* of
+Shipping API's arcs are grey, the Success one included. This is n8n's rendering rather than the
+engine's: in the ordinary n8n case an error-output arc is green, because the node emitted per-item
+errors and kept its own `success` status, so `hasIssues` is false and `success` wins. A whole-node
 failure is red, and a red node's arcs are grey.
 
 Making it green would mean stamping the node `executionStatus: 'success'` — untrue, and it would
 remove the red badge that is the point of the frame.
 
-### The video
-
-`scripts/testbed/record-demo.sh` records a run in the editor:
+### Recording a run
 
 ```bash
 scripts/testbed/record-demo.sh                       # Resilient Fan-Out at k = 4
 scripts/testbed/record-demo.sh --workflow="Agent · Two Tools" --budget=1
 ```
 
-Video: `.testbed/video/<workflow>-<engine>-k<budget>.webm`.
+Video: `.testbed/video/<workflow>-<engine>-k<budget>.webm`, continuous at 10 fps. The clips above
+are these recordings, converted to GIF.
 
-It does **not** use `agent-browser record`, for two measured reasons. That recorder opens a
-fresh browser context, and n8n binds its auth JWT to a browser id it keeps per context, so the
-recorded session lands back on the login page however faithfully cookies are copied. And its
-screencast is change-driven: it collapsed a five-second execution into a two-frame flipbook,
-which is the one thing the video exists to show. The script screenshots the viewport on a fixed
-interval instead, polling n8n's REST API for the execution's status rather than the DOM for a
-toast that auto-dismisses, and hands the frames to ffmpeg.
+Three things the script has to get right.
 
-One screenshot costs about 1.2 s of CLI round trip, so the result is a **time-lapse of real
-editor frames**, not a smooth screencast: a five-second run yields four or five frames of
-itself. That is enough for the shape — every branch dispatched at once, one of them ending red,
-the workflow finishing anyway — and every frame is the real editor.
+**It records with `agent-browser record`, which opens its own browser context.** That context
+carries none of this machine's cookies, so it lands on the sign-in page. The sign-in therefore
+happens inside the recording and the front of the file is trimmed afterwards — re-encoded rather
+than stream-copied, since a copy can only cut on a keyframe and at 10 fps that rounds the cut to
+somewhere unhelpful. An earlier version assembled PNG screenshots at 2 fps, believing the
+screencast was change-driven; it is not.
+
+**It frames the canvas** by clicking n8n's own Zoom to Fit control, after a fresh snapshot. Refs
+go stale across a navigation, and the keyboard shortcut only lands when focus is already on the
+canvas pane, which after a page load it is not. Without this the recording is whatever pan the
+editor restored, with the first node half under the sidebar.
+
+**It sends no keystrokes to the canvas.** n8n saves a workflow before a manual execute, so an
+editing keystroke from the recorder is written back into the fixture. One earlier attempt at the
+zoom added a sticky note that way.
+
+Completion comes from n8n's REST API rather than from the DOM, because the success toast
+auto-dismisses and `get text` does not reliably carry it.
 
 ## Queue mode: the engine in the worker
 
