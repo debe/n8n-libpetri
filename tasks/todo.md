@@ -170,16 +170,19 @@
       both `getWorkflowSchedulerFactory` and `planEngineRequest` are in the built file
 - [x] **Two seeded workflows, both real n8n exports** (the repo previously had none — every
       fixture is a `WorkflowDescription` of structural stubs). *Concurrency Showcase*: 13 nodes,
-      an If, a four-way fan of 1.2 s Code legs and three Merge joins, acyclic with one producer
+      an If, a four-way fan of 2.5 s Code legs and three Merge joins, acyclic with one producer
       per input index so k-safety leaves the budget alone. *Agent · Two Tools*: AgentV3 with a
       Calculator and a Code tool over `ai_tool`, driven by `stub-llm.mjs`, a local
       OpenAI-compatible model with a fixed script — one `tool_calls` message naming both tools,
       then an answer, so the round is a genuine two-outstanding fan-out with no key or network
-- [x] **Measured 2026-09-10, best of two, n8n 2.37.0 @ `441970b2`, Node 26.8.1**: Concurrency
-      Showcase at legacy 4944 ms, libpetri k = 1 4944 ms, **k = 4 1284 ms**; Agent · Two Tools at
-      131 / 129 / 130 ms. `runData` **identical** on every leg, all 14 (resp. 2) realised
-      dependency edges respected, and the k = 4 order reordered exactly as expected — n8n runs
-      `Merge AB` before it starts `Fetch C`, the net starts all four legs first
+- [x] **Measured 2026-09-11, best of two, n8n 2.37.0 @ `441970b2`, Node 26.8.1**: Concurrency
+      Showcase at legacy 10,166 ms, libpetri k = 1 10,172 ms, **k = 4 2672 ms**; Agent · Two Tools
+      at 129 / 129 / 130 ms; Agent · Nested Agents at 939 / 922 / **585 ms**. `runData`
+      **identical** on every leg, all 14 (resp. 2) realised dependency edges respected, and the
+      k = 4 order reordered exactly as expected — n8n runs `Merge AB` before it starts `Fetch C`,
+      the net starts all four legs first. The legs sleep 2.5 s rather than the 1.2 s first
+      measured on 2026-09-10 (4944 / 4944 / 1284 ms), so a recording of the run shows the four
+      dispatched together for longer than a frame
 - [x] `diff-engines.sh` boots one server per engine (the preload reads the engine once, at start)
       and `run.mjs` drives `POST /rest/workflows/:id/run`, the editor's own manual-execution path.
       `tests/testbed/compare-run.ts` reuses `firstDifference`, `dependencyEdges`, `activationKey`

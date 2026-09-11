@@ -10,6 +10,12 @@
 #   scripts/testbed/record-demo.sh --budget=1 --attach
 #   scripts/testbed/record-demo.sh --fps=4                  # play the time-lapse back faster
 #   scripts/testbed/record-demo.sh --viewport=1920x1200     # wider frame for a big canvas
+#   scripts/testbed/record-demo.sh --llm-latency=1300       # a stub that answers at a model's pace
+#
+# `--llm-latency` is what makes an agent clip legible. The stub answers instantly, so an agent
+# round — model, tool, model again — lands inside a single frame and the canvas turns green all
+# at once. At 1300 ms the beats separate and the recording shows the round unfolding. It changes
+# no outcome, and it is off everywhere a wall clock is reported.
 #
 # One screenshot costs about 1.2 s of CLI round trip, so this is a *time-lapse* of real editor
 # frames rather than a smooth screencast: a five-second run yields four or five frames of it.
@@ -24,6 +30,7 @@ HERE="$ROOT/scripts/testbed"
 TESTBED="$ROOT/.testbed"
 VIDEO="$TESTBED/video"
 ENGINE=libpetri; BUDGET=4; PORT=5678; LLM_PORT=5699; ATTACH=0; FPS=2; WORKFLOW="Resilient Fan-Out"
+LLM_LATENCY=0
 VIEWPORT=1600x1000
 
 for arg in "$@"; do
@@ -32,6 +39,7 @@ for arg in "$@"; do
     --budget=*)   BUDGET="${arg#--budget=}" ;;
     --port=*)     PORT="${arg#--port=}" ;;
     --llm-port=*) LLM_PORT="${arg#--llm-port=}" ;;
+    --llm-latency=*) LLM_LATENCY="${arg#--llm-latency=}" ;;
     --workflow=*) WORKFLOW="${arg#--workflow=}" ;;
     --fps=*)      FPS="${arg#--fps=}" ;;
     --viewport=*) VIEWPORT="${arg#--viewport=}" ;;
@@ -48,8 +56,9 @@ command -v agent-browser >/dev/null || die "agent-browser is not installed"
 
 if [ $ATTACH -eq 0 ]; then
   "$HERE/n8n-testbed.sh" --stop >/dev/null 2>&1 || true
-  log "booting n8n (engine=$ENGINE, budget=$BUDGET)"
-  "$HERE/n8n-testbed.sh" --daemon --engine="$ENGINE" --budget="$BUDGET" --port="$PORT" >/dev/null \
+  log "booting n8n (engine=$ENGINE, budget=$BUDGET$([ "$LLM_LATENCY" -gt 0 ] 2>/dev/null && echo ", llm latency ${LLM_LATENCY} ms"))"
+  "$HERE/n8n-testbed.sh" --daemon --engine="$ENGINE" --budget="$BUDGET" --port="$PORT" \
+    --llm-port="$LLM_PORT" --llm-latency="$LLM_LATENCY" >/dev/null \
     || die "n8n did not boot; see $TESTBED/n8n.log"
   trap '"$HERE/n8n-testbed.sh" --stop >/dev/null 2>&1 || true; agent-browser close >/dev/null 2>&1 || true' EXIT
 fi
@@ -205,7 +214,9 @@ done
 finished=$(node -e 'console.log(Date.now())')
 log "'$WORKFLOW' finished in about $(( finished - started )) ms (browser round trip included)"
 
-agent-browser wait 2500 >/dev/null   # hold on the result, so the video ends on the outcome
+agent-browser wait 1500 >/dev/null   # hold on the result, so the video ends on the outcome.
+                                     # Short, because make-gifs.sh holds the last frame again
+                                     # before the loop restarts — the two holds add up.
 agent-browser record stop >/dev/null 2>&1 || die "could not stop recording"
 
 # Restore the fixture. n8n saves a workflow before every manual execute, so whatever the editor

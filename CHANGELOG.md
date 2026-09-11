@@ -5,7 +5,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Every demo clip now spends visible time where work happens.** An instant action reaches the
+  canvas as a single frame, so a recording of it showed a workflow that turned green all at once
+  rather than a run unfolding. Three fixtures moved: the Concurrency Showcase's four legs sleep
+  2.5 s instead of 1.2 s, the nested workflow's two calculators are Code tools that sleep 400 ms
+  like the escalation ladder's, and `record-demo.sh` takes `--llm-latency` so an agent clip is
+  recorded with the stub answering at a real model's pace. Latency stays **zero by default**,
+  because every wall clock these documents report is measured with the stub instant and a pause
+  would put itself into those numbers. Re-measured on 2026-09-11: Concurrency Showcase at legacy
+  10,166 ms, k = 1 10,172 ms, **k = 4 2672 ms**; Agent · Nested Agents at 939 / 922 / **585 ms**,
+  which the sleeping tools turn from three numbers within 5% of each other into a leg that says
+  something — at k = 4 the outer tool runs while the inner agent is still working. Run data
+  identical on every leg, every realised dependency edge respected.
+
+- The recording holds its result for 1.5 s and the GIF holds the last frame for 1.5 s more,
+  rather than 2.5 s and up to 3 s. With every run now several seconds long, the old holds were
+  most of the clip.
+
 ### Fixed
+- **`diff-engines.sh` could no longer finish a run.** It executes every seeded workflow and dies
+  on the first that does not succeed, and the seed has since grown workflows that exist to show a
+  *difference*: the tool-deadline agent is canceled at n8n's execution timeout, the waiting child
+  suspends for seventy seconds. Comparing those leg against leg sets two intended outcomes against
+  each other and reports the feature as a failure. It now takes `--workflows`, defaulting to the
+  three both engines finish the same way, and a name that was not seeded is an error rather than a
+  silent skip.
+
 - **The budget semiflow was reported present or missing depending on the state-class cap.** A
   P-invariant is a statement about the incidence matrix, so it cannot depend on how many state
   classes the enumeration was allowed to keep — but it did. `runBudget` asks the solver-free

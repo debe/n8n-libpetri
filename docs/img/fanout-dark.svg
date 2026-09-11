@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 507" width="1240" height="507"
-     role="img" aria-label="A timeline of the same 13-node n8n workflow run twice. Under n8n’s stack loop the four 1.2 s Code nodes run one after another and the run takes 4,944 ms. On the Petri net at k = 4 the same four run side by side and the run takes 1,284 ms, 3.85 times faster, with identical run data.">
+     role="img" aria-label="A timeline of the same 13-node n8n workflow run twice. Under n8n’s stack loop the four 2.5 s Code nodes run one after another and the run takes 10,166 ms. On the Petri net at k = 4 the same four run side by side and the run takes 2,672 ms, 3.80 times faster, with identical run data.">
   <title>One workflow, one number changed</title>
   <!-- PALETTE - the only block that differs between the light and dark variants. -->
   <style>
@@ -16,45 +16,45 @@
     .pill { font-size:14.5px; font-weight:700; } .lead { font-size:13px; } .note { font-size:12.5px; }
     /* Every animated element's base style is its FINAL state, so a renderer that does not
        animate shows the finished chart. Only the playhead hides when nothing moves. */
-    .an { animation-duration:6544ms; animation-timing-function:linear; animation-iteration-count:infinite; }
+    .an { animation-duration:11766ms; animation-timing-function:linear; animation-iteration-count:infinite; }
     rect.work.an { transform-box:fill-box; transform-origin:left center; }
-    .playhead { opacity:0; animation:sweep 6544ms linear infinite, showhead 6544ms linear infinite; }
-    @keyframes sweep { 0%{transform:translateX(0)}75.55%,100%{transform:translateX(962.4px)} }
-    @keyframes showhead { 0%,75.14999999999999%{opacity:1}75.55%,100%{opacity:0} }
-    @keyframes k1{0%,0.031%{transform:scaleX(0)}18.49%,100%{transform:scaleX(1)}}
-    @keyframes k1l{0%,12.057%{opacity:0}13.89%,100%{opacity:1}}
-    @keyframes k2{0%,18.49%{transform:scaleX(0)}36.919%,100%{transform:scaleX(1)}}
-    @keyframes k2l{0%,30.516%{opacity:0}32.35%,100%{opacity:1}}
-    @keyframes k3{0%,36.935%{transform:scaleX(0)}55.333%,100%{transform:scaleX(1)}}
-    @keyframes k3l{0%,48.961%{opacity:0}50.794%,100%{opacity:1}}
-    @keyframes k4{0%,55.333%{transform:scaleX(0)}73.732%,100%{transform:scaleX(1)}}
-    @keyframes k4l{0%,67.359%{opacity:0}69.193%,100%{opacity:1}}
-    @keyframes k5{0%,0.0%{opacity:0}0.458%,100%{opacity:1}}
-    @keyframes k6{0%,0.0%{opacity:0}0.458%,100%{opacity:1}}
-    @keyframes k7{0%,0.0%{opacity:0}0.458%,100%{opacity:1}}
-    @keyframes k8{0%,0.031%{opacity:0}0.489%,100%{opacity:1}}
-    @keyframes k9{0%,36.919%{opacity:0}37.378%,100%{opacity:1}}
-    @keyframes k10{0%,73.732%{opacity:0}74.19%,100%{opacity:1}}
-    @keyframes k11{0%,73.747%{opacity:0}74.205%,100%{opacity:1}}
-    @keyframes k12{0%,73.762%{opacity:0}74.221%,100%{opacity:1}}
-    @keyframes k13{0%,75.55%{opacity:0}77.384%,100%{opacity:1}}
-    @keyframes k14{0%,0.031%{transform:scaleX(0)}18.444%,100%{transform:scaleX(1)}}
-    @keyframes k14l{0%,12.057%{opacity:0}13.89%,100%{opacity:1}}
-    @keyframes k15{0%,0.031%{transform:scaleX(0)}18.444%,100%{transform:scaleX(1)}}
-    @keyframes k15l{0%,12.057%{opacity:0}13.89%,100%{opacity:1}}
-    @keyframes k16{0%,0.031%{transform:scaleX(0)}18.46%,100%{transform:scaleX(1)}}
-    @keyframes k16l{0%,12.057%{opacity:0}13.89%,100%{opacity:1}}
-    @keyframes k17{0%,0.031%{transform:scaleX(0)}18.475%,100%{transform:scaleX(1)}}
-    @keyframes k17l{0%,12.057%{opacity:0}13.89%,100%{opacity:1}}
-    @keyframes k18{0%,0.0%{opacity:0}0.458%,100%{opacity:1}}
-    @keyframes k19{0%,0.015%{opacity:0}0.474%,100%{opacity:1}}
-    @keyframes k20{0%,0.015%{opacity:0}0.474%,100%{opacity:1}}
-    @keyframes k21{0%,0.031%{opacity:0}0.489%,100%{opacity:1}}
-    @keyframes k22{0%,18.46%{opacity:0}18.918%,100%{opacity:1}}
-    @keyframes k23{0%,18.475%{opacity:0}18.933%,100%{opacity:1}}
-    @keyframes k24{0%,18.49%{opacity:0}18.949%,100%{opacity:1}}
-    @keyframes k25{0%,18.506%{opacity:0}18.964%,100%{opacity:1}}
-    @keyframes k26{0%,19.621%{opacity:0}21.455%,100%{opacity:1}}
+    .playhead { opacity:0; animation:sweep 11766ms linear infinite, showhead 11766ms linear infinite; }
+    @keyframes sweep { 0%{transform:translateX(0)}86.401%,100%{transform:translateX(989.5px)} }
+    @keyframes showhead { 0%,86.00099999999999%{opacity:1}86.401%,100%{opacity:0} }
+    @keyframes k1{0%,0.025%{transform:scaleX(0)}21.299%,100%{transform:scaleX(1)}}
+    @keyframes k1l{0%,13.403%{opacity:0}14.423%,100%{opacity:1}}
+    @keyframes k2{0%,21.299%{transform:scaleX(0)}42.589%,100%{transform:scaleX(1)}}
+    @keyframes k2l{0%,34.676%{opacity:0}35.696%,100%{opacity:1}}
+    @keyframes k3{0%,42.606%{transform:scaleX(0)}63.904%,100%{transform:scaleX(1)}}
+    @keyframes k3l{0%,55.983%{opacity:0}57.003%,100%{opacity:1}}
+    @keyframes k4{0%,63.913%{transform:scaleX(0)}85.22%,100%{transform:scaleX(1)}}
+    @keyframes k4l{0%,77.29%{opacity:0}78.31%,100%{opacity:1}}
+    @keyframes k5{0%,0.0%{opacity:0}0.255%,100%{opacity:1}}
+    @keyframes k6{0%,0.0%{opacity:0}0.255%,100%{opacity:1}}
+    @keyframes k7{0%,0.008%{opacity:0}0.263%,100%{opacity:1}}
+    @keyframes k8{0%,0.025%{opacity:0}0.28%,100%{opacity:1}}
+    @keyframes k9{0%,42.589%{opacity:0}42.844%,100%{opacity:1}}
+    @keyframes k10{0%,85.22%{opacity:0}85.475%,100%{opacity:1}}
+    @keyframes k11{0%,85.237%{opacity:0}85.492%,100%{opacity:1}}
+    @keyframes k12{0%,85.254%{opacity:0}85.509%,100%{opacity:1}}
+    @keyframes k13{0%,86.401%{opacity:0}87.421%,100%{opacity:1}}
+    @keyframes k14{0%,0.017%{transform:scaleX(0)}21.324%,100%{transform:scaleX(1)}}
+    @keyframes k14l{0%,13.394%{opacity:0}14.414%,100%{opacity:1}}
+    @keyframes k15{0%,0.017%{transform:scaleX(0)}21.324%,100%{transform:scaleX(1)}}
+    @keyframes k15l{0%,13.394%{opacity:0}14.414%,100%{opacity:1}}
+    @keyframes k16{0%,0.017%{transform:scaleX(0)}21.324%,100%{transform:scaleX(1)}}
+    @keyframes k16l{0%,13.394%{opacity:0}14.414%,100%{opacity:1}}
+    @keyframes k17{0%,0.017%{transform:scaleX(0)}21.324%,100%{transform:scaleX(1)}}
+    @keyframes k17l{0%,13.394%{opacity:0}14.414%,100%{opacity:1}}
+    @keyframes k18{0%,0.0%{opacity:0}0.255%,100%{opacity:1}}
+    @keyframes k19{0%,0.008%{opacity:0}0.263%,100%{opacity:1}}
+    @keyframes k20{0%,0.008%{opacity:0}0.263%,100%{opacity:1}}
+    @keyframes k21{0%,0.017%{opacity:0}0.272%,100%{opacity:1}}
+    @keyframes k22{0%,21.333%{opacity:0}21.588%,100%{opacity:1}}
+    @keyframes k23{0%,21.333%{opacity:0}21.588%,100%{opacity:1}}
+    @keyframes k24{0%,21.35%{opacity:0}21.605%,100%{opacity:1}}
+    @keyframes k25{0%,21.358%{opacity:0}21.613%,100%{opacity:1}}
+    @keyframes k26{0%,22.71%{opacity:0}23.729%,100%{opacity:1}}
     .b1{animation-name:k1} .b1l{animation-name:k1l}
     .b2{animation-name:k2} .b2l{animation-name:k2l}
     .b3{animation-name:k3} .b3l{animation-name:k3l}
@@ -85,68 +85,80 @@
   </style>
   <rect class="bg" width="1240" height="507"/>
   <text class="ink h1" x="36" y="50">One workflow, one number changed</text>
-  <text class="muted sub" x="36" y="76">12 activations either way, identical run data, 3.85× the wall clock. Real time, 1:1 — n8n’s own per-task clock, from a live server.</text>
+  <text class="muted sub" x="36" y="76">12 activations either way, identical run data, 3.80× the wall clock. Real time, 1:1 — n8n’s own per-task clock, from a live server.</text>
     <line class="grid" x1="36.0" y1="118" x2="36.0" y2="362" stroke-width="1"/>
   <text class="faint tickl" x="36.0" y="110" text-anchor="middle">0</text>
+  <line class="grid" x1="133.3" y1="118" x2="133.3" y2="362" stroke-width="1"/>
+  <text class="faint tickl" x="133.3" y="110" text-anchor="middle">1 s</text>
   <line class="grid" x1="230.7" y1="118" x2="230.7" y2="362" stroke-width="1"/>
-  <text class="faint tickl" x="230.7" y="110" text-anchor="middle">1 s</text>
+  <text class="faint tickl" x="230.7" y="110" text-anchor="middle">2 s</text>
+  <line class="grid" x1="328.0" y1="118" x2="328.0" y2="362" stroke-width="1"/>
+  <text class="faint tickl" x="328.0" y="110" text-anchor="middle">3 s</text>
   <line class="grid" x1="425.3" y1="118" x2="425.3" y2="362" stroke-width="1"/>
-  <text class="faint tickl" x="425.3" y="110" text-anchor="middle">2 s</text>
+  <text class="faint tickl" x="425.3" y="110" text-anchor="middle">4 s</text>
+  <line class="grid" x1="522.7" y1="118" x2="522.7" y2="362" stroke-width="1"/>
+  <text class="faint tickl" x="522.7" y="110" text-anchor="middle">5 s</text>
   <line class="grid" x1="620.0" y1="118" x2="620.0" y2="362" stroke-width="1"/>
-  <text class="faint tickl" x="620.0" y="110" text-anchor="middle">3 s</text>
+  <text class="faint tickl" x="620.0" y="110" text-anchor="middle">6 s</text>
+  <line class="grid" x1="717.3" y1="118" x2="717.3" y2="362" stroke-width="1"/>
+  <text class="faint tickl" x="717.3" y="110" text-anchor="middle">7 s</text>
   <line class="grid" x1="814.7" y1="118" x2="814.7" y2="362" stroke-width="1"/>
-  <text class="faint tickl" x="814.7" y="110" text-anchor="middle">4 s</text>
+  <text class="faint tickl" x="814.7" y="110" text-anchor="middle">8 s</text>
+  <line class="grid" x1="912.0" y1="118" x2="912.0" y2="362" stroke-width="1"/>
+  <text class="faint tickl" x="912.0" y="110" text-anchor="middle">9 s</text>
   <line class="grid" x1="1009.3" y1="118" x2="1009.3" y2="362" stroke-width="1"/>
-  <text class="faint tickl" x="1009.3" y="110" text-anchor="middle">5 s</text>
+  <text class="faint tickl" x="1009.3" y="110" text-anchor="middle">10 s</text>
+  <line class="grid" x1="1106.7" y1="118" x2="1106.7" y2="362" stroke-width="1"/>
+  <text class="faint tickl" x="1106.7" y="110" text-anchor="middle">11 s</text>
   <line class="grid" x1="1204.0" y1="118" x2="1204.0" y2="362" stroke-width="1"/>
-  <text class="faint tickl" x="1204.0" y="110" text-anchor="middle">6 s</text>
+  <text class="faint tickl" x="1204.0" y="110" text-anchor="middle">12 s</text>
   <rect class="lane" x="36" y="146" width="1168" height="38" rx="6"/>
   <text class="ink h2" x="36" y="136">n8n’s stack loop<tspan class="muted" dx="8" font-weight="400">one node at a time</tspan></text>
-  <rect class="work an b1" x="36.4" y="152" width="235.2" height="26" rx="4"/>
-  <text class="onbar bar an b1l" x="46.4" y="170">Fetch A · 1,208 ms</text>
-  <rect class="work an b2" x="271.5" y="152" width="234.8" height="26" rx="4"/>
-  <text class="onbar bar an b2l" x="281.5" y="170">Fetch B · 1,206 ms</text>
-  <rect class="work an b3" x="506.5" y="152" width="234.4" height="26" rx="4"/>
-  <text class="onbar bar an b3l" x="516.5" y="170">Fetch C · 1,204 ms</text>
-  <rect class="work an b4" x="740.9" y="152" width="234.4" height="26" rx="4"/>
-  <text class="onbar bar an b4l" x="750.9" y="170">Fetch D · 1,204 ms</text>
+  <rect class="work an b1" x="36.3" y="152" width="243.6" height="26" rx="4"/>
+  <text class="onbar bar an b1l" x="46.3" y="170">Fetch A · 2,503 ms</text>
+  <rect class="work an b2" x="279.9" y="152" width="243.8" height="26" rx="4"/>
+  <text class="onbar bar an b2l" x="289.9" y="170">Fetch B · 2,505 ms</text>
+  <rect class="work an b3" x="523.9" y="152" width="243.9" height="26" rx="4"/>
+  <text class="onbar bar an b3l" x="533.9" y="170">Fetch C · 2,506 ms</text>
+  <rect class="work an b4" x="767.9" y="152" width="244.0" height="26" rx="4"/>
+  <text class="onbar bar an b4l" x="777.9" y="170">Fetch D · 2,507 ms</text>
   <rect class="tick an b5" x="34.5" y="147" width="3" height="36" rx="1.5"/>
   <rect class="tick an b6" x="34.5" y="147" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b7" x="34.5" y="147" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b8" x="34.9" y="147" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b9" x="504.8" y="147" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b10" x="973.8" y="147" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b11" x="974.0" y="147" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b12" x="974.2" y="147" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b7" x="34.6" y="147" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b8" x="34.8" y="147" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b9" x="522.2" y="147" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b10" x="1010.5" y="147" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b11" x="1010.7" y="147" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b12" x="1010.9" y="147" width="3" height="36" rx="1.5"/>
   <g class="an b13">
-    <line class="fin0" x1="998.4" y1="118" x2="998.4" y2="362" stroke-width="1.5" stroke-dasharray="4 4"/>
-    <rect class="pill0" x="1007.4" y="151" width="86" height="28" rx="14" stroke-width="1.25"/>
-    <text class="pill0t pill" x="1050.6" y="170" text-anchor="middle">4,944 ms</text>
-    <text class="muted lead" x="1007.4" y="139">3.85× the net’s wall clock</text>
+    <line class="fin0" x1="1025.5" y1="118" x2="1025.5" y2="362" stroke-width="1.5" stroke-dasharray="4 4"/>
+    <rect class="pill0" x="1034.5" y="151" width="95" height="28" rx="14" stroke-width="1.25"/>
+    <text class="pill0t pill" x="1081.8" y="170" text-anchor="middle">10,166 ms</text>
+    <text class="muted lead" x="1034.5" y="139">3.80× the net’s wall clock</text>
   </g>
   <rect class="lane" x="36" y="224" width="1168" height="134" rx="6"/>
   <text class="ink h2" x="36" y="214">the same workflow on the net<tspan class="muted" dx="8" font-weight="400">k = 4</tspan></text>
-  <rect class="work an b14" x="36.4" y="230" width="234.6" height="26" rx="4"/>
-  <text class="onbar bar an b14l" x="46.4" y="248">Fetch A · 1,205 ms</text>
-  <rect class="work an b15" x="36.4" y="262" width="234.6" height="26" rx="4"/>
-  <text class="onbar bar an b15l" x="46.4" y="280">Fetch B · 1,205 ms</text>
-  <rect class="work an b16" x="36.4" y="294" width="234.8" height="26" rx="4"/>
-  <text class="onbar bar an b16l" x="46.4" y="312">Fetch C · 1,206 ms</text>
-  <rect class="work an b17" x="36.4" y="326" width="235.0" height="26" rx="4"/>
-  <text class="onbar bar an b17l" x="46.4" y="344">Fetch D · 1,207 ms</text>
+  <rect class="work an b14" x="36.2" y="230" width="244.0" height="26" rx="4"/>
+  <text class="onbar bar an b14l" x="46.2" y="248">Fetch A · 2,507 ms</text>
+  <rect class="work an b15" x="36.2" y="262" width="244.0" height="26" rx="4"/>
+  <text class="onbar bar an b15l" x="46.2" y="280">Fetch B · 2,507 ms</text>
+  <rect class="work an b16" x="36.2" y="294" width="244.0" height="26" rx="4"/>
+  <text class="onbar bar an b16l" x="46.2" y="312">Fetch C · 2,507 ms</text>
+  <rect class="work an b17" x="36.2" y="326" width="244.0" height="26" rx="4"/>
+  <text class="onbar bar an b17l" x="46.2" y="344">Fetch D · 2,507 ms</text>
   <rect class="tick an b18" x="34.5" y="225" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b19" x="34.7" y="225" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b20" x="34.7" y="225" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b21" x="34.9" y="225" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b22" x="269.7" y="225" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b23" x="269.9" y="225" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b24" x="270.0" y="225" width="3" height="36" rx="1.5"/>
-  <rect class="tick an b25" x="270.2" y="225" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b19" x="34.6" y="225" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b20" x="34.6" y="225" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b21" x="34.7" y="225" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b22" x="278.8" y="225" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b23" x="278.8" y="257" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b24" x="279.0" y="225" width="3" height="36" rx="1.5"/>
+  <rect class="tick an b25" x="279.1" y="225" width="3" height="36" rx="1.5"/>
   <g class="an b26">
-    <line class="fin1" x1="286.0" y1="118" x2="286.0" y2="362" stroke-width="1.5" stroke-dasharray="4 4"/>
-    <rect class="pill1" x="295.0" y="277" width="86" height="28" rx="14" stroke-width="1.25"/>
-    <text class="pill1t pill" x="338.2" y="296" text-anchor="middle">1,284 ms</text>
-    <text class="muted lead" x="295.0" y="326">finished — n8n is still on Fetch B</text>
+    <line class="fin1" x1="296.1" y1="118" x2="296.1" y2="362" stroke-width="1.5" stroke-dasharray="4 4"/>
+    <rect class="pill1" x="305.1" y="277" width="86" height="28" rx="14" stroke-width="1.25"/>
+    <text class="pill1t pill" x="348.3" y="296" text-anchor="middle">2,672 ms</text>
+    <text class="muted lead" x="305.1" y="326">finished — n8n is still on Fetch B</text>
   </g>
   <g class="playhead">
     <line class="head" x1="36" y1="112" x2="36" y2="368" stroke-width="1.5"/>
@@ -154,9 +166,9 @@
   </g>
   <line class="rule" x1="36" y1="424" x2="1204" y2="424" stroke-width="1.25"/>
   <rect class="work" x="36" y="437" width="26" height="12" rx="3"/>
-  <text class="muted note" x="70" y="447">a node running — the 4 Code legs sleep 1.2 s each</text>
+  <text class="muted note" x="70" y="447">a node running — the 4 Code legs sleep 2.5 s each</text>
   <rect class="tick" x="506" y="434" width="3" height="18" rx="1.5"/>
-  <text class="muted note" x="520" y="447">the other 8 nodes, 9 ms between them</text>
+  <text class="muted note" x="520" y="447">the other 8 nodes, 11 ms between them</text>
   <text class="faint note" x="36" y="469">Concurrency Showcase · 13 nodes seeded into a real n8n editor by scripts/testbed/n8n-testbed.sh · measured by scripts/testbed/diff-engines.sh --repeat=2 · both legs pass the same data check</text>
   <text class="faint note" x="36" y="489">The dashed line is the wall clock, request to response, so the gap after the last bar is the REST round trip both legs pay. Wide bars grow over the milliseconds they ran; ticks appear when they fire.</text>
 </svg>

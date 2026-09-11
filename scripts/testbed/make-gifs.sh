@@ -19,15 +19,15 @@ WIDTH=900
 FPS=10
 
 # clip:hold — `hold` is the seconds the final frame is held before the GIF loops. A GIF restarts
-# with no pause, so a short run reaches its result and immediately throws it away. The escalation
-# ladder finishes in about 700 ms and needs the longest hold for that reason. Cloned frames are
-# identical, so the hold costs almost nothing in file size.
+# with no pause, so a run would reach its result and immediately throw it away. The recording
+# already ends on 1.5 s of the finished canvas, so this adds a second beat rather than the only
+# one. Cloned frames are identical, so the hold costs almost nothing in file size.
 CLIPS="
-concurrency-showcase:2
-resilient-fan-out:2
-agent-tool-deadline:2
-agent-nested-agents:3
-agent-escalation-ladder:3
+concurrency-showcase:1.5
+resilient-fan-out:1.5
+agent-tool-deadline:1.5
+agent-nested-agents:1.5
+agent-escalation-ladder:1.5
 "
 
 log() { printf '[gifs] %s\n' "$*"; }

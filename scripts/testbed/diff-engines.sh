@@ -10,6 +10,14 @@
 #   scripts/testbed/diff-engines.sh                       # legacy, libpetri k=1, libpetri k=4
 #   scripts/testbed/diff-engines.sh --budgets=1,2,4,8
 #   scripts/testbed/diff-engines.sh --repeat=3            # three runs per leg, best wall clock
+#   scripts/testbed/diff-engines.sh --workflows="Concurrency Showcase"
+#
+# Only the workflows both engines finish the same way are comparable, and that is what
+# `--workflows` defaults to. Most of the rest of the seed exists to show a *difference* — the
+# tool-deadline agent is canceled at n8n's execution timeout, the waiting child suspends for
+# seventy seconds, the failure-policy workflow declares a chain n8n's own fields do not carry —
+# so a leg-against-leg diff of those compares two intended outcomes and reports the feature as a
+# failure. Name one explicitly to run it anyway.
 #
 # The engine is fixed when the process starts (the preload reads N8N_EXECUTION_ENGINE once), so
 # each leg is its own server: boot, seed, run every workflow, stop.
@@ -23,6 +31,7 @@ HERE="$ROOT/scripts/testbed"
 TESTBED="$ROOT/.testbed"
 RUNS="$TESTBED/runs"
 PORT=5678; LLM_PORT=5699; BUDGETS="1,4"; REPEAT=1
+WORKFLOWS="Concurrency Showcase,Agent · Two Tools,Agent · Nested Agents"
 
 for arg in "$@"; do
   case "$arg" in
@@ -30,6 +39,7 @@ for arg in "$@"; do
     --port=*)    PORT="${arg#--port=}" ;;
     --llm-port=*) LLM_PORT="${arg#--llm-port=}" ;;
     --repeat=*)  REPEAT="${arg#--repeat=}" ;;
+    --workflows=*) WORKFLOWS="${arg#--workflows=}" ;;
     -h|--help)   sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (see --help)" >&2; exit 2 ;;
   esac
@@ -53,10 +63,19 @@ leg() {
     grep -q 'scheduler registered' "$TESTBED/n8n.log" || die "leg $label: no scheduler registered"
   fi
 
+  # The seeded names, filtered to the ones asked for — and a name that was not seeded is an
+  # error rather than a silent skip, because the alternative is a table with a row missing.
   local names; names=$(node -e '
     const ids = require(process.argv[1]);
-    process.stdout.write(ids.workflows.map((w) => w.name).join("\n"));
-  ' "$TESTBED/ids.json")
+    const seeded = new Set(ids.workflows.map((w) => w.name));
+    const wanted = process.argv[2].split(",").map((s) => s.trim()).filter(Boolean);
+    const missing = wanted.filter((name) => !seeded.has(name));
+    if (missing.length) {
+      console.error(`not seeded: ${missing.join(", ")}`);
+      process.exit(1);
+    }
+    process.stdout.write(wanted.join("\n"));
+  ' "$TESTBED/ids.json" "$WORKFLOWS") || die "leg $label: see above"
 
   local name slug best out attempt
   while IFS= read -r name; do

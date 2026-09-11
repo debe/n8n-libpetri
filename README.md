@@ -338,13 +338,13 @@ preload, and seeds workflows so there is something to press.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/fanout-dark.svg" />
   <img alt="A timeline of the same thirteen-node n8n workflow run twice in a live server. Under
-  n8n's stack loop the four 1.2 s Code nodes run one after another and the run takes 4,944 ms. On
-  the Petri net at k = 4 the same four run side by side and the run takes 1,284 ms, with identical
+  n8n's stack loop the four 2.5 s Code nodes run one after another and the run takes 10,166 ms. On
+  the Petri net at k = 4 the same four run side by side and the run takes 2,672 ms, with identical
   run data." src="docs/img/fanout-light.svg" />
 </picture>
 
 *One workflow, run twice in that server through the editor's own manual-run endpoint. Four Code
-nodes sleep 1.2 s each on independent branches, and `Route` sends the other branch to `Skipped`,
+nodes sleep 2.5 s each on independent branches, and `Route` sends the other branch to `Skipped`,
 so twelve of the thirteen nodes activate. n8n's loop takes one stack entry at a time. The net runs
 whatever the marking says may run, which at k = 4 is all four legs. The bars are n8n's own
 per-task clock, at 1:1.*
@@ -362,16 +362,21 @@ the same input, and every realised dependency edge still holds.
 
 | Workflow | Leg | Wall clock | Data vs n8n | Happens-before | Order |
 |---|---|---|---|---|---|
-| Concurrency Showcase, 13 nodes | n8n's loop | 4,944 ms | reference | 14 edges ok | reference |
-| | net, k = 1 | 4,944 ms | identical | 14 edges ok | same |
-| | net, k = 4 | **1,284 ms** | identical | 14 edges ok | reordered |
-| Agent · Two Tools, 6 nodes | n8n's loop | 131 ms | reference | 2 edges ok | reference |
+| Concurrency Showcase, 13 nodes | n8n's loop | 10,166 ms | reference | 14 edges ok | reference |
+| | net, k = 1 | 10,172 ms | identical | 14 edges ok | same |
+| | net, k = 4 | **2,672 ms** | identical | 14 edges ok | reordered |
+| Agent · Two Tools, 6 nodes | n8n's loop | 129 ms | reference | 2 edges ok | reference |
 | | net, k = 1 | 129 ms | identical | 2 edges ok | same |
 | | net, k = 4 | 130 ms | identical | 2 edges ok | same |
+| Agent · Nested Agents, 8 nodes | n8n's loop | 939 ms | reference | 2 edges ok | reference |
+| | net, k = 1 | 922 ms | identical | 2 edges ok | reordered |
+| | net, k = 4 | **585 ms** | identical | 2 edges ok | reordered |
 
 The second workflow is an AI Agent with two tools on `ai_tool` connections, driven by a local stub
 model, so the dispatch round of [ADR 0008](docs/adr/0008-agent-tool-dispatch.md) is exercised by
-n8n's own agent node rather than by a fixture.
+n8n's own agent node rather than by a fixture. The third puts an agent inside an agent: its two
+tools sleep 400 ms each, one of them behind a second agent, and at k = 4 the outer tool runs while
+the inner agent is still working.
 
 ### Three runs, recorded
 

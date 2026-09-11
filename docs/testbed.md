@@ -89,7 +89,7 @@ reporting on the net.
 ```
 Manual Trigger → Seed → Route (If)
   false → Skipped
-  true  → Fan → Fetch A | Fetch B | Fetch C | Fetch D     (Code, each sleeps 1.2 s)
+  true  → Fan → Fetch A | Fetch B | Fetch C | Fetch D     (Code, each sleeps 2.5 s)
 Fetch A, Fetch B → Merge AB        Fetch C, Fetch D → Merge CD
 Merge AB, Merge CD → Merge All → Summarise
 ```
@@ -263,27 +263,28 @@ by hand rather than by a recorded count.
 
 | leg | status | wall clock | data vs reference |
 | --- | --- | --- | --- |
-| legacy (reference) | success | 594 ms | — |
-| libpetri k=1 | success | 587 ms | **identical** |
-| libpetri k=4 | success | 567 ms | **identical** |
+| legacy (reference) | success | 939 ms | — |
+| libpetri k=1 | success | 922 ms | **identical** |
+| libpetri k=4 | success | **585 ms** | **identical** |
 
-**This leg is parity, and the wall clocks are not a result** — the workflow is stub-LLM bound,
-not scheduler bound, and three numbers within 5% of each other say nothing about either engine.
-What it establishes is that depth-2 delegation runs in the process n8n ships, under both engines,
-with every payload equal. Both happens-before edges hold on every leg.
+Both tools are Code tools that sleep 400 ms, which is about what a real one costs and is what
+makes the round legible in the clip below. It also makes the leg measurable: with instant tools
+all three numbers sat within 5% and said nothing about either engine.
 
-The order does move, and only in one place:
+What the numbers say now is where the round's calls sit relative to each other:
 
 ```
-legacy:      … → Inner Chat Model#0 → Inner Calculator#0 → Sub Agent#0 → Inner Chat Model#1 → Calculator#0 → …
-libpetri k=4: … → Calculator#0 → Inner Chat Model#0 → Inner Calculator#0 → Sub Agent#0 → Inner Chat Model#1 → …
+legacy:       … → Outer Chat Model#0 → Inner Chat Model#0 → Inner Calculator#0 → Sub Agent#0 → Inner Chat Model#1 → Calculator#0 → …
+libpetri k=1: … → Outer Chat Model#0 → Inner Chat Model#0 → Calculator#0 → Inner Calculator#0 → Sub Agent#0 → Inner Chat Model#1 → …
+libpetri k=4: … → Outer Chat Model#0 → Calculator#0 → Inner Chat Model#0 → Inner Calculator#0 → Sub Agent#0 → Inner Chat Model#1 → …
 ```
 
 `Calculator` is the *outer* agent's other tool, requested in the same round as `Sub Agent`. n8n
-runs the round's calls one after another, so `Calculator` waits out the entire inner agent;
-the net holds only the ordering the data forces, so at k=4 it goes first. Nothing downstream
-depends on which, and the data is identical either way — which is the distinction the differ
-draws between a reordering and a difference.
+runs the round's calls one after another, so `Calculator` waits out the entire inner agent. The
+net holds only the ordering the data forces: at k=1 it takes the first slot that frees, and at
+k=4 it runs while the inner agent is still working, which is the 585 ms. Nothing downstream
+depends on which, and the data is identical on every leg — which is the distinction the differ
+draws between a reordering and a difference. Both happens-before edges hold throughout.
 
 The two runtimes bound delegation differently. n8n's newer agent runtime identifies a delegated
 task by a path string and accepts one level below the root, so a second level of delegation is
@@ -435,20 +436,25 @@ Merge is n8n's own. Nothing here is a Petri net concept: the workflow reads as a
 ## What was measured
 
 n8n 2.37.0 at the pin `441970b2`, Node 26.8.1, macOS, k as shown, best of two runs per leg,
-2026-09-10. `diff-engines.sh` produced this.
+2026-09-11. `diff-engines.sh` produced this, over the three workflows both engines finish the
+same way — which is what `--workflows` defaults to. The rest of the seed exists to show a
+*difference*, so a leg-against-leg diff of those would compare two intended outcomes.
 
 | Workflow | leg | wall clock | data vs n8n | happens-before | order |
 | --- | --- | --- | --- | --- | --- |
-| Concurrency Showcase | legacy (reference) | 4944 ms | — | 14 edges ok | — |
-| | libpetri k = 1 | 4944 ms | identical | 14 edges ok | same |
-| | libpetri k = 4 | **1284 ms** | identical | 14 edges ok | **reordered** |
-| Agent · Two Tools | legacy (reference) | 131 ms | — | 2 edges ok | — |
+| Concurrency Showcase | legacy (reference) | 10,166 ms | — | 14 edges ok | — |
+| | libpetri k = 1 | 10,172 ms | identical | 14 edges ok | same |
+| | libpetri k = 4 | **2672 ms** | identical | 14 edges ok | **reordered** |
+| Agent · Two Tools | legacy (reference) | 129 ms | — | 2 edges ok | — |
 | | libpetri k = 1 | 129 ms | identical | 2 edges ok | same |
 | | libpetri k = 4 | 130 ms | identical | 2 edges ok | same |
+| Agent · Nested Agents | legacy (reference) | 939 ms | — | 2 edges ok | — |
+| | libpetri k = 1 | 922 ms | identical | 2 edges ok | **reordered** |
+| | libpetri k = 4 | **585 ms** | identical | 2 edges ok | **reordered** |
 
-Four independent 1.2 s legs, so 5 s sequentially and 1.2 s four-wide: the net returns 1284 ms
-against n8n's 4944 ms, and costs nothing measurable at k = 1 — 4944 ms, the same figure to the
-millisecond. The reorder is the whole difference —
+Four independent 2.5 s legs, so 10 s sequentially and 2.5 s four-wide: the net returns 2672 ms
+against n8n's 10,166 ms, and costs nothing measurable at k = 1 — 10,172 ms, six milliseconds
+apart over ten seconds. The reorder is the whole difference —
 
 ```
 n8n            … Fan → Fetch A → Fetch B → Merge AB → Fetch C → Fetch D → Merge CD → …
@@ -524,7 +530,8 @@ The k = 4 timeline, from n8n's own per-task clock:
 
 All four branches start within **2 ms** of each other, and the run is bounded by the slowest of
 them rather than by their sum — 5,123 ms against 12,654 ms sequential, a 2.5× cut on a workflow
-whose author wrote no concurrency anywhere. Pricing's 1,258 ms is three calls with 400 ms and
+whose JSON asks for no concurrency at all. The budget is a launcher flag; the document is the same
+one the legacy leg ran. Pricing's 1,258 ms is three calls with 400 ms and
 800 ms between them; Shipping's 5,057 ms is two attempts abandoned at their 2.5 s deadline,
 after which `continue` let the branch carry a payload into the Merge and the workflow finish.
 The legacy leg is the same document under the engine that ignores the policy.
@@ -564,15 +571,21 @@ scripts/testbed/record-demo.sh --workflow="Agent · Two Tools" --budget=1
 ```
 
 Video: `.testbed/video/<workflow>-<engine>-k<budget>.webm`, continuous at 10 fps.
-`--llm-latency=MS` on the launcher makes the stub answer at a real model's pace, which is what
-makes an agent round legible: the model thinks, a tool runs, the model thinks again. It is **zero
-by default**, because every wall clock this document reports is measured with the stub answering
-instantly, and a pause would put itself into those numbers.
 
-`scripts/testbed/make-gifs.sh` converts the recordings to the GIFs this document embeds — GitHub sanitises
-`<video>` out of Markdown, so a committed WebM would render as a download link. Each GIF holds its
-final frame for two or three seconds, because a GIF loops without pausing and the shortest run
-here finishes in about 700 ms; without the hold the result is gone before it can be read.
+`--llm-latency=MS` makes the stub answer at a real model's pace, and every agent clip here is
+recorded at 1300 ms. It is what makes a round legible: the model thinks, a tool runs, the model
+thinks again. With the stub answering instantly the three land in one frame. The tools sleep for
+the same reason — the escalation ladder's `Calculator` and both of the nested workflow's are Code
+tools that wait 400 ms, which is about what a real one costs.
+
+Latency is **zero by default**, because every wall clock this document reports is measured with
+the stub answering instantly and a pause would put itself into those numbers. It changes no
+outcome: the same nodes run, in the same order, with the same data.
+
+`scripts/testbed/make-gifs.sh` converts the recordings to the GIFs this document embeds — GitHub
+sanitises `<video>` out of Markdown, so a committed WebM would render as a download link. The
+recording ends on 1.5 s of the finished canvas and the GIF holds that frame for 1.5 s more,
+because a GIF loops without pausing and the result would otherwise be gone before it can be read.
 
 Three things the script has to get right.
 

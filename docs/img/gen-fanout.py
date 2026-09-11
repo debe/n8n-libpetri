@@ -204,14 +204,14 @@ ctx = {
                  'Real time, 1:1 — n8n’s own per-task clock, from a live server.'),
     'lead': {'legacy': f'{ratio:.2f}× the net’s wall clock',
              'libpetri-k4': f'finished — n8n is still on {running}' if running else 'finished'},
-    'legend_bar': f'a node running — the {wide} Code legs sleep 1.2 s each',
+    'legend_bar': f'a node running — the {wide} Code legs sleep 2.5 s each',
     'legend_tick': f'the other {len(ticks)} nodes, {sum(r["dur"] for r in ticks)} ms between them',
     'footer1': ('Concurrency Showcase · 13 nodes seeded into a real n8n editor by scripts/testbed/n8n-testbed.sh · '
                 'measured by scripts/testbed/diff-engines.sh --repeat=2 · both legs pass the same data check'),
     'footer2': ('The dashed line is the wall clock, request to response, so the gap after the last bar is the '
                 'REST round trip both legs pay. Wide bars grow over the milliseconds they ran; ticks appear when '
                 'they fire.'),
-    'alt': (f'A timeline of the same 13-node n8n workflow run twice. Under n8n’s stack loop the four 1.2 s Code '
+    'alt': (f'A timeline of the same 13-node n8n workflow run twice. Under n8n’s stack loop the four 2.5 s Code '
             f'nodes run one after another and the run takes {a_elapsed:,} ms. On the Petri net at k = 4 the same '
             f'four run side by side and the run takes {b_elapsed:,} ms, {ratio:.2f} times faster, with identical '
             f'run data.'),

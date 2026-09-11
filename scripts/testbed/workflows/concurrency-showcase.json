@@ -26,7 +26,7 @@
               "id": "2",
               "name": "note",
               "type": "string",
-              "value": "four independent legs, each sleeping 1.2 s"
+              "value": "four independent legs, each sleeping 2.5 s"
             }
           ]
         },
@@ -111,7 +111,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 1200));\nreturn [{ json: { leg: 'A' } }];\n"
+        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 2500));\nreturn [{ json: { leg: 'A' } }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -125,7 +125,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 1200));\nreturn [{ json: { leg: 'B' } }];\n"
+        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 2500));\nreturn [{ json: { leg: 'B' } }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -139,7 +139,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 1200));\nreturn [{ json: { leg: 'C' } }];\n"
+        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 2500));\nreturn [{ json: { leg: 'C' } }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -153,7 +153,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 1200));\nreturn [{ json: { leg: 'D' } }];\n"
+        "jsCode": "// One independent leg. It sleeps, and it returns a payload that does not mention the\n// clock: the wall clock is what changes between budgets, so nothing time-dependent may\n// reach the output or the legacy/libpetri data comparison would differ on every run.\nawait new Promise((resolve) => setTimeout(resolve, 2500));\nreturn [{ json: { leg: 'D' } }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
