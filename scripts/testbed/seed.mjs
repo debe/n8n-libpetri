@@ -153,7 +153,8 @@ const cred = await credential();
 const workflows = [];
 // Order matters where one workflow calls another: `waiting-child` before `parent-waits-on-child`.
 for (const file of ['concurrency-showcase.json', 'agent-two-tools.json', 'agent-budget-showcase.json',
-  'agent-tool-deadline.json', 'agent-nested.json', 'failure-policy-showcase.json',
+  'agent-tool-deadline.json', 'agent-nested.json', 'agent-escalation-ladder.json',
+  'failure-policy-showcase.json',
   'resilient-fan-out.json', 'waiting-child.json', 'parent-waits-on-child.json']) {
   workflows.push(await workflow(file, cred, workflows));
 }

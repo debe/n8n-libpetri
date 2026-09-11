@@ -79,9 +79,9 @@ launcher rebuilds when `dist` is older than the patched source and then asserts 
 shared state with `scripts/run-conformance.sh --scope=cli`, whose own guard greps the same
 built file; rebuilding from the patched source can only make that leg more correct.
 
-## The nine workflows
+## The ten workflows
 
-All nine set `settings.executionOrder: "v1"`. Without it `PetriScheduler` delegates straight to
+All ten set `settings.executionOrder: "v1"`. Without it `PetriScheduler` delegates straight to
 n8n's `StackScheduler` (divergence #3), and the testbed would be measuring n8n's own loop while
 reporting on the net.
 
@@ -332,6 +332,33 @@ The sub-cliff case is where the two differ: a node held by `setTimeout` holds it
 engine that can bound it (see **Agent · Tool Deadline**). n8n has a second cliff of the same
 shape in its agent bridge — `WAIT_POLL_ELIGIBLE_MS = 60_000`, under which it polls the database
 every two seconds and over which it asks a human to press a button.
+
+### Agent · Escalation Ladder — 9 nodes
+
+```
+Manual Trigger → Research Agent ─0→ Answer
+                  (maxToolCalls 2) └─1→ Last Try Agent ─0→ Answer After Escalation
+                                        (maxToolCalls 1)  └─1→ Give Up
+Stub Chat Model      --ai_languageModel--> Research Agent
+Calculator           --ai_tool----------->  Research Agent
+Last Try Chat Model  --ai_languageModel--> Last Try Agent
+```
+
+An escalation written as graph rather than as a branch inside a node. The first agent carries
+`[stub:loop]`, so the stub answers every call with more tool calls and it never finishes on its
+own. Its declared budget is two, and the `onFailure` step routes the exhaustion to its error
+output rather than ending the execution. That output goes to a *second* agent with a different
+instruction — "you have one attempt left, answer from what you already know" — whose own error
+output is the give-up path.
+
+Measured, one run: `Calculator` ran twice, `Research Agent` ended `error` with
+`Tool-call budget (2) reached`, `Last Try Agent` answered without calling a tool, and
+`Give Up` never ran. 566 ms.
+
+The point is where the escalation lives. No node asks "is this the last try"; the budget is a
+place, the second agent is reached only when that place is empty, and the give-up path is an
+edge nothing takes until the one above it is spent. Each of the three outcomes is a different
+region of the graph, so each is something the verifier can reason about.
 
 ### Failure Policy Showcase — 5 nodes
 

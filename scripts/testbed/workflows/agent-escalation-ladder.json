@@ -1,0 +1,295 @@
+{
+  "name": "Agent · Escalation Ladder",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "when-clicking-‘execute-workflow’",
+      "name": "When clicking ‘Execute workflow’",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "[stub:loop] Work out 23 * 19 and verify it with the calculator. Keep checking until certain.",
+        "hasOutputParser": false,
+        "needsFallback": false,
+        "options": {
+          "maxIterations": 30,
+          "enableStreaming": false
+        }
+      },
+      "id": "research-agent",
+      "name": "Research Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -80,
+        20
+      ],
+      "onError": "continueErrorOutput",
+      "executionPolicy": {
+        "v": 1,
+        "maxToolCalls": 2,
+        "onFailure": [
+          {
+            "action": "route",
+            "output": "error"
+          }
+        ]
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "You have one attempt left. Answer from what you already know; do not call a tool again.",
+        "hasOutputParser": false,
+        "needsFallback": false,
+        "options": {
+          "maxIterations": 30,
+          "enableStreaming": false
+        }
+      },
+      "id": "last-try-agent",
+      "name": "Last Try Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        200,
+        200
+      ],
+      "onError": "continueErrorOutput",
+      "executionPolicy": {
+        "v": 1,
+        "maxToolCalls": 1,
+        "onFailure": [
+          {
+            "action": "route",
+            "output": "error"
+          }
+        ]
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "answer",
+              "type": "string",
+              "value": "={{ $json.output }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "answer",
+      "name": "Answer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        480,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "answer",
+              "type": "string",
+              "value": "={{ $json.output }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "answer-after-escalation",
+      "name": "Answer After Escalation",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        480,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "outcome",
+              "type": "string",
+              "value": "no answer produced; taking the error route"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "give-up",
+      "name": "Give Up",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "stub-model",
+          "mode": "list",
+          "cachedResultName": "stub-model"
+        },
+        "options": {},
+        "responsesApiEnabled": false
+      },
+      "id": "stub-chat-model",
+      "name": "Stub Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -160,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "PLACEHOLDER",
+          "name": "Stub OpenAI"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "calculator",
+      "name": "Calculator",
+      "type": "@n8n/n8n-nodes-langchain.toolCalculator",
+      "typeVersion": 1,
+      "position": [
+        20,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "stub-model",
+          "mode": "list",
+          "cachedResultName": "stub-model"
+        },
+        "options": {},
+        "responsesApiEnabled": false
+      },
+      "id": "last-try-chat-model",
+      "name": "Last Try Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        160,
+        460
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "PLACEHOLDER",
+          "name": "Stub OpenAI"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Research Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Research Agent": {
+      "main": [
+        [
+          {
+            "node": "Answer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Last Try Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Last Try Agent": {
+      "main": [
+        [
+          {
+            "node": "Answer After Escalation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stub Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Research Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Last Try Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Last Try Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculator": {
+      "ai_tool": [
+        [
+          {
+            "node": "Research Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
