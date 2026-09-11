@@ -76,6 +76,26 @@ scripts/verify-patch.sh       # re-apply patches to the pinned commit; fails on 
 
 Pinned n8n commit: `441970b` (master; the release tag predates n8n's helper extraction).
 
+### Node-type catalogue (`scripts/node-types/`)
+
+```bash
+node scripts/node-types/extract.mjs      # .n8n dist -> .node-types/catalogue.json
+```
+
+A workflow JSON export carries no node-type descriptions, so without a catalogue the verify CLI
+**guesses** every port count from the connections — a lower bound, since an unwired output is
+invisible in an export and one miscounted port changes the compiled net. The extractor reads
+n8n's own generated `dist/types/nodes.json`, so the counts are n8n's. Ports declared by an
+expression are *evaluated* against probes derived from that expression (its own parameter names,
+its own string literals); a count that moves with a parameter is withheld and left to
+`BUILT_IN_SHAPES`, which is parameter-aware. Anchors are asserted on every run — the catalogue is
+generated, so nothing else would notice a probe that starts calling a router's variable output
+count invariant. Measured on the 200-template corpus: **236 of ~5,114 nodes still guessed (4.6%)**,
+against 4,805 (94%) before.
+
+`canWait` is derived the same way — `known/nodes.json` names each node's built file, and that
+directory is searched for `putExecutionToWait` — so the answer comes from the code that runs.
+
 ### Live testbed (`scripts/testbed/`)
 
 ```bash

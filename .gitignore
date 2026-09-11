@@ -28,3 +28,9 @@ conformance-results/
 .rpiv/
 .serena/
 .tokensave
+
+# Fetched n8n template corpus (see scripts/templates/)
+.templates/
+
+# Node-type catalogue, generated from the .n8n clone (see scripts/node-types/)
+.node-types/

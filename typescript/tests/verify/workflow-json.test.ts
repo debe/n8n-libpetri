@@ -88,6 +88,48 @@ describe('workflow JSON adapter', () => {
     expect(warnings).toEqual([]);
   });
 
+  it('applies loopNode to a supplied shape, which the type knows and the shape need not restate', () => {
+    // A catalogue built from n8n's generated type file carries counts and nothing else, so a
+    // `--node-types` entry for the loop node used to silently drop `loopNode` — and with it
+    // the loop emission semantics. Every resolution path applies it now.
+    const raw = {
+      nodes: [
+        { id: 't', name: 'T', type: 'n8n-nodes-base.manualTrigger', typeVersion: 1, position: [0, 0] },
+        { id: 'l', name: 'Loop', type: 'n8n-nodes-base.splitInBatches', typeVersion: 3, position: [200, 0] },
+        { id: 'b', name: 'Body', type: 'n8n-nodes-base.set', typeVersion: 3, position: [400, 0] },
+      ],
+      connections: {
+        T: { main: [[{ node: 'Loop', type: 'main', index: 0 }]] },
+        Loop: { main: [[], [{ node: 'Body', type: 'main', index: 0 }]] },
+        Body: { main: [[{ node: 'Loop', type: 'main', index: 0 }]] },
+      },
+    };
+    const catalogue = { types: { 'n8n-nodes-base.splitInBatches@3': { inputCount: 1, outputCount: 2 } } };
+    const { description } = describeWorkflowJson(raw, { nodeTypes: catalogue });
+    const loop = description.nodes.find((n) => n.name === 'Loop')!;
+    expect(description.nodeTypes(loop).loopNode).toBe(true);
+    // And the built-in's names survive: the supplied entry has none, and n8n's own type file
+    // lists a port as the bare string "main", so a catalogue can never carry them.
+    expect(description.nodeTypes(loop).outputNames).toEqual(['done', 'loop']);
+  });
+
+  it('takes counts from the supplied shape but keeps the built-in names it does not carry', () => {
+    const catalogue = { types: { 'n8n-nodes-base.if@2': { inputCount: 1, outputCount: 2 } } };
+    const { description } = describeWorkflowJson(EXPORT, { nodeTypes: catalogue });
+    const iff = description.nodes.find((n) => n.name === 'If')!;
+    expect(description.nodeTypes(iff).outputNames).toEqual(['true', 'false']);
+  });
+
+  it('does not graft names on when the supplied counts disagree with the built-in', () => {
+    // Disagreement means the two are describing different things — a newer type version, or a
+    // deliberate override — and names from the other one would be a fiction.
+    const catalogue = { types: { 'n8n-nodes-base.if@2': { inputCount: 1, outputCount: 3 } } };
+    const { description } = describeWorkflowJson(EXPORT, { nodeTypes: catalogue });
+    const iff = description.nodes.find((n) => n.name === 'If')!;
+    expect(description.nodeTypes(iff).outputCount).toBe(3);
+    expect(description.nodeTypes(iff).outputNames).toBeUndefined();
+  });
+
   it('guesses port counts from the connections and says so', () => {
     const raw = {
       nodes: [
