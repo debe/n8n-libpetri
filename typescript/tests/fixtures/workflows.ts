@@ -351,6 +351,32 @@ export function agentToolPolicy(executionPolicy: NodeDescription['executionPolic
   ], 'Trigger', { toolConnections: [tool('Calculator', 'Agent')] });
 }
 
+/**
+ * A nested agent: `B` is wired as an `ai_tool` of `A` and has a tool of its own. That is n8n's
+ * `AgentToolV3` — `outputs: [NodeConnectionTypes.AiTool]`, every input `ai_*`, and
+ * `toolsAgentExecute` for a body, so it emits an `EngineRequest` exactly as a top-level agent
+ * does. After the adapter filters inputs to `main` its shape is a tool's: no `main` port at
+ * either end.
+ *
+ * `B` is therefore the one node that is `isTool` *and* an agent at once, and the two gadgets
+ * meet in its `X_run` outcome: the tool branch writes its agent's `A/response`, the request
+ * branch writes its own `B/routed_req`. Delegation is two levels deep, which n8n's own agent
+ * runtime refuses — `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/` caps a task
+ * path at depth 1, by parse failure.
+ */
+export const agentNested = workflow('agentNested', [
+  node('Trigger', 'trigger', [0, 0]),
+  node('A', 'agent', [200, 0], { maxRounds: 2, maxToolCalls: 2 }),
+  node('End', 'set', [400, 0]),
+  node('Calculator', 'tool', [200, 200]),
+  node('B', 'tool', [400, 200], { maxRounds: 2, maxToolCalls: 2 }),
+  node('Code', 'tool', [400, 400]),
+], [
+  conn('Trigger', 0, 'A', 0), conn('A', 0, 'End', 0),
+], 'Trigger', {
+  toolConnections: [tool('Calculator', 'A'), tool('B', 'A'), tool('Code', 'B')],
+});
+
 export const AGENTS = { agentOneTool, agentTwoTools, agentSharedTool, agentAssumedRounds } as const;
 
 /**

@@ -79,9 +79,9 @@ launcher rebuilds when `dist` is older than the patched source and then asserts 
 shared state with `scripts/run-conformance.sh --scope=cli`, whose own guard greps the same
 built file; rebuilding from the patched source can only make that leg more correct.
 
-## The eight workflows
+## The nine workflows
 
-All eight set `settings.executionOrder: "v1"`. Without it `PetriScheduler` delegates straight to
+All nine set `settings.executionOrder: "v1"`. Without it `PetriScheduler` delegates straight to
 n8n's `StackScheduler` (divergence #3) and the testbed would silently demonstrate the thing it
 replaces.
 
@@ -229,6 +229,70 @@ Same workflow, same hung service. n8n's only bound is global and it takes the wh
 with it; the per-tool deadline loses the tool call and nothing else — the agent receives the
 error as its tool response, answers, and `Answer` runs. `tests/scheduler/agent.test.ts` pins the
 same four behaviours against `FakeHost` without a server.
+
+### Agent · Nested Agents — 8 nodes
+
+```
+Manual Trigger → Research Agent → Answer
+                   ai_tool ↑ Calculator
+                   ai_tool ↑ Sub Agent  (@n8n/n8n-nodes-langchain.agentTool)
+                                ai_tool ↑ Inner Calculator
+```
+
+`Sub Agent` is n8n's `AgentToolV3`: an agent wired as another agent's tool. Its description is
+`outputs: [NodeConnectionTypes.AiTool]` with every input `ai_*`, and its body is
+`toolsAgentExecute` — the same executor the top-level `Agent` runs — so it emits an
+`EngineRequest` for *its* tools exactly as a top-level agent does. After the adapter filters
+inputs to `main`, its shape is a plain tool's, which the generated catalogue confirms
+(`@n8n/n8n-nodes-langchain.agentTool@3` → `{inputCount: 0, outputCount: 0}`).
+
+That makes it the one node in the model that is a **tool and an agent at once**, and nothing in
+the gadget was written for the combination: `joinFormOf` returns `'tool'` for `isTool`, while the
+whole round block is added for `tools.length > 0`. They compose. `Sub Agent` gets a tool's input
+side (`B/in_tool`, and none of `in` / `in_empty` / `skipped`) and an agent's round entire, and
+the two meet in one `X_run` `xor` — the tool branch writes the parent's `A/response`, the request
+branch writes its own `B/routed_req`. The branches are disjoint, which is what IO-015's
+exact-explanation search needs. `tests/compiler/agent.test.ts` pins the place and transition sets
+by hand rather than by a recorded count.
+
+| leg | status | wall clock | data vs reference |
+| --- | --- | --- | --- |
+| legacy (reference) | success | 594 ms | — |
+| libpetri k=1 | success | 587 ms | **identical** |
+| libpetri k=4 | success | 567 ms | **identical** |
+
+**This leg is parity, and the wall clocks are not a result** — the workflow is stub-LLM bound,
+not scheduler bound, and three numbers within 5% of each other say nothing about either engine.
+What it establishes is that depth-2 delegation runs in the process n8n ships, under both engines,
+with every payload equal. Both happens-before edges hold on every leg.
+
+The order does move, and only in one place:
+
+```
+legacy:      … → Inner Chat Model#0 → Inner Calculator#0 → Sub Agent#0 → Inner Chat Model#1 → Calculator#0 → …
+libpetri k=4: … → Calculator#0 → Inner Chat Model#0 → Inner Calculator#0 → Sub Agent#0 → Inner Chat Model#1 → …
+```
+
+`Calculator` is the *outer* agent's other tool, requested in the same round as `Sub Agent`. n8n
+runs the round's calls one after another, so `Calculator` waits out the entire inner agent;
+the net holds only the ordering the data forces, so at k=4 it goes first. Nothing downstream
+depends on which, and the data is identical either way — which is the distinction the differ
+draws between a reordering and a difference.
+
+What the net has that n8n's own agent runtime does not: `@n8n/agents` caps delegation at one
+level by **parse failure** — `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/`
+(`runtime/tools/sub-agent-task-path.ts`) does not match a depth-2 task path. Here the depth is
+the graph, and the bound is a marking at every level: each agent spends its own `A/calls`,
+nothing refunds either, and z3 validates one conservation law spanning both rounds. An inner
+agent that exhausts its budget fails by name *inside itself*, and n8n's own rule for a failing
+`ai_tool` node hands that error to the agent above as an ordinary tool response — so a runaway
+at depth 2 is contained at depth 2 and the execution still completes
+(`tests/scheduler/agent.test.ts`).
+
+The cost is real and is stated rather than hidden. Two nested agents close in 19,523 state
+classes at `maxToolCalls` 2 and 202,164 at 3; at 4 the solver-free route runs out of heap before
+it closes (`effectiveMaxClasses` clamps to what the heap affords — 263,737 on this machine). The
+SMT route still answers past that point, which is what it is for.
 
 ### Waiting Child + Parent Waits On Child — 3 nodes each
 

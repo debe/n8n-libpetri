@@ -14,7 +14,7 @@ import { renderStateSpace } from '../../src/verify/report.js';
 import { StateSpace } from '../../src/verify/state-class.js';
 import { markingStateOf } from '../../src/verify/verify.js';
 import {
-  agentAssumedRounds, agentOneTool, agentSharedTool, agentTwoTools, linear,
+  agentAssumedRounds, agentNested, agentOneTool, agentSharedTool, agentTwoTools, linear,
 } from '../fixtures/workflows.js';
 
 describe('analysis', () => {
@@ -302,5 +302,107 @@ describe('the structural hash', () => {
 
   it('is unchanged by adding an empty toolConnections list to a workflow without agents', () => {
     expect(structuralHash(analyse(linear))).toBe(structuralHash(analyse({ ...linear, toolConnections: [] })));
+  });
+});
+
+/**
+ * A nested agent (n8n's `AgentToolV3`). `B` is the only node that is a tool and an agent at
+ * once, and nothing in the gadget is written for that case: `joinFormOf` returns `'tool'` for
+ * `isTool`, while the whole round block is added for `tools.length > 0`. Whether the two
+ * compose was unverified, so the counts below are hand-derived rather than recorded — a gate
+ * on the composition, not a snapshot of it.
+ */
+describe('an agent used as another agent\'s tool', () => {
+  /** The node-local part of every place / transition name belonging to `node`. */
+  const localsOf = (names: Iterable<{ readonly name: string }>, node: string): string[] =>
+    [...names].map((x) => x.name).filter((n) => n.startsWith(`id:${node}/`))
+      .map((n) => n.slice(`id:${node}/`.length)).sort();
+
+  it('compiles with no diagnostics, and puts the tool one level below its agent', () => {
+    const a = analyse(agentNested);
+    expect(a.diagnostics).toEqual([]);
+    // The classification that makes this fixture the case it is.
+    expect(a.byName.get('B')!.isTool).toBe(true);
+    expect(a.byName.get('B')!.tools).toEqual(['Code']);
+    expect([...a.agentsOf.get('B')!]).toEqual(['A']);
+    // `reachFrom` walks `succ`, which carries no dispatch edge, so both `B` and `Code` are
+    // reachable only through the fixpoint that follows the tool connections — and `Code` only
+    // on a second pass, through a tool that is itself only reachable through one.
+    expect(a.reachable.has('Code')).toBe(true);
+    // Depth is `X_start` priority, so a nested round must sort strictly below the round above it.
+    expect([a.depth.get('A'), a.depth.get('B'), a.depth.get('Code')]).toEqual([1, 2, 3]);
+  });
+
+  it('gives B both gadgets and neither twice', () => {
+    const c = compile(agentNested);
+    // Hand-derived. A tool's input side is the agent's dispatch place and nothing else, so `B`
+    // has `in_tool` where `A` has `in` / `in_empty`, and no `skipped` — a tool is never
+    // delivered an empty activation to skip. Everything else is `A`'s, entire: the node core
+    // and all eight round places.
+    const core = ['idle', 'running', 'routed', 'waiting', 'stopped', 'done'];
+    const round = ['routed_req', 'queue', 'dispatched', 'drained', 'calls', 'outstanding', 'response', 'rounds'];
+    expect(localsOf(c.net.places, 'B')).toEqual([...core, ...round, 'in_tool'].sort());
+    expect(localsOf(c.net.places, 'A')).toEqual([...core, ...round, 'in', 'in_empty', 'skipped'].sort());
+    // Which states the same thing as a difference, so a place added to one gadget and not the
+    // other fails here rather than passing two independent lists.
+    const minus = (xs: string[], ys: string[]) => xs.filter((x) => !ys.includes(x));
+    expect(minus(localsOf(c.net.places, 'A'), localsOf(c.net.places, 'B'))).toEqual(['in', 'in_empty', 'skipped']);
+    expect(minus(localsOf(c.net.places, 'B'), localsOf(c.net.places, 'A'))).toEqual(['in_tool']);
+
+    // Transitions: the node core plus the six of the round. `A` has one more, `skip`.
+    const roundT = ['done_req', 'dispatch', 'collect', 'resume', 'calls_out', 'rounds_out'];
+    expect(localsOf(c.net.transitions, 'B')).toEqual([...['start', 'run', 'done'], ...roundT].sort());
+    expect(minus(localsOf(c.net.transitions, 'A'), localsOf(c.net.transitions, 'B'))).toEqual(['skip']);
+
+    // And a plain tool is untouched by any of it: no round block on `Code`.
+    expect(localsOf(c.net.transitions, 'Code')).toEqual(['done', 'run', 'start']);
+  });
+
+  it('separates the tool outcome from the nested round in one xor', () => {
+    const c = compile(agentNested);
+    const run = [...c.net.transitions].find((t) => t.name === 'id:B/run')!;
+    const branches = enumerateBranches((run as unknown as { outputSpec: never }).outputSpec)
+      .map((b) => [...b].map((p) => p.name).sort());
+    // Five: the tool's success, the nested round's request, halt, waiting, stopped. The first
+    // two are what had never met before — a tool whose result is its agent's `A/response`, and
+    // an agent whose run may instead ask for a round of its own.
+    expect(branches).toHaveLength(5);
+    const success = branches.filter((b) => b.includes('id:A/response'));
+    const request = branches.filter((b) => b.includes('id:B/routed_req'));
+    expect(success).toHaveLength(1);
+    expect(request).toHaveLength(1);
+    // IO-015 searches for an *exact* explanation of the places a firing wrote, so two branches
+    // of one `xor` may not be confusable: each must claim a place the other does not.
+    expect(success[0]!.filter((p) => request[0]!.includes(p))).toEqual(['id:B/idle']);
+
+    // The dispatch reaches a second level: `B` writes into `Code`'s own tool-input place.
+    const dispatch = [...c.net.transitions].find((t) => t.name === 'id:B/dispatch')!;
+    const written = new Set(enumerateBranches((dispatch as unknown as { outputSpec: never }).outputSpec)
+      .flatMap((b) => [...b].map((p) => p.name)));
+    expect(written.has('id:Code/in_tool')).toBe(true);
+  });
+
+  it('bounds both levels: each agent spends its own A/calls, and neither refunds', () => {
+    const c = compile(agentNested);
+    const space = StateSpace.explore(c.net, markingStateOf(c.initialMarking(null)), c.netMap, 200_000);
+    expect(space.complete).toBe(true);
+    // Two independent budgets, not one shared counter — `B`'s round is bounded by `B/calls`
+    // whether or not `A` still has calls left. That is the whole difference from a host-side
+    // recursion cap: the bound is in the marking of the level that is spending.
+    for (const n of ['A', 'B']) {
+      const g = c.netMap.node(n);
+      expect(space.peak(g.calls!), n).toBe(2);
+      expect(space.peak(g.outstanding!), n).toBe(2);
+    }
+    // Nothing anywhere refunds either budget, which is what keeps the nesting finite.
+    const refunds: string[] = [];
+    for (const t of c.net.transitions) {
+      const out = (t as unknown as { outputSpec?: unknown }).outputSpec;
+      if (out === undefined || out === null) continue;
+      for (const branch of enumerateBranches(out as never)) {
+        for (const p of branch) if (p.name.endsWith('/calls')) refunds.push(t.name);
+      }
+    }
+    expect(refunds).toEqual([]);
   });
 });

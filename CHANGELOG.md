@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **The budget semiflow was reported present or missing depending on the state-class cap.** A
+  P-invariant is a statement about the incidence matrix, so it cannot depend on how many state
+  classes the enumeration was allowed to keep — but it did. `runBudget` asks the solver-free
+  `graphBound` first and falls back to an SMT query, and that query's run asks
+  `semiflowInvariants('auto')`, which *skips* the semiflow union whenever the null-space basis
+  is complete. Its basis-only invariants were then cached, and the call site read
+  `ctx.invariants ?? collectInvariants(ctx)` — short-circuiting past the one run that asks for
+  the union in non-negative form, the very form this search needs. So the same net with the same
+  marking reported `_budget + Σ(running + routed) = k` at a cap large enough to close the graph
+  and "no law giving `_budget` and every `X/running` the same positive weight" at one that
+  truncated. The call site now always goes through `collectInvariants`, which reuses a cached
+  list only when that list actually carries the union. Found by the first fixture large enough
+  to truncate at the default cap — a nested agent.
+
 - **`FakeHost` did not mirror n8n's rule for a failing `ai_tool` node.** n8n continues such a
   node even with no `onError` at all, and hands the agent `{ json: { error } }` rather than the
   tool's input passed through — `isAiToolExecution` keys on the `rewireOutputLogTo` tag that
@@ -24,6 +38,34 @@ All notable changes to this project are documented here. The format follows
   there are.
 
 ### Added
+- **Nested agents compile, run and verify.** n8n's `AgentToolV3` is an agent wired as another
+  agent's tool: `outputs: [NodeConnectionTypes.AiTool]`, every input `ai_*`, and
+  `toolsAgentExecute` for a body, so it emits an `EngineRequest` exactly as a top-level agent
+  does. After the adapter filters inputs to `main` its shape is a tool's — which makes it the
+  one node that is `isTool` *and* an agent at once, a composition nothing in the gadget was
+  written for. It composes: the tool input side (`B/in_tool`, no `in` / `in_empty` / `skipped`)
+  meets the whole round block (`B/queue`, `B/calls`, `B/rounds`, …), and the two meet in one
+  `X_run` `xor` whose tool branch writes the parent's `A/response` and whose request branch
+  writes `B/routed_req` — disjoint, so IO-015's exact-explanation search separates them.
+  `analyse` already iterated reachability and depth to a fixpoint for this case; what was
+  unverified was the gadget, and it is now pinned by hand-derived place and transition sets
+  rather than by a recorded count.
+
+  Two things the nesting buys that a host-side recursion cap does not. **The bound is in the
+  marking of the level that is spending**: each agent has its own `A/calls`, nothing anywhere
+  refunds either, and the exhaustion is contained at its own level — an inner agent that runs
+  out of tool calls fails by name *inside itself*, and n8n's own rule for a failing `ai_tool`
+  node (`aiToolDefaultsToContinue`) hands that error to the agent above it as an ordinary tool
+  response, which answers and completes. **And the conservation law spans both levels**: z3
+  validates one `_budget + Σ(running + routed + routed_req) = k` covering `A` and `B` together.
+  n8n's own agent runtime caps delegation at one level by *parse failure* —
+  `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/` does not match a depth-2 task path.
+
+  The cost is real and is stated rather than hidden: two nested agents at `maxToolCalls` 2 close
+  in 19,523 state classes, at 3 in 202,164, and at 4 the solver-free route runs out of heap
+  before it closes (`effectiveMaxClasses` clamps to what the heap affords, 263,737 here). The
+  SMT route still answers past that point, which is what `smtFallback` is for.
+
 - **Execution policy in workflow JSON: the attempt chain** (ADR 0009). A node may declare
   `executionPolicy.onFailure`, an attempt-indexed list of `retry` / `route` / `stop` /
   `continue` steps, and `executionPolicy.timeoutMs`, a per-attempt deadline. It is n8n's own

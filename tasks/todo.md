@@ -266,6 +266,18 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       never-recovering script, and on `multiProducer` the chain spends 6 calls and completes
       where `retryOnFail` spends 4 and halts. Divergence rows 26–28 record what the feature
       changes; the live legs are in `docs/testbed.md`
+- [x] **Nested agents compile, run and verify.** *Closed 2026-09-11.* n8n's `AgentToolV3` is an
+      agent wired as another agent's tool, which makes it the one node that is `isTool` *and* an
+      agent at once — a composition nothing in the gadget was written for (`joinFormOf` returns
+      `'tool'` for `isTool`; the round block is added for `tools.length > 0`). It composes: a
+      tool's input side plus an agent's round entire, meeting in one `X_run` `xor` whose two
+      relevant branches are disjoint. `analyse` already iterated reachability and depth to a
+      fixpoint for the case; the gadget is now pinned by hand-derived place and transition sets
+      (`tests/compiler/agent.test.ts`), driven end to end (`tests/scheduler/agent.test.ts`), and
+      run under both engines in the live server with **identical data**
+      (`docs/testbed.md`, *Agent · Nested Agents*). The bound is a marking at every level, and z3
+      validates one conservation law spanning both rounds. Cost is stated, not hidden: 19,523
+      state classes at `maxToolCalls` 2, 202,164 at 3, heap-bound at 4
 - [ ] **Divergence #17 has no guard.** At k ≥ 2 a `responseMode: responseNode` webhook answers the
       caller where n8n's `break` would have left it unanswered, because the net cannot un-start an
       action. The recommendation ("keep k = 1 where a failure must suppress a ready sibling") is in
@@ -672,7 +684,10 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
         `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/`
         (`runtime/tools/sub-agent-task-path.ts`), and `maxChildren` is documented as limiting
         "parallelism, not the total number of delegated tasks". A recursion bound expressed as a
-        parse failure is the shape ν-nets would carry as a marking (§4, Route B)
+        parse failure is the shape ν-nets would carry as a marking (§4, Route B). The classic
+        node has no such cap, and depth 2 over it is now demonstrated end to end here — compiled,
+        run in the live server under both engines with identical data, and with one budget
+        semiflow spanning both levels (`docs/testbed.md`, *Agent · Nested Agents*)
       - **Exhaustion presents as completion**: `agent-runtime.ts:975` sets
         `lastFinishReason = 'max-iterations'` and then calls `sink.finishComplete(...)`, leaving
         three downstream call sites to check the string. Issue #22771 (Dec 2025, fixed in

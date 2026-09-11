@@ -8,7 +8,7 @@
  * *when*: the round is a marking, so a paused or halted execution keeps it, the budget bounds
  * how many tools are in flight, and `A/rounds` bounds how many times the agent may go round.
  */
-import { agentOneTool, agentToolPolicy, agentTwoTools, conn, node } from '../fixtures/workflows.js';
+import { agentNested, agentOneTool, agentToolPolicy, agentTwoTools, conn, node } from '../fixtures/workflows.js';
 import { compile } from '../../src/compiler/index.js';
 import { execute, items, ranNodes, sleep } from './support.js';
 
@@ -407,5 +407,141 @@ describe('a policy on an agent\'s tool', () => {
   it('refuses route: a tool has no output to route to', () => {
     expect(() => compile(agentToolPolicy({ onFailure: [{ action: 'route', output: 0 }] })))
       .toThrow(/Calculator.*no output to route to.*goes to its agent/s);
+  });
+});
+
+/**
+ * A nested agent. n8n's own runtime caps delegation at one level — `@n8n/agents` parses a
+ * sub-agent's task path against `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/`,
+ * so a depth-2 path does not fail a check, it fails to parse. Here delegation is the graph, and
+ * a second level is a second round in the same net — no new concept, no new code path.
+ */
+describe('an agent that dispatches another agent', () => {
+  it('runs both rounds and answers up the chain', async () => {
+    const r = await execute(agentNested, {
+      A: agentCalling(['B']),
+      B: agentCalling(['Code']),
+      Code: () => ({ data: [items({ result: 7 })] }),
+      Calculator: () => ({ data: [items({ result: 1 })] }),
+    }, { startItems: START });
+
+    expect(r.error).toBeUndefined();
+    expect(r.scheduler.outcome).toBe('completed');
+    // `B` runs twice for the same reason `A` does — once to ask, once to answer — and `Code`
+    // runs between its two activations, inside `A`'s own round.
+    expect(ranNodes(r.calls)).toEqual(['Trigger', 'A', 'B', 'Code', 'B', 'A', 'End']);
+    // `Calculator` is wired to `A` and was never asked for, so it never ran: a tool is
+    // dispatched, not scheduled.
+    expect(r.runData.Calculator).toBeUndefined();
+    // One `runData` entry per agent, not two: the re-entry reuses the requesting run's index,
+    // at both levels.
+    expect(r.runData.A).toHaveLength(1);
+    expect(r.runData.B).toHaveLength(1);
+    expect(r.runData.Code).toHaveLength(1);
+    expect(r.runData.End![0]!.data!.main![0]![0]!.json).toEqual({ answer: 'done' });
+  });
+
+  it('keeps the same runData at budget 1 and 4: the nesting is order, not concurrency', async () => {
+    const run = async (budget: number) => await execute(agentNested, {
+      A: agentCalling(['B']),
+      B: agentCalling(['Code']),
+      Code: () => ({ data: [items({ result: 7 })] }),
+    }, { startItems: START, budget });
+    const one = await run(1);
+    const four = await run(4);
+    for (const node of ['A', 'B', 'Code', 'End']) {
+      expect(four.runData[node]?.map((t) => t.data), node).toEqual(one.runData[node]?.map((t) => t.data));
+    }
+    expect(ranNodes(four.calls)).toEqual(ranNodes(one.calls));
+  });
+
+  it('contains the inner agent\'s tool-call budget at its own level', async () => {
+    // `B` asks for a tool on every activation and never answers. `B/calls` is 2, so the third
+    // request has no unit left and `B_calls_out` re-enters `B` with the fact — the run then
+    // fails by name, inside `B`.
+    let bCalls = 0;
+    const r = await execute(agentNested, {
+      A: agentCalling(['B']),
+      B: () => {
+        bCalls++;
+        return {
+          actions: [{
+            actionType: 'ExecutionNodeAction' as const, nodeName: 'Code', input: {}, type: 'ai_tool' as const,
+            id: `c${bCalls}`, metadata: {},
+          }],
+          metadata: { requestId: `r${bCalls}` },
+        };
+      },
+      Code: () => ({ data: [items({ result: 7 })] }),
+    }, { startItems: START });
+
+    expect(r.error).toBeUndefined();
+    expect(bCalls).toBe(3);
+    // Two activations of `Code`, and a third `runData` slot that `planEngineRequest` reserved
+    // for the request `B_calls_out` then refused — divergence #29, and the reason the count and
+    // the run count differ here.
+    expect(ranNodes(r.calls).filter((n) => n === 'Code')).toHaveLength(2);
+    expect(r.runData.Code).toHaveLength(3);
+    expect(r.runData.Code![2]!.data).toBeUndefined();
+    // `B` is an `ai_tool` execution, so n8n's own rule applies to it exactly as to any other
+    // failing tool (`workflow-execute.ts`: AI tools default to continue-on-fail so the agent
+    // receives the error as a tool response). The inner agent's exhausted budget is therefore
+    // *data* to the outer one, not an execution failure.
+    expect(r.runData.B![0]!.executionStatus).toBe('error');
+    expect(r.runData.B![0]!.data!.main![0]![0]!.json).toEqual({
+      error: expect.stringContaining('Tool-call budget (2) reached: "B"'),
+    });
+    // And the outer agent carries on: it gets its response, answers, and `End` runs. A runaway
+    // at depth 2 is contained at depth 2 — the execution completes.
+    expect(r.scheduler.outcome).toBe('completed');
+    expect(ranNodes(r.calls)).toEqual(['Trigger', 'A', 'B', 'Code', 'B', 'Code', 'B', 'A', 'End']);
+    expect(r.runData.End![0]!.data!.main![0]![0]!.json).toEqual({ answer: 'done' });
+  });
+
+  it('ends an exhausted round budget the same way at depth 2 as at depth 1', async () => {
+    // The other exhaustion. `A_rounds_out` is a *designed terminal*, not a failure: `_pause`
+    // marks the stop and the codec writes the open round back onto n8n's stack. That is the
+    // same outcome whether the agent whose rounds ran out is the top-level one or a tool of
+    // another agent, which is the claim worth pinning — nesting adds no new terminal.
+    const asking = (toolName: string, n: () => void) => () => {
+      n();
+      return {
+        actions: [{
+          actionType: 'ExecutionNodeAction' as const, nodeName: toolName, input: {}, type: 'ai_tool' as const,
+          id: 'c', metadata: {},
+        }],
+        metadata: { requestId: 'r' },
+      };
+    };
+    // `maxToolCalls` raised out of the way so `A/rounds` is what binds, not `A/calls`.
+    const raise = (name: string) => ({
+      ...agentNested,
+      nodes: agentNested.nodes.map((x) => (x.name === name ? { ...x, maxToolCalls: 8 } : x)),
+    });
+
+    let inner = 0;
+    const nested = await execute(raise('B') as never, {
+      A: agentCalling(['B']),
+      B: asking('Code', () => { inner++; }),
+      Code: () => ({ data: [items({ result: 7 })] }),
+    }, { startItems: START });
+
+    // Depth 1, for comparison: the same shape with the *outer* agent asking forever.
+    let outer = 0;
+    const flat = await execute(raise('A') as never, {
+      A: asking('Calculator', () => { outer++; }),
+      Calculator: () => ({ data: [items({ result: 1 })] }),
+      B: () => ({ data: [items({ answer: 'x' })] }),
+      Code: () => ({ data: [items({ result: 7 })] }),
+    }, { startItems: START });
+
+    // One initial run plus `maxRounds` resumes, at either depth.
+    expect([inner, outer]).toEqual([3, 3]);
+    expect(nested.scheduler.outcome).toBe(flat.scheduler.outcome);
+    expect(nested.error).toBeUndefined();
+    expect(flat.error).toBeUndefined();
+    // Neither completes: the agent that ran out of rounds never answered, so nothing downstream
+    // of it can run, and the marking is kept rather than discarded.
+    expect(nested.runData.End).toBeUndefined();
   });
 });

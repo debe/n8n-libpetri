@@ -348,6 +348,15 @@ interface Context {
   invariants: readonly PInvariant[] | null;
   /** That result's report, for the two canonical count lines. */
   invariantReport: string | null;
+  /**
+   * Whether {@link invariants} came from a run that actually unioned the semiflows. A query's
+   * run asks `'auto'`, which *skips* the union whenever the basis is complete, and
+   * {@link collectInvariants} needs the union's non-negative form. Without this flag the cache
+   * hands it a basis-only list and the budget semiflow is reported missing on a net that has
+   * one — see the comment in `collectInvariants`, and `nested agent` in
+   * `tests/verify/invariants.test.ts`.
+   */
+  invariantsUnionedSemiflows: boolean;
 }
 
 /**
@@ -446,6 +455,7 @@ async function query(
     if (ctx.invariants === null && result.invariants.length > 0) {
       ctx.invariants = result.invariants;
       ctx.invariantReport = result.report;
+      ctx.invariantsUnionedSemiflows = (countFrom(result.report, SEMIFLOW_LINE) ?? 0) > 0;
     }
     return {
       verdict: result.verdict.type,
@@ -1266,7 +1276,12 @@ async function runBudget(ctx: Context): Promise<void> {
   // structural fact, and its absence is not a violation but a gap in what can be proven.
   // It is the one part of this family the solver-free route cannot supply — a P-invariant is
   // a statement about the incidence matrix, not about the reachable set.
-  const invariants = ctx.invariants ?? (await collectInvariants(ctx));
+  // `collectInvariants`, not `ctx.invariants ??`: the `placeBound` query above may have filled
+  // the cache from an `'auto'` run, and only `collectInvariants` knows whether such a list
+  // carries the semiflow union this search needs. Short-circuiting here made the law's presence
+  // a function of whether `graphBound` answered — the same net reported it at a class cap large
+  // enough to close and missing at one that truncated.
+  const invariants = await collectInvariants(ctx);
   const semiflow = invariants === null ? null : budgetSemiflowOf(invariants, ctx.flat, ctx.map, k);
   const semiflowDecision: Decision = {
     verdict: semiflow === null ? 'unknown' : 'proven',
@@ -1562,7 +1577,17 @@ const INVARIANT_SOLVER_TIMEOUT_MS = 1;
  * the process.
  */
 async function collectInvariants(ctx: Context): Promise<readonly PInvariant[] | null> {
-  if (ctx.invariants !== null) return ctx.invariants;
+  // A cache filled by {@link query} came from a `'auto'` run, and `'auto'` skips the union
+  // whenever the basis is complete — the very case this run exists for. Reusing it then reports
+  // "no law giving _budget and every X/running the same positive weight" on a net that has one,
+  // and *which* it reports depends on whether some other family happened to need the solver
+  // first: measured, a nested agent at `maxToolCalls` 3 loses the law at the default class cap
+  // and keeps it at a cap large enough to close, on one net with one marking. So the cache is
+  // honoured only when it carries the union, or when semiflows are switched off and the basis
+  // is all there is to have.
+  if (ctx.invariants !== null && (ctx.invariantsUnionedSemiflows || !ctx.semiflowInvariants)) {
+    return ctx.invariants;
+  }
   // Same guard as {@link query}: this *is* the pipeline, so on a net above the ceiling it is
   // the call that would abort the process.
   if (ctx.smtRefusal !== null) return null;
@@ -1596,16 +1621,17 @@ async function collectInvariants(ctx: Context): Promise<readonly PInvariant[] | 
     // the pipeline still runs and the route reports `unavailable`, which is exactly what
     // `no-z3.test.ts` pins. Both call sites disable enumeration, so this guards against a
     // future default answering here without the pipeline rather than against today.
-    if (result.invariants.length === 0 && result.route !== 'smt') return null;
+    if (result.invariants.length === 0 && result.route !== 'smt') return ctx.invariants;
     ctx.invariants = result.invariants;
     ctx.invariantReport = result.report;
+    ctx.invariantsUnionedSemiflows = (countFrom(result.report, SEMIFLOW_LINE) ?? 0) > 0;
     return result.invariants;
   } catch (e) {
     // Same rule as {@link query}: an invariant pipeline that failed is `null`, a bug is not.
     // This catch was bare, so a `TypeError` here emptied the report's structural section and
     // took the budget family's semiflow with it, silently.
     rethrowIfBug(e);
-    return null;
+    return ctx.invariants;
   }
 }
 
@@ -1687,6 +1713,7 @@ export async function verifyCompiled(
     onCheck: options.onCheck,
     invariants: null,
     invariantReport: null,
+    invariantsUnionedSemiflows: false,
   };
 
   // Cheapest first, so a streamed run says something useful before the expensive family.

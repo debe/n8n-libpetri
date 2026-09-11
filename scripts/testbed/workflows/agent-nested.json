@@ -1,0 +1,233 @@
+{
+  "name": "Agent · Nested Agents",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "when-clicking-‘execute-workflow’",
+      "name": "When clicking ‘Execute workflow’",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "Delegate the arithmetic to the Sub Agent, then answer.",
+        "hasOutputParser": false,
+        "needsFallback": false,
+        "options": {
+          "maxIterations": 4
+        }
+      },
+      "id": "research-agent",
+      "name": "Research Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "answer",
+              "type": "string",
+              "value": "={{ $json.output }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "answer",
+      "name": "Answer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        360,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "stub-model",
+          "mode": "list",
+          "cachedResultName": "stub-model"
+        },
+        "options": {},
+        "responsesApiEnabled": false
+      },
+      "id": "outer-chat-model",
+      "name": "Outer Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -100,
+        220
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "PLACEHOLDER",
+          "name": "Stub OpenAI"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "calculator",
+      "name": "Calculator",
+      "type": "@n8n/n8n-nodes-langchain.toolCalculator",
+      "typeVersion": 1,
+      "position": [
+        60,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Delegate an arithmetic question to a second agent, which has its own tools.",
+        "text": "={{ $fromAI('query', 'the arithmetic question to answer', 'string') }}",
+        "hasOutputParser": false,
+        "needsFallback": false,
+        "options": {
+          "maxIterations": 3
+        }
+      },
+      "id": "sub-agent",
+      "name": "Sub Agent",
+      "type": "@n8n/n8n-nodes-langchain.agentTool",
+      "typeVersion": 3,
+      "position": [
+        240,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "stub-model",
+          "mode": "list",
+          "cachedResultName": "stub-model"
+        },
+        "options": {},
+        "responsesApiEnabled": false
+      },
+      "id": "inner-chat-model",
+      "name": "Inner Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        140,
+        440
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "PLACEHOLDER",
+          "name": "Stub OpenAI"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "inner-calculator",
+      "name": "Inner Calculator",
+      "type": "@n8n/n8n-nodes-langchain.toolCalculator",
+      "typeVersion": 1,
+      "position": [
+        340,
+        440
+      ]
+    }
+  ],
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Research Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Research Agent": {
+      "main": [
+        [
+          {
+            "node": "Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outer Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Research Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculator": {
+      "ai_tool": [
+        [
+          {
+            "node": "Research Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sub Agent": {
+      "ai_tool": [
+        [
+          {
+            "node": "Research Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inner Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Sub Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inner Calculator": {
+      "ai_tool": [
+        [
+          {
+            "node": "Sub Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

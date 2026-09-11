@@ -19,7 +19,8 @@
 import { flatten } from 'libpetri/verification';
 import { compile } from '../../src/compiler/index.js';
 import {
-  conn, diamond, fanOut, linear, loopOverItems, multiProducer, node, switch20, twoTriggers, workflow, failurePolicy,
+  agentNested, conn, diamond, fanOut, linear, loopOverItems, multiProducer, node, switch20,
+  twoTriggers, workflow, failurePolicy,
 } from '../fixtures/workflows.js';
 import {
   DEFAULT_MAX_CLASSES, alternativeEntryReach, effectiveMaxClasses, producersOf, verify, verifyCompiled,
@@ -70,6 +71,38 @@ describeZ3('verify: properties', () => {
       // VER-007 is on by default and the encoder was handed more than the null-space basis.
       expect(report.invariants.encoded).toBeGreaterThanOrEqual(report.invariants.basis);
       expect(report.invariants.semiflowsEncoded).toBeGreaterThan(0);
+    });
+
+    it('reports the same semiflow whether or not the class cap let the graph close', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // A P-invariant is a statement about the incidence matrix, so it cannot depend on how
+      // many state classes the enumeration was allowed to keep. It did: `runBudget` asks
+      // `graphBound` first and falls back to an SMT query, and that query's run asks
+      // `semiflowInvariants('auto')` — which *skips* the union whenever the basis is complete.
+      // Its invariants were then cached and reused for this search, so the law was reported
+      // present on a run whose graph closed and missing on a run of the same net whose graph
+      // truncated. `agentNested` is the fixture that made it visible: the first one big enough
+      // to truncate at the default cap.
+      const small = await verify(agentNested, { ...base, properties: ['budget'], maxClasses: 2_000 });
+      const large = await verify(agentNested, { ...base, properties: ['budget'] });
+      expect(small.stateSpace.complete).toBe(false);
+      expect(large.stateSpace.complete).toBe(true);
+      expect(small.invariants.budgetSemiflow, digest(small)).not.toBeNull();
+      expect(small.invariants.budgetSemiflow).toBe(large.invariants.budgetSemiflow);
+      expect(small.invariants.semiflowsEncoded).toBe(large.invariants.semiflowsEncoded);
+    });
+
+    it('covers both levels of a nested agent in one law', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // The claim nesting is really about: the budget unit is conserved *across* the levels,
+      // not per level. An agent used as another agent's tool holds its unit on `B/routed_req`
+      // between its request and `B_done_req`, exactly as the agent above it holds one on
+      // `A/routed_req` — so one conservation law spans both rounds, and z3 validates it.
+      const report = await verify(agentNested, { ...base, properties: ['budget'] });
+      const semiflow = report.invariants.budgetSemiflow;
+      expect(semiflow, digest(report)).not.toBeNull();
+      for (const local of ['id:A/running', 'id:A/routed_req', 'id:B/running', 'id:B/routed_req']) {
+        expect(semiflow, `${local} is not in the semiflow`).toContain(local);
+      }
+      expect(report.checks.find((c) => c.subject.kind === 'net')!.verdict).toBe('proven');
     });
   });
 
