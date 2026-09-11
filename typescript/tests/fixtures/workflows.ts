@@ -336,9 +336,9 @@ export const agentAssumedRounds = workflow('agentAssumedRounds', [
  *
  * A tool's outcome is not a main edge but its agent's `A/response`, so only three of the four
  * actions mean anything on one: `retry` re-runs it, `stop` halts the execution, and `continue`
- * is n8n's own default for a failing tool (`workflow-execute.ts`: "AI tools default to
- * continue-on-fail so the agent receives the error as a tool response"). `route` has nowhere to
- * go and the compiler refuses it.
+ * is n8n's own default for a failing tool — `workflow-execute.ts` continues an `ai_tool` node so
+ * the agent receives the error as its tool response. `route` has nowhere to go and the compiler
+ * refuses it.
  */
 export function agentToolPolicy(executionPolicy: NodeDescription['executionPolicy']): WorkflowDescription {
   return workflow('agentToolPolicy', [

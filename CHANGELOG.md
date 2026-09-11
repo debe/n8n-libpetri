@@ -69,7 +69,7 @@ All notable changes to this project are documented here. The format follows
   n8n the way production does — `n8n start` enqueues onto Redis, a separate `n8n worker`
   dequeues and executes — and gives the worker the same `--import` preload, because in queue
   mode the main process never constructs a scheduler for a queued execution
-  (`WorkflowExecute.processRunExecutionData()` is called at `job-processor.ts:275`, in the
+  (`WorkflowExecute.processRunExecutionData()` is called at `job-processor.ts`, in the
   worker). The launcher refuses to continue if the worker's log does not carry
   `scheduler registered`: a worker without the engine would run n8n's own stack loop while the
   main process's log still said it was installed.
@@ -86,7 +86,7 @@ All notable changes to this project are documented here. The format follows
   Three things it took, each found by hitting it: the worker needs its own
   `N8N_RUNNERS_BROKER_PORT` (it exits on the main process's 5679); a *manual* execution is not
   enqueued at all without `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true`
-  (`workflow-runner.ts:299`), so the first attempt measured the main process while calling
+  (`workflow-runner.ts`), so the first attempt measured the main process while calling
   itself queue mode; and n8n warns that scaling mode is not officially supported with sqlite,
   which the testbed keeps and `docs/testbed.md` records rather than hides.
 
@@ -191,9 +191,9 @@ All notable changes to this project are documented here. The format follows
   the child by a `__WORKFLOW_ID:<name>__` placeholder the seeder resolves, so nothing under
   `workflows/` hardcodes instance state.
 
-  70 seconds is the point. `Wait.node.ts` suspends only past a cliff — *"If wait time is shorter
-  a little over a minute — and under it holds the execution on a timer rather than suspending.
-  The node's own `executionTime` is what tells the two apart, measured both ways: a 4-second
+  70 seconds is the point. `Wait.node.ts` suspends only past a threshold a little over a minute;
+  under it the node holds the execution on a timer rather than suspending. The node's own
+  `executionTime` is what tells the two apart, measured both ways: a 4-second
   child left `Call The Child` at **4,036 ms**, held for the whole wait; a 70-second child left it
   at **0 ms**, suspended and re-run on resume. At 70 s the parent goes to
   `putExecutionToWait(WAIT_INDEFINITELY)` and `WaitTracker.resumeParentExecution` wakes it.

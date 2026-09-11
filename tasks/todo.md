@@ -274,7 +274,7 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
 - [x] **Queue mode: the engine reaches the worker.** *Closed 2026-09-11.*
       `scripts/testbed/n8n-testbed.sh --queue` boots a producer and a worker against Redis and
       gates on `scheduler registered` in the *worker* log, because that is the only process that
-      constructs a scheduler for a queued execution (`job-processor.ts:275`). `engine entered`
+      constructs a scheduler for a queued execution (`job-processor.ts`). `engine entered`
       appears once in the worker log and zero times in the main log; five workflows are
       data-identical to their `regular`-mode runs; and a suspended execution came back as a
       *different job id* on the same execution, which is the marking round trip through Redis

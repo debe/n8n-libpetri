@@ -214,9 +214,9 @@ the agent never gets as far as a second iteration.
 
 Only three of the four actions mean anything on a tool. A tool's outcome is its agent's
 `A/response`, not a main edge, so `route` has nowhere to go and the compiler refuses it by name.
-`continue` is n8n's own default for a failing tool — `workflow-execute.ts`: *"AI tools default to
-continue-on-fail so the agent receives the error as a tool response"* — and `retry` and `stop`
-behave as they do anywhere else.
+`continue` is n8n's own default for a failing tool: it continues an `ai_tool` node so the agent
+receives the error as its tool response (`workflow-execute.ts`). `retry` and `stop` behave as
+they do anywhere else.
 
 **Measured, one leg each:**
 
@@ -544,7 +544,7 @@ executes. Production usually does not: `EXECUTIONS_MODE=queue` makes `n8n start`
 puts a job on Redis, and a separate `n8n worker` process consumes it. **That is where the engine
 has to be**, because in queue mode the main process never constructs a scheduler for a queued
 execution — `WorkflowExecute.processRunExecutionData()` is called in the worker, at
-`packages/cli/src/scaling/job-processor.ts:275`.
+`packages/cli/src/scaling/job-processor.ts`.
 
 So the worker gets the same `--import` preload the main process gets, and the launcher refuses
 to continue if the worker's log does not carry `scheduler registered`. A worker without it would
@@ -557,7 +557,7 @@ Three things had to be true, and each was found by hitting it:
    `N8N_RUNNERS_BROKER_PORT`, default 5679, and the main process already has it — the worker
    exits with *"n8n Task Broker's port 5679 is already in use"*. The launcher gives it
    `--port + 2`.
-2. **A manual execution is not enqueued at all.** `workflow-runner.ts:299` enqueues only when
+2. **A manual execution is not enqueued at all.** `workflow-runner.ts` enqueues only when
    `mode === 'queue' && executionMode !== 'manual'`, unless
    `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true`. Everything the testbed drives is a manual
    execution, so without that flag the main process runs the workflow in-process and the worker
@@ -634,7 +634,7 @@ are in different packages:
 | constant | value | where |
 | --- | --- | --- |
 | the Wait node's hold-vs-suspend threshold | `65000` | `nodes-base/nodes/Wait/Wait.node.ts:596` |
-| the agent tool's poll-vs-human threshold | `WAIT_POLL_ELIGIBLE_MS = 60_000` | `cli/src/modules/agents/tools/workflow-tool-factory.ts:87` |
+| the agent tool's poll-vs-human threshold | `WAIT_POLL_ELIGIBLE_MS = 60_000` | `cli/src/modules/agents/tools/workflow-tool-factory.ts` |
 
 `isPollableWait` is `waitTill - now <= 60_000` (`:784`). The Wait node computes `waitTill` and
 then, if the remaining wait is under 65 s, blocks in-process on a `setTimeout` and never suspends
@@ -662,8 +662,8 @@ something else sets a short `waitTill` — `Form` and the `sendAndWait` operatio
 have to be set under a minute. That is a human-approval *timeout*, not work finishing.
 
 This is the default configuration rather than a corner: `backgroundTasksEnabled` defaults to `false`
-(`@n8n/config/src/configs/agents.config.ts:80`), so the background-job path between the two is
-off, and `supportsHitl` defaults to `true` (`workflow-tool-factory.ts:994`).
+(`@n8n/config/src/configs/agents.config.ts`), so the background-job path between the two is
+off, and `supportsHitl` defaults to `true` (`workflow-tool-factory.ts`).
 
 ### The same case under the net
 

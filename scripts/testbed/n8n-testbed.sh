@@ -176,7 +176,7 @@ if [ $QUEUE -eq 1 ]; then
              # run's jobs sit in db 9 until something flushes them.
              QUEUE_BULL_REDIS_DB=9
              # Without this a *manual* execution never reaches the queue at all:
-             # `workflow-runner.ts:299` enqueues only when
+             # `workflow-runner.ts` enqueues only when
              # `mode === 'queue' && executionMode !== 'manual'`, so the main process runs it
              # in-process and the worker sits idle. Everything the testbed drives — `run.mjs`,
              # the editor's Execute button — is a manual execution, so without the flag the
@@ -224,7 +224,7 @@ fi
 # The worker gets the *same* preload, for the same reason the main process does and with more at
 # stake: in queue mode the main process hands the execution to Redis and never constructs a
 # scheduler, so `WorkflowExecute.processRunExecutionData()` is called only here
-# (`job-processor.ts:275`). A worker without the preload would run n8n's own stack loop while
+# (`job-processor.ts`). A worker without the preload would run n8n's own stack loop while
 # the main process's log still said `scheduler registered` — the exact failure the preload's
 # "no fallback" rule exists to prevent, one process over.
 if [ $QUEUE -eq 1 ]; then
