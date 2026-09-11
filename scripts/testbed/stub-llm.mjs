@@ -17,10 +17,9 @@
  *   which ends the agent.
  *
  * One exception, and it is the point of the budget workflow: a prompt carrying the marker
- * `[stub:loop]` makes the stub **never** stop — every call answers with tool calls again. That
- * is the failure users report against the real thing ("if a tool returns an unexpected result
- * or if the agent gets 'confused' … it enters an infinite loop—calling the same tools
- * repeatedly"), reproduced deterministically and offline. The marker travels in the workflow's
+ * `[stub:loop]` makes the stub **never** stop — every call answers with tool calls again. A
+ * model that never decides it is finished is the shape a call bound exists for, and this
+ * reproduces it deterministically and offline. The marker travels in the workflow's
  * own prompt text, so the workflow is self-describing in the editor and no second credential,
  * env var or seed change is needed to arm it.
  *

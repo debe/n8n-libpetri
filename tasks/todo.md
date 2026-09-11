@@ -679,52 +679,14 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       `maxTries` + `waitBetweenTries` (ADR 0009 §1). If it holds up in use here it is a candidate
       for n8n's own schema, which is the outcome that would make the layering pay off beyond this
       engine
-- [ ] **The tool-call budget is missing from n8n's *new* agent runtime too, so the ask is not a
-      legacy-node oversight.** `packages/@n8n/agents` (in the pinned tree at `441970b`, ~31.7k
-      lines) is a second scheduler: `runtime/loop/agent-runtime.ts:857` is
-      `for (; iterationCount < maxIterations; iterationCount++)` with `MAX_LOOP_ITERATIONS = 30`
-      (`:143`), `runtime/tools/tool-call-executor.ts` batches a turn's calls by a `concurrency`
-      field (default 1) under `Promise.allSettled`, and `runtime/tools/delegate-sub-agent-tool.ts`
-      fans out to sub-agents at `DEFAULT_SUB_AGENT_MAX_CHILDREN = 10`. Three observations, each
-      one an argument for the same upstream change:
-      - **Rounds are bounded; tool calls are not.** `runtime/loop/execution-counter.ts` counts
-        them and says so outright — "Aggregate execution counters are best-effort instrumentation
-        and must never affect agent execution." The only `maxToolCalls` in the tree is the OpenAI
-        node forwarding `max_tool_calls` to the vendor API, and a post-hoc *eval grader*
-        (`@n8n/instance-ai/evaluations/computer-use/graders/trace.ts:176`). The community request
-        for a runtime bound — "it enters an infinite loop—calling the same tools repeatedly",
-        May 2026, 20+ replies — is open and unanswered. `A/calls` is that bound, and divergence
-        \#25 is the same gap in the classic node
-      - **Delegation depth is capped at 1 by a regex on a path string**:
-        `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/`
-        (`runtime/tools/sub-agent-task-path.ts`), and `maxChildren` is documented as limiting
-        "parallelism, not the total number of delegated tasks". A recursion bound expressed as a
-        parse failure is the shape ν-nets would carry as a marking (§4, Route B). The classic
-        node has no such cap, and depth 2 over it is now demonstrated end to end here — compiled,
-        run in the live server under both engines with identical data, and with one budget
-        semiflow spanning both levels (`docs/testbed.md`, *Agent · Nested Agents*)
-      - **Exhaustion presents as completion**: `agent-runtime.ts:975` sets
-        `lastFinishReason = 'max-iterations'` and then calls `sink.finishComplete(...)`, leaving
-        three downstream call sites to check the string. Issue #22771 (Dec 2025, fixed in
-        PR #23218) was the classic node making that mistake visibly — max iterations routing to
-        the Success output under `continueErrorOutput`. `A_calls_out` and `A_rounds_out` are
-        designed terminals precisely so exhaustion is a marking the author routes, not a
-        finish-reason a consumer may forget to read
-      - **A waiting sub-workflow is either a blocked turn or a human button, never background
-        work.** Two constants in two packages, and they do not overlap: `Wait.node.ts:596`
-        blocks in-process under `65000` ms and never suspends, while the agent tool's
-        `WAIT_POLL_ELIGIBLE_MS = 60_000` (`tools/workflow-tool-factory.ts:87`) polls only a
-        `waitTill` within 60 s. Measured on their runtime: a 30 s child blocked the agent's turn
-        for 30.1 s; a 70 s child suspended in 0.7 s to a `workflow_wait` card with "Check for the
-        result" / "Stop waiting". The poll path cannot fire for a Wait node at all. Ours is a
-        marking that resumes on its own — across a worker-process boundary, at that
-        (`docs/testbed.md`)
-      Not a blocker and not reachable through our seam — `@n8n/agents` does not go through
-      `WorkflowExecute.processRunExecutionData()`, so it is a separate integration, and it is
-      Preview with queue mode unsupported. Reachable from the testbed for *measurement* though:
-      `N8N_ENABLED_MODULES=agents` plus the existing stub-OpenAI credential drives it, which is
-      how the wait-cliff numbers above were taken. Recorded because it is the strongest evidence
-      the budget/exhaustion-routing ask is real: the same gap survived a from-scratch rewrite
+- [ ] **A runtime bound on an agent's tool calls, and an exhaustion an author can route.** The
+      round budget `A/rounds` mirrors the agent node's own `maxIterations`; the call budget
+      `A/calls` has no n8n counterpart, so it is the scheduler's own number rather than a
+      fallback for one (divergence #25). Two things would make it unnecessary: a declared
+      per-agent call bound, and an exhaustion that presents as an outcome a workflow can route
+      on rather than as a completion carrying a reason field. `A_calls_out` and `A_rounds_out`
+      are designed terminals for exactly that reason. Detailed observations are in the untracked
+      `notes/n8n-agent-runtime.md`
 
 ### 5. Harness and CI
 

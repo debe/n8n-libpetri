@@ -157,14 +157,14 @@ describe('the per-attempt deadline', () => {
   });
 });
 
-describe("the error output catches a thrown failure, which n8n's own does not", () => {
+describe('the error output catches a thrown failure as well as a per-item one', () => {
   /** `continueErrorOutput` fixture: Trigger -> A; A.0 -> B, A.1 (the appended error output) -> Err. */
   const throws = () => { throw new Error('blew up'); };
 
-  it('n8n sends a thrown failure down output 0, not the error output', async () => {
-    // The baseline, and it surprises people: `handleNodeErrorOutput` sorts *per-item* errors out
-    // of an otherwise successful run, so a node that actually throws is continued down output 0
-    // with its input passed through. The error branch never fires.
+  it('n8n sends a thrown failure down output 0, which is the baseline to compare against', async () => {
+    // n8n's error output is for *per-item* errors: `handleNodeErrorOutput` sorts them out of an
+    // otherwise successful run, so a node that throws outright is continued down output 0 with
+    // its input passed through, and the error branch does not fire.
     const r = await execute(continueErrorOutput, { A: throws }, { startItems: START });
     expect(ranNodes(r.calls)).toEqual(['Trigger', 'A', 'B']);
     expect(r.runData.Err).toBeUndefined();

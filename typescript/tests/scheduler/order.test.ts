@@ -3,7 +3,7 @@
  * linear chain and the IF/Merge diamond produce the same `runData` shape (task data with
  * `source`, items with `pairedItem`) and the same host-call / hook order as
  * `stack-scheduler.ts` — the expected per-node sequence is `expectedSuccessSequence` in
- * `support.ts`, read off that file line by line. The stack machinery the net replaces
+ * `support.ts`, read off that file line by line. The stack machinery the net stands in for
  * (`isExecutionStackNotEmpty`, `popExecutionStack`, `addNodeToBeExecuted`) is the only
  * difference: the entries are popped once up front, and `addNodeToBeExecuted` is never
  * called (the successors' entries land with `X_run`'s own outputs, next cycle).

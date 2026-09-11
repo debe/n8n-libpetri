@@ -135,7 +135,7 @@ export function ranNodes(calls: readonly string[]): string[] {
  * The per-node host-call sequence of a successful run, read off `stack-scheduler.ts`
  * (n8n `441970b`, patch 0001) with the stack machinery left out (`isExecutionStackNotEmpty`,
  * `popExecutionStack`, `addNodeToBeExecuted` are the loop's own bookkeeping the net
- * replaces). Line numbers refer to that file.
+ * stands in for). Line numbers refer to that file.
  */
 export function expectedSuccessSequence(node: string): string[] {
   return [
@@ -163,7 +163,7 @@ export function expectedSuccessSequence(node: string): string[] {
   ];
 }
 
-/** Every recorded call except the stack machinery the net replaces. */
+/** Every recorded call except the stack machinery the net stands in for. */
 export function withoutStackMachinery(calls: readonly string[]): string[] {
   return calls.filter((c) => !c.startsWith('isExecutionStackNotEmpty') && !c.startsWith('popExecutionStack'));
 }

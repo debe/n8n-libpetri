@@ -4,11 +4,14 @@ Guidance for Claude Code when working in the n8n-libpetri repository.
 
 ## Project overview
 
-n8n-libpetri replaces n8n's intra-workflow scheduler (the `executionLoop` inside
-`WorkflowExecute.processRunExecutionData()`) with a Coloured Time Petri Net engine built on
-[libpetri](https://github.com/debe/libpetri) `typescript/`. n8n keeps node execution,
-persistence, hooks, webhooks and queue mode. There is no n8n source fork: `.n8n/` is a
-gitignored clone at a pinned commit plus two patches under `patches/n8n/`.
+n8n-libpetri is an alternative intra-workflow scheduler for n8n, registered through the seam the
+two patches under `patches/n8n/` add. It models an execution as a Coloured Time Petri Net built
+on [libpetri](https://github.com/debe/libpetri) `typescript/`, so the scheduling model is
+available to analysis as well as to execution. n8n keeps node execution, persistence, hooks,
+webhooks and queue mode. There is no n8n source fork: `.n8n/` is a gitignored clone at a pinned
+commit, and the patches add an extension point rather than changing behaviour — patch 0001
+extracts n8n's existing loop as `StackScheduler` behind a `WorkflowScheduler` interface, patch
+0002 adds the registry. With nothing registered, n8n runs its own loop exactly as before.
 
 The architecture, the model (emission rule, per-node gadget, join gadget, retries, halt,
 budget, marking codec) and the design principles live in the root
@@ -20,7 +23,7 @@ budget, marking codec) and the design principles live in the root
 - One net serves execution and verification. No separate "verification net".
 - The net decides what runs. No host-side dispatch queue, permit gating or scheduler policy.
 - The scheduler runs the net to quiescence and stops it only through `close()`. libpetri's
-  `run(ms, 'close')` is sound (5.0.0) but is *not* n8n's timeout: `shouldStopExecuting()` sets
+  `run(ms, 'close')` is sound but is *not* n8n's timeout: `shouldStopExecuting()` sets
   the `status` / `timedOut` fields the caller reads, and n8n polls it between activations —
   see ADR 0004, "The timeout is n8n's, not the net's".
 - Every n8n behaviour we do not reproduce is recorded in `docs/divergences.md`. No silent skips.

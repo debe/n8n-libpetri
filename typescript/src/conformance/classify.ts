@@ -1,7 +1,7 @@
 /**
  * Which n8n cases exercise the scheduler. The reporting rule (CLAUDE.md): of n8n's
  * execution-engine suite only a small set of cases drives the `executionLoop` that the
- * libpetri engine replaces; the headline is *loop-driving cases passed*, and the far larger
+ * libpetri scheduler stands in for; the headline is *loop-driving cases passed*, and the far larger
  * pure-helper population (`runNode`, `assignPairedItems`, `checkReadyForExecution`, error
  * reporting, contexts, request helpers, …) is stated separately as a regression guard.
  *

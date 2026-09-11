@@ -34,3 +34,6 @@ conformance-results/
 
 # Node-type catalogue, generated from the .n8n clone (see scripts/node-types/)
 .node-types/
+
+# Working notes kept out of the repository (see tasks/todo.md §4b)
+notes/

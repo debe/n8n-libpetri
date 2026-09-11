@@ -1,10 +1,11 @@
 /**
  * n8n-libpetri — the scheduler seam.
  *
- * `PetriScheduler` replaces the `executionLoop:` inside n8n's
- * `WorkflowExecute.processRunExecutionData()` (patch 0001 extracts it as `StackScheduler`
- * behind `WorkflowScheduler`; patch 0002 adds the registry `registerPetriScheduler` plugs
- * into). The action bound to every node's `X_run` transition calls the host's public
+ * `PetriScheduler` is an alternative to the `executionLoop:` inside n8n's
+ * `WorkflowExecute.processRunExecutionData()`, selected through the seam the patches add:
+ * patch 0001 extracts n8n's own loop as `StackScheduler` behind a `WorkflowScheduler`
+ * interface, and patch 0002 adds the registry `registerPetriScheduler` plugs into. One
+ * scheduler is constructed per execution, and with nothing registered it is n8n's. The action bound to every node's `X_run` transition calls the host's public
  * `runNode()` and routes the result into the declared output places (IO-015). Scheduling
  * itself is the net's job (EXEC-002, EXEC-003). The marking codec (`decodeExecutionData` /
  * `encodeMarking`) converts the marking to and from n8n's `nodeExecutionStack` /

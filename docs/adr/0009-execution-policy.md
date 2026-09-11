@@ -172,8 +172,8 @@ draws it and a user can wire it. So the two fields divide cleanly and the pair i
 one node, where `continueRegularOutput` is not: `onError` is a statement about the node's
 **shape**, `onFailure` about its **policy**. A `route` step may then name `'error'`.
 
-**What this buys is something n8n cannot do.** Its error output never catches a thrown failure —
-`handleNodeErrorOutput` runs on the success path and sorts *per-item* errors out of an otherwise
+**What this adds is a thrown failure on the error arc.** n8n's error output carries *per-item*
+errors: `handleNodeErrorOutput` runs on the success path and sorts them out of an otherwise
 successful run, while a node that throws is continued down output 0 with its input passed
 through, by `handleNodeExecutionError`, identically under both continue modes. Measured on the
 `continueErrorOutput` fixture: n8n runs `Trigger, A, B`; `Err` never runs. A chain routes the

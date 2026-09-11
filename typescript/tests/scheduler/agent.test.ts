@@ -309,7 +309,7 @@ describe('the tool-call budget', () => {
 /**
  * An `onFailure` chain on the **tool**, which is the node that calls the flaky service. n8n has
  * `retryOnFail` there and no deadline at any level, so this is the shape where a per-node policy
- * buys an agent something n8n cannot express.
+ * gives an agent a bound n8n expresses at the round level rather than the call level.
  *
  * A tool's outcome is its agent's `A/response`, not a main edge, so only three actions mean
  * anything on one — and the fourth has to be refused rather than compiled into something
@@ -351,7 +351,7 @@ describe('a policy on an agent\'s tool', () => {
   });
 
   it('continue hands the error to the agent as its tool response, which is n8n\'s own default', async () => {
-    // `workflow-execute.ts`: "AI tools default to continue-on-fail so the agent receives the
+    // n8n continues a failing `ai_tool` node by default so the agent receives the
     // error as a tool response", and it surfaces `{ json: { error } }` on the ai_tool channel.
     const r = await execute(agentToolPolicy({ onFailure: [{ action: 'continue' }] }), {
       Agent: asking(),
@@ -424,8 +424,8 @@ describe('a policy on an agent\'s tool', () => {
 
 /**
  * A nested agent. n8n's own runtime caps delegation at one level — `@n8n/agents` parses a
- * sub-agent's task path against `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/`,
- * so a depth-2 path does not fail a check, it fails to parse. Here delegation is the graph, and
+ * task path, whose format admits one level below the root, so a second level is rejected when
+ * that path is parsed rather than by a check written for the purpose. Here delegation is the graph, and
  * a second level is a second round in the same net — no new concept, no new code path.
  */
 describe('an agent that dispatches another agent', () => {
@@ -496,7 +496,7 @@ describe('an agent that dispatches another agent', () => {
     expect(r.runData.Code).toHaveLength(3);
     expect(r.runData.Code![2]!.data).toBeUndefined();
     // `B` is an `ai_tool` execution, so n8n's own rule applies to it exactly as to any other
-    // failing tool (`workflow-execute.ts`: AI tools default to continue-on-fail so the agent
+    // failing tool (n8n continues an `ai_tool` node by default so the agent
     // receives the error as a tool response). The inner agent's exhausted budget is therefore
     // *data* to the outer one, not an execution failure.
     expect(r.runData.B![0]!.executionStatus).toBe('error');

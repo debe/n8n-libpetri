@@ -792,7 +792,7 @@ export function checkHappensBefore(reference: EngineRun, candidate: EngineRun): 
 /**
  * Why an activation's `executionIndex` moved. The register's row **#5** is the umbrella:
  * n8n's total order is a LIFO artifact of a stack it `unshift`s onto and `shift`s from, and
- * this project replaces the total-order assertion with data equivalence plus happens-before
+ * this project uses, in place of the total-order assertion, with data equivalence plus happens-before
  * (`docs/divergences.md` #5, `docs/conformance-m2.md` attributes its two order failures the
  * same way). So an *order-only* difference — data equal, happens-before intact — is
  * attributed to #5, and the mechanism that produced it is named separately: #11 and #12 are

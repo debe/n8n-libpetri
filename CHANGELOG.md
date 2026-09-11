@@ -111,7 +111,8 @@ All notable changes to this project are documented here. The format follows
   response, which answers and completes. **And the conservation law spans both levels**: z3
   validates one `_budget + Σ(running + routed + routed_req) = k` covering `A` and `B` together.
   n8n's own agent runtime caps delegation at one level by *parse failure* —
-  `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/` does not match a depth-2 task path.
+  its task-path format admits one level below the root, so a second level is rejected when that
+  path is parsed.
 
   The cost is real and is stated rather than hidden: two nested agents at `maxToolCalls` 2 close
   in 19,523 state classes, at 3 in 202,164, and at 4 the solver-free route runs out of heap
@@ -177,11 +178,11 @@ All notable changes to this project are documented here. The format follows
   alone, which is what makes the editor draw the arc. The two are therefore allowed together on
   one node (`continueRegularOutput` is not), and a step may name `output: 'error'`.
 
-  This does something n8n cannot: **its error output never catches a thrown failure.**
-  `handleNodeErrorOutput` runs on the success path and sorts *per-item* errors out of an
-  otherwise-successful run; a node that actually throws is continued down output 0 with its
-  input passed through, identically under both continue modes. Measured on the
-  `continueErrorOutput` fixture — n8n runs `Trigger, A, B` and `Err` never runs. A chain sends
+  The two differ in what reaches the error arc. n8n's `handleNodeErrorOutput` runs on the
+  success path and sorts *per-item* errors out of an otherwise-successful run; a node that
+  throws outright is continued down output 0 with its input passed through, identically under
+  both continue modes. Measured on the `continueErrorOutput` fixture — n8n runs `Trigger, A, B`
+  and `Err` never runs. A chain sends
   the same failure, thrown or timed out, down the error arc carrying `{ json: { error } }`, and
   applies the branch inside `record()` so what is recorded is what was routed. Divergence #27
   is rewritten around the measurement.
@@ -191,7 +192,7 @@ All notable changes to this project are documented here. The format follows
   `workflows/` hardcodes instance state.
 
   70 seconds is the point. `Wait.node.ts` suspends only past a cliff — *"If wait time is shorter
-  than 65 seconds leave execution active"* — and under it holds the execution with a `setTimeout`.
+  a little over a minute — and under it holds the execution on a timer rather than suspending.
   The node's own `executionTime` is what tells the two apart, measured both ways: a 4-second
   child left `Call The Child` at **4,036 ms**, held for the whole wait; a 70-second child left it
   at **0 ms**, suspended and re-run on resume. At 70 s the parent goes to
@@ -199,7 +200,7 @@ All notable changes to this project are documented here. The format follows
 
   Both engines at 70 s: legacy 70,161 ms, libpetri 70,143 ms, **data equal**, every payload
   identical. Parity, not advantage — and that is the point, because every resume claim in this
-  project rests on it. The advantage is the sub-cliff case: a node held by `setTimeout` holds its
+  project rests on it. The sub-cliff case is where the two differ: a node held by `setTimeout` holds its
   `_budget` unit for the entire wait, and `executionPolicy.timeoutMs` is the only thing in either
   engine that bounds it. n8n has a second cliff of the same shape in its agent bridge —
   `WAIT_POLL_ELIGIBLE_MS = 60_000`, under which it polls the database every two seconds and over
@@ -208,21 +209,21 @@ All notable changes to this project are documented here. The format follows
   service. Only three of the four actions mean anything there: a tool's outcome is its agent's
   `A/response` rather than a main edge, so `route` has nowhere to go and the compiler now refuses
   it by name instead of leaving the author to decode an out-of-range index. `continue` is n8n's
-  own default for a failing tool (`workflow-execute.ts`: *"AI tools default to continue-on-fail so
-  the agent receives the error as a tool response"*), and `retry` and `stop` behave as anywhere.
+  own default for a failing tool (n8n continues an `ai_tool` node so
+  the agent receives the error as its tool response), and `retry` and `stop` behave as anywhere.
 
   `timeoutMs` is the half n8n has at **no** level. Measured in a live n8n against a service that
   never answers, with the workflow's own `executionTimeout` at 20 s because that is n8n's only
   bound here: n8n's leg is **canceled at 20,083 ms** with the agent never recorded and nothing
   downstream run; the net's is **success at 3,592 ms**, the tool alone marked
   `error — "Attempt 1 of \"Slow_Service\" did not finish within 3000 ms and was abandoned"`, the
-  agent answering from that error and `Answer` running. Same workflow, same hung service: n8n's
-  bound takes the execution with it, ours loses one tool call.
-- **The agent that will not stop** (`scripts/testbed/workflows/agent-budget-showcase.json`), the
+  agent answering from that error and `Answer` running. Same workflow, same hung service, two
+  bounds at different scopes: n8n's ends the execution, the per-tool one ends one tool call.
+- **An agent that keeps asking** (`scripts/testbed/workflows/agent-budget-showcase.json`), the
   one shape where the tool-call budget of divergence #25 is visible. Its prompt carries a
   `[stub:loop]` marker that makes the testbed stub answer every call with tool calls and never
-  with `stop` — the failure users report against the real thing ("it enters an infinite
-  loop—calling the same tools repeatedly") made deterministic and offline — and the agent
+  with `stop` — a model that never decides it is finished, made deterministic and offline — and
+  the agent
   declares `onError: continueErrorOutput` with
   `executionPolicy: { maxToolCalls: 6, onFailure: [{ action: 'route', output: 'error' }] }`.
 
@@ -231,8 +232,8 @@ All notable changes to this project are documented here. The format follows
   caps *rounds*, and a model may request any number of calls in one — after **30 model calls and
   60 tool executions**, in 378 ms. On the net it ends on `Tool-call budget (6) reached` after
   **4 model calls and 6 tool executions**, in 579 ms. Both take the same declared error branch
-  and both finish the execution as `success`; what differs is the price of finding out, and in a
-  real workflow those 60 are billed API calls. `tests/scheduler/agent.test.ts` pins the same
+  and both finish the execution as `success`; what differs is how much work it takes to get
+  there, and against a real model those 60 calls are 60 requests. `tests/scheduler/agent.test.ts` pins the same
   mechanism against `FakeHost` without a server.
 
   Two honest differences fall out and are recorded rather than smoothed over. The node's
@@ -521,8 +522,8 @@ All notable changes to this project are documented here. The format follows
   mapping that landed.
 
 - **Nodes run concurrently.** The `_budget` place is seeded with `k` unit tokens, so up to `k`
-  nodes whose inputs are ready run at the same time — the whole point of replacing a loop that
-  runs one node at a time. Two independent 500 ms HTTP calls now take ~500 ms, not ~1 s:
+  nodes whose inputs are ready run at the same time, and `k` is a declared number rather than a
+  property of the control flow. Two independent 500 ms HTTP calls take ~500 ms rather than ~1 s:
 
   ```ts
   registerPetriScheduler({ setWorkflowSchedulerFactory, nodeHelpers, StackScheduler, budget: 4 });

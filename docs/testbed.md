@@ -82,8 +82,8 @@ built file; rebuilding from the patched source can only make that leg more corre
 ## The nine workflows
 
 All nine set `settings.executionOrder: "v1"`. Without it `PetriScheduler` delegates straight to
-n8n's `StackScheduler` (divergence #3) and the testbed would silently demonstrate the thing it
-replaces.
+n8n's `StackScheduler` (divergence #3), and the testbed would be measuring n8n's own loop while
+reporting on the net.
 
 ### Concurrency Showcase — 13 nodes
 
@@ -141,10 +141,9 @@ Calculator       --ai_tool---------->   Confused Agent
 Fact_Lookup      --ai_tool---------->   Confused Agent
 ```
 
-The agent that will not stop. Its prompt carries the marker `[stub:loop]`, which makes
+An agent that keeps asking. Its prompt carries the marker `[stub:loop]`, which makes
 `stub-llm.mjs` answer **every** call with tool calls and never with `finish_reason: "stop"` —
-the failure users report against the real thing ("if a tool returns an unexpected result or if
-the agent gets 'confused' … it enters an infinite loop—calling the same tools repeatedly"),
+a model that never decides it is done, which is the shape a call bound exists for,
 made deterministic and offline. The marker travels in the workflow's own prompt, so nothing
 outside the workflow arms it.
 
@@ -161,8 +160,8 @@ field alone — and `onFailure` declares the *policy* that reaches it. This is t
 separates, in the one shape where the difference is visible: n8n has no tool-call budget to run
 out of, so without the policy there would be nothing to route.
 
-`maxIterations` is deliberately left at n8n's own default of 30, because the point is that it is
-the wrong bound: it caps *rounds*, and a model may request any number of calls in one.
+`maxIterations` is deliberately left at n8n's own default of 30, because the two bound different
+things: it caps *rounds*, and a model may request any number of calls within one round.
 
 **Measured, one manual leg each** (`n8n execute` through `scripts/testbed/run.mjs`; the legacy
 leg came from `diff-engines.sh`, the net leg from a `--daemon` server at k = 4):
@@ -173,8 +172,9 @@ leg came from `diff-engines.sh`, the net leg from a `--daemon` server at k = 4):
 | libpetri k=4 | 4 | **6** | `Tool-call budget (6) reached` | `error` | 579 ms |
 
 Both route the failure to `Budget Exhausted`, and both finish the execution as `success` — the
-declared branch is taken either way. What differs is the price of finding out: **ten times the
-tool calls**, and in a real workflow those are billed API calls, not a local stub.
+declared branch is taken either way. What differs is how much work it takes to get there:
+**ten times the tool calls**, which against a real model rather than a local stub is ten times
+the requests.
 
 Two details worth stating rather than smoothing over:
 
@@ -225,8 +225,8 @@ behave as they do anywhere else.
 | legacy | never completes, status unset | never recorded | **canceled**, `finished: false` | **20,083 ms** |
 | libpetri k=4 | `error` — *"Attempt 1 of \"Slow_Service\" did not finish within 3000 ms and was abandoned"* | `success` | **success** | **3,592 ms** |
 
-Same workflow, same hung service. n8n's only bound is global and it takes the whole execution
-with it; the per-tool deadline loses the tool call and nothing else — the agent receives the
+Same workflow, same hung service, two bounds at different scopes. n8n's applies to the whole
+execution, so it ends the whole execution; the per-tool deadline loses the tool call and nothing else — the agent receives the
 error as its tool response, answers, and `Answer` runs. `tests/scheduler/agent.test.ts` pins the
 same four behaviours against `FakeHost` without a server.
 
@@ -279,9 +279,9 @@ the net holds only the ordering the data forces, so at k=4 it goes first. Nothin
 depends on which, and the data is identical either way — which is the distinction the differ
 draws between a reordering and a difference.
 
-What the net has that n8n's own agent runtime does not: `@n8n/agents` caps delegation at one
-level by **parse failure** — `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/`
-(`runtime/tools/sub-agent-task-path.ts`) does not match a depth-2 task path. Here the depth is
+The two runtimes bound delegation differently. n8n's newer agent runtime identifies a delegated
+task by a path string and accepts one level below the root, so a second level of delegation is
+rejected when that path is parsed rather than by a check written for the purpose. Here the depth is
 the graph, and the bound is a marking at every level: each agent spends its own `A/calls`,
 nothing refunds either, and z3 validates one conservation law spanning both rounds. An inner
 agent that exhausts its budget fails by name *inside itself*, and n8n's own rule for a failing
@@ -305,18 +305,12 @@ The parent cannot know the child's id before the child is seeded, so it carries
 `__WORKFLOW_ID:Waiting Child__` and `seed.mjs` binds it — the same rule as the stub's port and
 the credential: nothing under `workflows/` hardcodes instance state.
 
-**70 seconds is the point, not an accident.** `Wait.node.ts`:
+**70 seconds is the point, not an accident.** n8n's Wait node has a threshold a little over a
+minute: a wait shorter than that is held in process on a timer, and only a longer one suspends
+the execution and writes a `waitTill`. The threshold applies to the computed remaining wait, so
+it governs both the interval and the fixed-time forms of the node.
 
-```js
-if (waitValue < 65000) {
-  // If wait time is shorter than 65 seconds leave execution active because
-  const timer = setTimeout(() => resolve([context.getInputData()]), waitValue);
-}
-// If longer than 65 seconds put execution to wait
-return await this.putToWait(context, waitTill);
-```
-
-Under the cliff n8n **holds the execution active**; over it, it suspends. Measured both ways, and
+Under that threshold n8n **holds the execution active**; over it, it suspends. Measured both ways, and
 the node's own `executionTime` is what tells them apart:
 
 | child waits | `Call The Child` executionTime | what happened |
@@ -333,7 +327,7 @@ payload identical. This leg is parity, not advantage — n8n handles nested wait
 do we. What it establishes is that a suspended parent survives the marking round trip in a real
 server, which every resume claim rests on.
 
-The advantage is next door, and it is the sub-cliff case: a node held by `setTimeout` holds its
+The sub-cliff case is where the two differ: a node held by `setTimeout` holds its
 `_budget` unit for the entire wait, and `executionPolicy.timeoutMs` is the only thing in either
 engine that can bound it (see **Agent · Tool Deadline**). n8n has a second cliff of the same
 shape in its agent bridge — `WAIT_POLL_ELIGIBLE_MS = 60_000`, under which it polls the database
@@ -619,7 +613,7 @@ queue-mode leg on sqlite is n8n running outside its supported configuration, and
 it should be read as a statement about queue mode under load. A Postgres leg is the honest way
 to make that stronger claim and has not been run.
 
-## The agent wait cliff, measured on n8n's own agent
+## How a waiting sub-workflow reaches an agent
 
 ```bash
 N8N_ENABLED_MODULES=agents scripts/testbed/n8n-testbed.sh --daemon
@@ -645,7 +639,7 @@ are in different packages:
 `isPollableWait` is `waitTill - now <= 60_000` (`:784`). The Wait node computes `waitTill` and
 then, if the remaining wait is under 65 s, blocks in-process on a `setTimeout` and never suspends
 at all — for `timeInterval` and `specificTime` alike, since the check is on the computed
-`waitValue`. **So the two thresholds do not overlap**: under 65 s there is no `waiting` execution
+`waitValue`. **The two thresholds therefore do not overlap**: under 65 s there is no `waiting` execution
 for the agent to poll, and at 65 s or more the `waitTill` is already further out than 60 s.
 
 Measured, both sides, one agent with one workflow tool re-pointed between runs:
@@ -662,16 +656,16 @@ second and handed back a card titled `Waiting on "Waiting Child"` with two butto
 **"Check for the result"** and **"Stop waiting"** (`buildWaitCard`, `:823`). A human has to press
 one.
 
-So `WAIT_POLL_ELIGIBLE_MS` cannot fire for a Wait node at all. It is reachable only where
+The poll window therefore does not apply to a Wait node. It is reached where
 something else sets a short `waitTill` — `Form` and the `sendAndWait` operations through
 `configureWaitTillDate`, whose default is `WAIT_INDEFINITELY` and whose `limitWaitTime` would
 have to be set under a minute. That is a human-approval *timeout*, not work finishing.
 
-This is the default configuration and not a corner: `backgroundTasksEnabled` defaults to `false`
+This is the default configuration rather than a corner: `backgroundTasksEnabled` defaults to `false`
 (`@n8n/config/src/configs/agents.config.ts:80`), so the background-job path between the two is
 off, and `supportsHitl` defaults to `true` (`workflow-tool-factory.ts:994`).
 
-### What we do instead
+### The same case under the net
 
 A waiting sub-workflow is a **marking**. The parent's `Call The Child` records
 `executionTime: 0 ms`, the marking is written to `IRunExecutionData`, and the execution resumes
@@ -680,10 +674,10 @@ when the wait elapses — 70,143 ms end to end against legacy's 70,161 ms, every
 **different job id** and completed there (*Queue mode* above), so the marking survives a process
 boundary as well as a suspension.
 
-Nothing blocks and nobody presses a button. That is the difference worth claiming — not that
-n8n's choices are wrong. Blocking a chat turn for thirty seconds is defensible, and so is asking
-a human about a wait measured in hours. What n8n does not have is the third option: the work
-continues without either.
+Nothing blocks and nobody is asked to act. Both of n8n's behaviours are reasonable ones —
+blocking a chat turn for thirty seconds is a fair trade, and asking a person about a wait
+measured in hours is often the right call. Keeping the wait as a marking is a third option, and
+it is available here because the scheduling state is data rather than control flow.
 
 **Be precise about what was compared.** These are two different integration points — n8n's agent
 tool in `modules/agents`, and our classic `Execute Workflow` node under the net. The question

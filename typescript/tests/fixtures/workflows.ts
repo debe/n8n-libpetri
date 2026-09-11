@@ -361,8 +361,8 @@ export function agentToolPolicy(executionPolicy: NodeDescription['executionPolic
  * `B` is therefore the one node that is `isTool` *and* an agent at once, and the two gadgets
  * meet in its `X_run` outcome: the tool branch writes its agent's `A/response`, the request
  * branch writes its own `B/routed_req`. Delegation is two levels deep, which n8n's own agent
- * runtime refuses — `SUB_AGENT_TASK_PATH_PATTERN = /^\/root(?:\/[a-z0-9_]+)?$/` caps a task
- * path at depth 1, by parse failure.
+ * runtime bounds differently: it identifies a delegated task by a path string that admits one
+ * level below the root, so a second level is rejected when that path is parsed.
  */
 export const agentNested = workflow('agentNested', [
   node('Trigger', 'trigger', [0, 0]),

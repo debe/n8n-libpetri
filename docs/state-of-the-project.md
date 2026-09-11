@@ -17,9 +17,17 @@ Every scheduler milestone is complete:
 - The verifier analyses the production net through a state-class graph, with an optional
   Z3/Spacer fallback.
 - Differential and patched-n8n conformance harnesses classify known divergences.
+- A node may declare an execution policy in workflow JSON (ADR 0009): an attempt-indexed
+  `onFailure` chain of `retry` / `route` / `stop` / `continue` steps, and a per-attempt
+  `timeoutMs` that arms libpetri's output timeout. A policy-free node compiles unchanged.
+- An agent used as another agent's tool compiles, runs and verifies. Each level spends its own
+  call budget, and one conservation law covers both.
+- The live testbed boots the real editor with the scheduler installed, in `regular` mode and in
+  queue mode, where a separate worker process executes and the marking round-trips through the
+  database between jobs.
 
-The implementation uses libpetri 5.0.0. Node outcomes route directly from `X_run` for up to
-three connected outputs. Wider fan-outs split routing per output to avoid exponential output
+The implementation requires libpetri 5.1.0 or later (`^5.1.0`, and the lock pins 5.1.0). Node
+outcomes route directly from `X_run` for up to three connected outputs. Wider fan-outs split routing per output to avoid exponential output
 spec flattening. `_halt` is a terminal marker; the old halt-reap phase and `_halted` place no
 longer exist.
 
@@ -33,6 +41,8 @@ longer exist.
 | Verifier | `typescript/src/verify/` | Checks structural and reachability properties on the production net. |
 | Differential harness | `typescript/src/conformance/` | Runs a faithful stack reference and the Petri scheduler against one fake host. |
 | n8n integration | `patches/n8n/` | Adds a scheduler seam and registry to the pinned n8n commit. |
+| Node-type catalogue | `scripts/node-types/` | Reads port counts and `canWait` from n8n's own generated types, so the verify CLI does not guess them. |
+| Live testbed | `scripts/testbed/` | Boots the real n8n server with the scheduler installed, seeds demo workflows, and compares both engines on data and order. |
 
 ## Evidence
 

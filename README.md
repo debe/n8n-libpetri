@@ -9,8 +9,8 @@ n8n executes a workflow by running a scheduling loop over an explicit stack of p
 The loop is compact and effective, and it carries a complete scheduling model: the states a node
 passes through, the condition under which it may run, the number of nodes that may run at once,
 and the conditions under which an execution ends. That model is expressed as control flow and as
-a small number of execution-global fields. It is legible to a reader of the source and available
-to nothing else.
+a small number of execution-global fields — a form a reader of the source can follow, and one
+that tooling cannot easily consult.
 
 n8n-libpetri restates the same model as a coloured time Petri net. n8n retains the editor, the
 workflow format, credentials, node implementations, persistence, webhooks, hooks and queue mode.
@@ -66,7 +66,8 @@ net, and analysability follows from having them.
 
 **Waiting becomes a place.** A join in the net holds one slot per input and fires when the last
 slot is claimed. An edge with no data for this activation claims its slot with an `empty` token,
-so "produced nothing" arrives as a fact. n8n has no such fact to send, so a waiting join needs a
+so "produced nothing" arrives as a fact. A stack of pending entries carries arrivals but not
+absences, so a waiting join there needs a
 recovery pass after the stack drains; the net needs none.
 
 <picture>
@@ -82,7 +83,8 @@ still emits an `empty` token, `B`'s skip passes that empty on, and `Merge` start
 claimed and one holding data.*
 
 **The bound becomes a number.** One node at a time is what keeps `executionError`, `waitTill`
-and `lastNodeExecuted` correct, and nothing declares it. The net declares it as `_budget`, k
+and `lastNodeExecuted` correct, and it holds as a property of the control flow rather than as a
+stated number. The net states it as `_budget`, k
 tokens in one place, and the `budget` property checks the law that follows. Two independent
 500 ms branches take 1,006 ms today and 507 ms at k = 2.
 
@@ -353,7 +355,7 @@ so twelve of the thirteen nodes activate. n8n's loop takes one stack entry at a 
 whatever the marking says may run, which at k = 4 is all four legs. The bars are n8n's own
 per-task clock, at 1:1.*
 
-Besides the clock, the order is what changed — and it is the feature, not a defect:
+Besides the clock, the order is what changed, and that is what a declared budget buys:
 
 ```
 n8n             Fan → Fetch A → Fetch B → Merge AB → Fetch C  → Fetch D → Merge CD → Merge All → …
@@ -395,7 +397,8 @@ the harness cannot see are in [`docs/testbed.md`](docs/testbed.md).
 - An `EngineRequest` action naming a node with no `ai_tool` connection to its agent cannot be
   routed and fails by name (divergence #22). No real agent emits one.
 - An agent may make at most `executionPolicy.maxToolCalls` tool calls per execution, 64 unless
-  declared; n8n has no such bound (divergence #25). Verification explores every round size up to
+  declared. This one is the scheduler's own rather than a fallback for an n8n setting
+  (divergence #25). Verification explores every round size up to
   that budget, so an agent that declares none verifies as truncated, and the report says which
   value to declare. It is declared on the node, **not** in `parameters.options`: n8n rebuilds a
   node's `parameters` from its type's declared options, so the older `options.maxToolCalls`

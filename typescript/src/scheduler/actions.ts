@@ -4,7 +4,7 @@
  * the host is mirrored here, in the same order, on the transition whose firing corresponds
  * to it; the stack machinery (`isExecutionStackNotEmpty`, `popExecutionStack`,
  * `addNodeToBeExecuted`, the sibling sort, the R6 stuck-join fallback) is what the net
- * replaces and is never called.
+ * stands in for, and is never called.
  *
  * Per role (README "Per-node gadget"):
  * - `start` / `start-unmet`: instantaneous; build the node's `IExecuteData` from the input
@@ -644,7 +644,7 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
     if (!executionData.metadata?.nodeWasResumed) {
       await hooks.runHook('nodeExecuteBefore', [executionNode.name, taskStartedData]);
     }
-    // An `onFailure` chain replaces n8n's counter (ADR 0009): every failure lands on this
+    // An `onFailure` chain stands in for n8n's counter (ADR 0009): every failure lands on this
     // attempt's `X/failed_i` and the *step* decides what happens, so the run never consults
     // `getRetryParams` and never records — the terminal step does that, as `X_exhausted` does.
     const [maxTries] = host.getRetryParams(executionData);
