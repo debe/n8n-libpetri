@@ -99,13 +99,17 @@ directory is searched for `putExecutionToWait` — so the answer comes from the 
 ### Live testbed (`scripts/testbed/`)
 
 ```bash
-scripts/testbed/n8n-testbed.sh     # real n8n editor on the net at http://127.0.0.1:5678
-scripts/testbed/diff-engines.sh    # both engines in a live server, compared on data and order
-scripts/testbed/browser-check.sh   # drive the editor, screenshot the canvas
+scripts/testbed/n8n-testbed.sh          # real n8n editor on the net at http://127.0.0.1:5678
+scripts/testbed/n8n-testbed.sh --queue  # EXECUTIONS_MODE=queue: a producer and a worker on Redis
+scripts/testbed/diff-engines.sh         # both engines in a live server, compared on data and order
+scripts/testbed/browser-check.sh        # drive the editor, screenshot the canvas
 ```
 
 The engine reaches a running server through an `--import` preload (`scripts/testbed/preload.mjs`),
-not the vitest shim. It rebuilds `packages/core` when `dist` is older than the patched source,
+not the vitest shim. In queue mode the **worker** gets the same preload and the launcher gates on
+`scheduler registered` appearing in the worker's log: the main process never constructs a
+scheduler for a queued execution, so a worker without the engine would silently run n8n's own
+stack loop. It rebuilds `packages/core` when `dist` is older than the patched source,
 because the server loads `dist` and `planEngineRequest` lives only in the patch. Everything
 runtime is in the gitignored `.testbed/`. See `docs/testbed.md`.
 

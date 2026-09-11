@@ -12,9 +12,18 @@
 #   scripts/testbed/n8n-testbed.sh --seed-only         # boot, seed, stop
 #   scripts/testbed/n8n-testbed.sh --daemon            # boot, seed, return (diff-engines.sh)
 #   scripts/testbed/n8n-testbed.sh --stop              # stop a --daemon instance
+#   scripts/testbed/n8n-testbed.sh --queue             # queue mode: a main and a worker process
 #
 # Flags: --engine=libpetri|legacy  --budget=N  --port=N  --llm-port=N
 #        --fresh (wipe .testbed first)  --no-seed  --no-build  --seed-only  --daemon  --stop
+#        --queue  --redis-port=N
+#
+# `--queue` runs n8n the way production does: `n8n start` enqueues onto Redis and a separate
+# `n8n worker` process dequeues and executes. The engine has to reach that *worker*, because
+# that is where `WorkflowExecute.processRunExecutionData()` is called
+# (`packages/cli/src/scaling/job-processor.ts`) — the main process never constructs a scheduler
+# for a queued execution. Needs a Redis on --redis-port (default 6399); start one with
+#   redis-server --port 6399 --save '' --appendonly no --daemonize yes
 #
 # State lives in .testbed/ (gitignored): the sqlite database under home/, n8n.log, stub-llm.log,
 # ids.json. Nothing is written under .n8n/packages/core/src, which verify-patch.sh destroys.
@@ -25,8 +34,8 @@ N8N_DIR="$ROOT/.n8n"
 TESTBED="$ROOT/.testbed"
 HERE="$ROOT/scripts/testbed"
 
-ENGINE=libpetri; BUDGET=4; PORT=5678; LLM_PORT=5699
-FRESH=0; SEED=1; BUILD=1; SEED_ONLY=0; DAEMON=0; STOP=0
+ENGINE=libpetri; BUDGET=4; PORT=5678; LLM_PORT=5699; REDIS_PORT=6399
+FRESH=0; SEED=1; BUILD=1; SEED_ONLY=0; DAEMON=0; STOP=0; QUEUE=0
 for arg in "$@"; do
   case "$arg" in
     --engine=*)   ENGINE="${arg#--engine=}" ;;
@@ -39,6 +48,8 @@ for arg in "$@"; do
     --seed-only)  SEED_ONLY=1 ;;
     --daemon)     DAEMON=1 ;;
     --stop)       STOP=1 ;;
+    --queue)      QUEUE=1 ;;
+    --redis-port=*) REDIS_PORT="${arg#--redis-port=}" ;;
     -h|--help)    sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (see --help)" >&2; exit 2 ;;
   esac
@@ -52,7 +63,7 @@ die()  { log "error: $*" >&2; exit 1; }
 [ -d "$N8N_DIR/.git" ] || die "$N8N_DIR is not a checkout; run scripts/bootstrap-n8n.sh"
 
 if [ $STOP -eq 1 ]; then
-  for name in n8n stub-llm; do
+  for name in n8n-worker n8n stub-llm; do
     pidfile="$TESTBED/$name.pid"
     [ -f "$pidfile" ] || continue
     pid="$(cat "$pidfile")"
@@ -108,10 +119,11 @@ log "n8n-core carries the scheduler seam and planEngineRequest"
 mkdir -p "$TESTBED/home"
 
 # --- 4. children -------------------------------------------------------------------------------
-STUB_PID=""; N8N_PID=""
+STUB_PID=""; N8N_PID=""; WORKER_PID=""
 cleanup() {
   local code=$?
   trap - EXIT INT TERM
+  [ -n "$WORKER_PID" ] && kill "$WORKER_PID" 2>/dev/null || true
   [ -n "$N8N_PID" ] && kill "$N8N_PID" 2>/dev/null || true
   [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null || true
   wait 2>/dev/null || true
@@ -135,6 +147,29 @@ wait_rest() { # wait_rest <seconds>
   done
 }
 
+QUEUE_ENV=()
+if [ $QUEUE -eq 1 ]; then
+  # A Redis that is not there presents as n8n retrying a connection forever behind a REST API
+  # that never finishes coming up, which `wait_rest` reports 180 s later as "the REST API did
+  # not come up". Say the real thing now.
+  (exec 3<>"/dev/tcp/127.0.0.1/$REDIS_PORT") 2>/dev/null \
+    || die "no Redis on 127.0.0.1:$REDIS_PORT; start one with: redis-server --port $REDIS_PORT --save '' --appendonly no --daemonize yes"
+  QUEUE_ENV=(EXECUTIONS_MODE=queue
+             QUEUE_BULL_REDIS_HOST=127.0.0.1
+             QUEUE_BULL_REDIS_PORT="$REDIS_PORT"
+             # Its own logical database, so a testbed run never reads jobs a previous one left
+             # behind — and `--fresh` wipes the sqlite file but knows nothing about Redis.
+             QUEUE_BULL_REDIS_DB=9
+             # Without this a *manual* execution never reaches the queue at all:
+             # `workflow-runner.ts:299` enqueues only when
+             # `mode === 'queue' && executionMode !== 'manual'`, so the main process runs it
+             # in-process and the worker sits idle. Everything the testbed drives — `run.mjs`,
+             # the editor's Execute button — is a manual execution, so without the flag the
+             # whole leg would measure the main process while calling itself queue mode.
+             OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true)
+  log "queue mode: Redis on 127.0.0.1:$REDIS_PORT (db 9)"
+fi
+
 log "starting the stub LLM on 127.0.0.1:$LLM_PORT"
 STUB_LLM_PORT="$LLM_PORT" node "$HERE/stub-llm.mjs" >"$TESTBED/stub-llm.log" 2>&1 &
 STUB_PID=$!
@@ -151,6 +186,7 @@ log "starting n8n on 127.0.0.1:$PORT (engine=$ENGINE, budget=$BUDGET)"
          N8N_EXECUTION_ENGINE="$ENGINE" N8N_LIBPETRI_BUDGET="$BUDGET" \
          N8N_LIBPETRI_HOOK="$HOOK" \
          N8N_LIBPETRI_RESOLVE_FROM="$N8N_DIR/packages/cli/package.json"
+  [ ${#QUEUE_ENV[@]} -eq 0 ] || export "${QUEUE_ENV[@]}"
   # --import, not NODE_OPTIONS: bin/n8n never re-execs, and NODE_OPTIONS would additionally
   # load the preload into the internal task-runner child, which never runs a scheduler.
   exec node --import "$HERE/preload.mjs" "$N8N_DIR/packages/cli/bin/n8n" start
@@ -164,6 +200,51 @@ if [ "$ENGINE" = libpetri ]; then
   grep -q 'scheduler registered' "$TESTBED/n8n.log" \
     || die "the preload did not register a scheduler; see $TESTBED/n8n.log"
   log "$(grep -m1 'scheduler registered' "$TESTBED/n8n.log")"
+fi
+
+# --- 4b. the worker ----------------------------------------------------------------------------
+# Started after the REST API is up, so the main process has finished running migrations and the
+# worker finds a schema rather than racing it.
+#
+# The worker gets the *same* preload, for the same reason the main process does and with more at
+# stake: in queue mode the main process hands the execution to Redis and never constructs a
+# scheduler, so `WorkflowExecute.processRunExecutionData()` is called only here
+# (`job-processor.ts:275`). A worker without the preload would run n8n's own stack loop while
+# the main process's log still said `scheduler registered` — the exact failure the preload's
+# "no fallback" rule exists to prevent, one process over.
+if [ $QUEUE -eq 1 ]; then
+  log "starting an n8n worker (engine=$ENGINE, budget=$BUDGET)"
+  (
+    cd "$N8N_DIR"
+    export N8N_USER_FOLDER="$TESTBED/home" \
+           N8N_ENCRYPTION_KEY=n8n-libpetri-testbed-key \
+           N8N_DIAGNOSTICS_ENABLED=false N8N_VERSION_NOTIFICATIONS_ENABLED=false \
+           N8N_EXECUTION_ENGINE="$ENGINE" N8N_LIBPETRI_BUDGET="$BUDGET" \
+           N8N_LIBPETRI_HOOK="$HOOK" \
+           N8N_LIBPETRI_RESOLVE_FROM="$N8N_DIR/packages/cli/package.json"
+    # Each n8n process starts its own internal task broker, and the default port is the same
+    # one the main process already took — the worker exits with "n8n Task Broker's port 5679 is
+    # already in use". A real deployment gives each worker host its own broker (or an external
+    # one); here the second port is `--port + 2`, next to n8n's own `--port + 1` default.
+    export N8N_RUNNERS_BROKER_PORT=$(( PORT + 2 ))
+    export "${QUEUE_ENV[@]}"
+    exec node --import "$HERE/preload.mjs" "$N8N_DIR/packages/cli/bin/n8n" worker
+  ) >"$TESTBED/n8n-worker.log" 2>&1 &
+  WORKER_PID=$!
+
+  # The gate. A worker that booted without the engine is worse than one that did not boot.
+  deadline=$(( $(date +%s) + 120 ))
+  until grep -q 'n8n worker is now ready' "$TESTBED/n8n-worker.log" 2>/dev/null; do
+    [ "$(date +%s)" -lt "$deadline" ] || die "the worker did not come up; see $TESTBED/n8n-worker.log"
+    kill -0 "$WORKER_PID" 2>/dev/null || die "the worker exited during startup; see $TESTBED/n8n-worker.log"
+    sleep 1
+  done
+  if [ "$ENGINE" = libpetri ]; then
+    grep -q 'scheduler registered' "$TESTBED/n8n-worker.log" \
+      || die "the worker registered no scheduler; it would run n8n's stack loop. See $TESTBED/n8n-worker.log"
+    log "worker: $(grep -m1 'scheduler registered' "$TESTBED/n8n-worker.log")"
+  fi
+  log "the worker is up"
 fi
 
 # --- 5. seed -----------------------------------------------------------------------------------
@@ -180,6 +261,7 @@ fi
 if [ $DAEMON -eq 1 ]; then
   echo "$N8N_PID" >"$TESTBED/n8n.pid"
   echo "$STUB_PID" >"$TESTBED/stub-llm.pid"
+  [ -n "$WORKER_PID" ] && echo "$WORKER_PID" >"$TESTBED/n8n-worker.pid"
   trap - EXIT INT TERM   # the point of --daemon is that the children outlive this shell
   log "--daemon: n8n (pid $N8N_PID) and the stub LLM (pid $STUB_PID) left running on port $PORT"
   log "stop them with: scripts/testbed/n8n-testbed.sh --stop"

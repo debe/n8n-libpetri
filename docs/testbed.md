@@ -538,6 +538,87 @@ editor frames**, not a smooth screencast: a five-second run yields four or five 
 itself. That is enough for the shape — every branch dispatched at once, one of them ending red,
 the workflow finishing anyway — and every frame is the real editor.
 
+## Queue mode: the engine in the worker
+
+```bash
+redis-server --port 6399 --save '' --appendonly no --daemonize yes
+scripts/testbed/n8n-testbed.sh --queue --daemon
+```
+
+Everything above runs n8n in `regular` mode, where one process both serves the editor and
+executes. Production usually does not: `EXECUTIONS_MODE=queue` makes `n8n start` a producer that
+puts a job on Redis, and a separate `n8n worker` process consumes it. **That is where the engine
+has to be**, because in queue mode the main process never constructs a scheduler for a queued
+execution — `WorkflowExecute.processRunExecutionData()` is called in the worker, at
+`packages/cli/src/scaling/job-processor.ts:275`.
+
+So the worker gets the same `--import` preload the main process gets, and the launcher refuses
+to continue if the worker's log does not carry `scheduler registered`. A worker without it would
+run n8n's own stack loop while the main process's log still said the engine was installed — the
+failure the preload's "no fallback" rule exists to prevent, one process over.
+
+Three things had to be true, and each was found by hitting it:
+
+1. **The worker needs its own task-broker port.** Every n8n process starts an internal broker on
+   `N8N_RUNNERS_BROKER_PORT`, default 5679, and the main process already has it — the worker
+   exits with *"n8n Task Broker's port 5679 is already in use"*. The launcher gives it
+   `--port + 2`.
+2. **A manual execution is not enqueued at all.** `workflow-runner.ts:299` enqueues only when
+   `mode === 'queue' && executionMode !== 'manual'`, unless
+   `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true`. Everything the testbed drives is a manual
+   execution, so without that flag the main process runs the workflow in-process and the worker
+   sits idle — a leg that would have measured `regular` mode while calling itself queue mode.
+   The first run of this did exactly that: `engine entered` appeared in the *main* log and the
+   worker log had none.
+3. **Redis carries a pointer, not the marking.** The job payload is `{ executionId, … }`
+   (`scaling.types.ts`); the worker loads `execution.data` — the whole `IRunExecutionData`, our
+   marking included — from the **database**. So queue mode changes the process topology and
+   nothing about the path ADR 0005 depends on, and *"n8n stays the system of record"* holds
+   unchanged.
+
+### What it proves
+
+Every activation ran in the worker: `engine entered` appears **once in the worker log and zero
+times in the main log** across the whole run. The main log shows only `Enqueued execution N
+(job M)`.
+
+The resume is the part worth having:
+
+```
+Worker started execution 136 (job 6)     Parent Waits On Child, runs to the Wait, suspends
+Worker started execution 137 (job 7)     Waiting Child, its own 70 s Wait, suspends
+Worker started execution 136 (job 8)     the same execution, a different job — resumed
+```
+
+Execution 136 appears twice under **two different job ids**. The marking the codec wrote in job
+6 was persisted, re-enqueued when the wait elapsed, and read back by job 8, which completed the
+execution. That is the marking round trip through Redis and the database rather than through one
+process's memory — and it is the claim every resume in this project rests on.
+
+| workflow | regular k=4 | queue k=4 | data |
+| --- | --- | --- | --- |
+| Concurrency Showcase | 1,346 ms | 1,293 ms | **identical** |
+| Agent · Two Tools | 514 ms | 580 ms | **identical** |
+| Agent · Nested Agents | 134 ms | 133 ms | **identical** |
+| Resilient Fan-Out | 5,091 ms | 5,255 ms | **identical** |
+| Parent Waits On Child | 70,145 ms | 70,306 ms | identical but for the child's execution id |
+
+Same order on every one, and every happens-before edge holds. The last row's only difference is
+`runData['Call The Child'][0].metadata.subExecution.executionId` — the child execution's database
+id, which two runs cannot share; comparing the two `runData` trees with database ids and
+timestamps excluded gives **zero** differences. **This is parity, not an advantage**, and the
+wall clocks are not a result either: the two legs are within noise of each other, which is what
+you would expect when the work is the same and only the process boundary moved.
+
+### The caveat
+
+n8n logs *"Scaling mode is not officially supported with sqlite. Please use PostgreSQL
+instead."* and continues. The testbed keeps sqlite, because the claim being made here is about
+where the engine runs and what survives the round trip, not about database concurrency — but a
+queue-mode leg on sqlite is n8n running outside its supported configuration, and no number from
+it should be read as a statement about queue mode under load. A Postgres leg is the honest way
+to make that stronger claim and has not been run.
+
 ## Caveats
 
 - **Divergence #17 is not reachable here.** Neither workflow uses a `responseMode: responseNode`

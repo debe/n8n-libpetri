@@ -38,6 +38,31 @@ All notable changes to this project are documented here. The format follows
   there are.
 
 ### Added
+- **Queue mode: the engine reaches the worker.** `scripts/testbed/n8n-testbed.sh --queue` runs
+  n8n the way production does — `n8n start` enqueues onto Redis, a separate `n8n worker`
+  dequeues and executes — and gives the worker the same `--import` preload, because in queue
+  mode the main process never constructs a scheduler for a queued execution
+  (`WorkflowExecute.processRunExecutionData()` is called at `job-processor.ts:275`, in the
+  worker). The launcher refuses to continue if the worker's log does not carry
+  `scheduler registered`: a worker without the engine would run n8n's own stack loop while the
+  main process's log still said it was installed.
+
+  Measured: `engine entered` appears **once in the worker log and zero times in the main log**,
+  and five workflows are **data-identical** to their `regular`-mode runs, in the same order,
+  with every happens-before edge holding. The resume is the part worth having — execution 136
+  appears twice under two different job ids, so the marking the codec wrote in the first job was
+  persisted, re-enqueued when the wait elapsed, and read back by the second, which completed the
+  execution. Redis carries only `{ executionId }`; the worker loads the whole
+  `IRunExecutionData` from the database, so queue mode changes the process topology and nothing
+  about the path ADR 0005 depends on.
+
+  Three things it took, each found by hitting it: the worker needs its own
+  `N8N_RUNNERS_BROKER_PORT` (it exits on the main process's 5679); a *manual* execution is not
+  enqueued at all without `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true`
+  (`workflow-runner.ts:299`), so the first attempt measured the main process while calling
+  itself queue mode; and n8n warns that scaling mode is not officially supported with sqlite,
+  which the testbed keeps and `docs/testbed.md` records rather than hides.
+
 - **Nested agents compile, run and verify.** n8n's `AgentToolV3` is an agent wired as another
   agent's tool: `outputs: [NodeConnectionTypes.AiTool]`, every input `ai_*`, and
   `toolsAgentExecute` for a body, so it emits an `EngineRequest` exactly as a top-level agent

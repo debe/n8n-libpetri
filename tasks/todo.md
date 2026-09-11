@@ -266,6 +266,16 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       never-recovering script, and on `multiProducer` the chain spends 6 calls and completes
       where `retryOnFail` spends 4 and halts. Divergence rows 26–28 record what the feature
       changes; the live legs are in `docs/testbed.md`
+- [x] **Queue mode: the engine reaches the worker.** *Closed 2026-09-11.*
+      `scripts/testbed/n8n-testbed.sh --queue` boots a producer and a worker against Redis and
+      gates on `scheduler registered` in the *worker* log, because that is the only process that
+      constructs a scheduler for a queued execution (`job-processor.ts:275`). `engine entered`
+      appears once in the worker log and zero times in the main log; five workflows are
+      data-identical to their `regular`-mode runs; and a suspended execution came back as a
+      *different job id* on the same execution, which is the marking round trip through Redis
+      and the database rather than through one process's memory. Redis carries `{ executionId }`
+      and nothing else, so ADR 0005 is untouched. Recorded caveat: n8n warns that scaling mode
+      is not officially supported with sqlite, and a Postgres leg has not been run
 - [x] **Nested agents compile, run and verify.** *Closed 2026-09-11.* n8n's `AgentToolV3` is an
       agent wired as another agent's tool, which makes it the one node that is `isTool` *and* an
       agent at once — a composition nothing in the gadget was written for (`joinFormOf` returns
