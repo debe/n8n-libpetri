@@ -16,6 +16,14 @@
  * - **Second call** (tool results present) → a plain assistant answer, `finish_reason: "stop"`,
  *   which ends the agent.
  *
+ * One exception, and it is the point of the budget workflow: a prompt carrying the marker
+ * `[stub:loop]` makes the stub **never** stop — every call answers with tool calls again. That
+ * is the failure users report against the real thing ("if a tool returns an unexpected result
+ * or if the agent gets 'confused' … it enters an infinite loop—calling the same tools
+ * repeatedly"), reproduced deterministically and offline. The marker travels in the workflow's
+ * own prompt text, so the workflow is self-describing in the editor and no second credential,
+ * env var or seed change is needed to arm it.
+ *
  * Tool names and arguments are read off the request's own `tools` array rather than hardcoded,
  * so renaming a node in the editor cannot desynchronise the stub from the workflow.
  */
@@ -43,12 +51,23 @@ function argumentsFor(tool) {
   return JSON.stringify(args);
 }
 
+/** Every message's text, whatever shape the content took, so a marker is found in any of them. */
+function textOf(message) {
+  const content = message?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((part) => part?.text ?? '').join(' ');
+  return '';
+}
+
 function reply(body) {
   const tools = Array.isArray(body.tools) ? body.tools : [];
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const answered = messages.some((m) => m?.role === 'tool');
+  // The confused agent. It never reaches `stop`, so what ends the run is whatever bound the
+  // engine puts on it — which is exactly what the budget workflow measures.
+  const looping = messages.some((m) => textOf(m).includes('[stub:loop]'));
 
-  if (!answered && tools.length > 0) {
+  if ((looping || !answered) && tools.length > 0) {
     return {
       role: 'assistant',
       content: '',
@@ -114,8 +133,43 @@ function json(response, status, payload) {
   response.end(body);
 }
 
+/**
+ * Per-key call counters for `/flaky`, so a workflow can ask for a service that fails a fixed
+ * number of times and then recovers. Keyed by the caller (the workflow passes `$execution.id`),
+ * which is what makes a second run of the same workflow start from zero again.
+ */
+const flakyCalls = new Map();
+
 const server = createServer((request, response) => {
   const url = new URL(request.url ?? '/', `http://${HOST}:${PORT}`);
+
+  // A service that fails `fail` times per key and then succeeds. The point of the testbed's
+  // failure-policy workflow: a real HTTP node, a real non-2xx, a real n8n node error.
+  if (url.pathname.endsWith('/flaky')) {
+    const key = url.searchParams.get('key') ?? 'default';
+    const fail = Number.parseInt(url.searchParams.get('fail') ?? '2', 10);
+    const seen = (flakyCalls.get(key) ?? 0) + 1;
+    flakyCalls.set(key, seen);
+    if (seen <= fail) {
+      return json(response, 503, { error: `flaky: call ${seen} of ${fail} fails`, call: seen });
+    }
+    return json(response, 200, { ok: true, call: seen, recoveredAfter: fail });
+  }
+
+  // A healthy service that simply takes a while, so a fan-out has something to overlap.
+  if (url.pathname.endsWith('/slow')) {
+    const ms = Math.min(30_000, Number.parseInt(url.searchParams.get('ms') ?? '1000', 10));
+    const name = url.searchParams.get('name') ?? 'service';
+    return setTimeout(() => json(response, 200, { ok: true, service: name, tookMs: ms }), ms);
+  }
+
+  // A service that never answers. Under `retryOnFail` a node waiting on this is held until
+  // n8n's whole-execution timeout; under `executionPolicy.timeoutMs` the attempt is abandoned
+  // (IO-013) and the chain escalates. The socket is deliberately left open — IO-013 is explicit
+  // that abandoned work is not cancelled, and this is where that shows.
+  if (url.pathname.endsWith('/hang')) {
+    return; // no response, ever
+  }
 
   if (request.method === 'GET' && url.pathname.endsWith('/models')) {
     return json(response, 200, { object: 'list', data: [{ id: MODEL, object: 'model', created: 0, owned_by: 'n8n-libpetri-testbed' }] });

@@ -99,6 +99,12 @@ async function credential() {
 /** Repoints every credential reference in the workflow at the id n8n actually assigned. */
 function rebind(workflow, cred) {
   for (const node of workflow.nodes) {
+    // The stub's port is chosen by the launcher (`--llm-port`), so a workflow that calls it
+    // carries a placeholder rather than a hardcoded number — the same reason the credential's
+    // `url` is rewritten below.
+    if (typeof node.parameters?.url === 'string') {
+      node.parameters.url = node.parameters.url.replace('__LLM_PORT__', llmPort);
+    }
     if (!node.credentials) continue;
     for (const type of Object.keys(node.credentials)) {
       node.credentials[type] = { id: cred.id, name: cred.name };
@@ -135,7 +141,7 @@ async function workflow(file, cred) {
 await authenticate();
 const cred = await credential();
 const workflows = [];
-for (const file of ['concurrency-showcase.json', 'agent-two-tools.json']) {
+for (const file of ['concurrency-showcase.json', 'agent-two-tools.json', 'agent-budget-showcase.json', 'failure-policy-showcase.json', 'resilient-fan-out.json']) {
   workflows.push(await workflow(file, cred));
 }
 

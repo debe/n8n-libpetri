@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# n8n-testbed.sh — boot the real n8n editor with the PetriScheduler installed, seed two demo
+# n8n-testbed.sh — boot the real n8n editor with the PetriScheduler installed, seed the demo
 # workflows, and hand you a URL.
 #
 # Everything the conformance suite measures runs against `FakeHost`, a structural mirror of

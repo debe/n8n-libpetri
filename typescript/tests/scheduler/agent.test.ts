@@ -8,7 +8,7 @@
  * *when*: the round is a marking, so a paused or halted execution keeps it, the budget bounds
  * how many tools are in flight, and `A/rounds` bounds how many times the agent may go round.
  */
-import { agentOneTool, agentTwoTools } from '../fixtures/workflows.js';
+import { agentOneTool, agentTwoTools, conn, node } from '../fixtures/workflows.js';
 import { execute, items, ranNodes, sleep } from './support.js';
 
 const START = items({ n: 1 });
@@ -242,6 +242,40 @@ describe('the tool-call budget', () => {
     expect(r.runData.Agent![0]!.executionStatus).toBe('error');
     expect(r.runData.Agent![0]!.error?.message).toContain('Tool-call budget (2) reached');
     expect(r.runData.End![0]!.data!.main![0]![0]!.json).toEqual({ n: 1 });
+  });
+
+  /**
+   * The same agent, but the budget's outcome is the *author's* to declare: `onFailure` routes
+   * the exhausted agent down the error output `continueErrorOutput` gives it.
+   */
+  const routed = (maxToolCalls: number) => ({
+    ...agentTwoTools,
+    nodes: [
+      ...agentTwoTools.nodes.map((n) => (n.name === 'Agent'
+        ? {
+          ...n, maxToolCalls, onError: 'continueErrorOutput' as const,
+          executionPolicy: { onFailure: [{ action: 'route' as const, output: 'error' }] },
+        }
+        : n)),
+      node('Fallback', 'set', [400, 200]),
+    ],
+    connections: [...agentTwoTools.connections, conn('Agent', 1, 'Fallback', 0)],
+  });
+
+  it('routes an exhausted budget where the author declared, and the execution completes', async () => {
+    // The contribution ADR 0009 adds on top of the budget itself: what happens when it runs out
+    // is declared in the workflow, not fixed by the engine. Three calls against two: the first
+    // two run, `A_calls_out` re-enters the agent, and the failure takes the wired error branch
+    // instead of halting the execution.
+    const r = await execute(routed(2), { Agent: asking(3), ...tools }, { startItems: START });
+    expect(r.error).toBeUndefined();
+    expect(r.scheduler.outcome).toBe('completed');
+    // Exactly two tool calls were spent, and `End` — the success branch — never ran.
+    expect(ranNodes(r.calls)).toEqual(['Trigger', 'Agent', 'Calculator', 'Search', 'Fallback']);
+    expect(r.runData.Agent![0]!.executionStatus).toBe('error');
+    expect(r.runData.Agent![0]!.error?.message).toContain('Tool-call budget (2) reached');
+    expect(r.runData.End).toBeUndefined();
+    expect(r.runData.Fallback).toHaveLength(1);
   });
 
   it('counts across rounds: the budget is per execution, not per round', async () => {

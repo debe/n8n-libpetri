@@ -1,0 +1,277 @@
+{
+  "name": "Resilient Fan-Out",
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        300
+      ],
+      "id": "bb000000-0000-4000-8000-000000000001",
+      "name": "When clicking 'Execute workflow'"
+    },
+    {
+      "parameters": {
+        "url": "=http://127.0.0.1:__LLM_PORT__/slow?ms=3000&name=inventory",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        60
+      ],
+      "id": "bb000000-0000-4000-8000-000000000002",
+      "name": "Inventory API",
+      "notes": "Healthy, 3 s. Runs beside the other three."
+    },
+    {
+      "parameters": {
+        "url": "=http://127.0.0.1:__LLM_PORT__/flaky?key={{ $execution.id }}&fail=2",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        220
+      ],
+      "id": "bb000000-0000-4000-8000-000000000003",
+      "name": "Pricing API",
+      "notes": "503 twice, then 200. Backs off 200 ms, then 400 ms, and gives up on the third failure.",
+      "executionPolicy": {
+        "v": 1,
+        "onFailure": [
+          {
+            "action": "retry",
+            "waitMs": 400
+          },
+          {
+            "action": "retry",
+            "waitMs": 800
+          },
+          {
+            "action": "stop"
+          }
+        ]
+      }
+    },
+    {
+      "parameters": {
+        "url": "=http://127.0.0.1:__LLM_PORT__/hang",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        380
+      ],
+      "id": "bb000000-0000-4000-8000-000000000004",
+      "name": "Shipping API",
+      "notes": "Never answers. Each attempt is abandoned after 2.5 s; the second routes the failure down the error output instead of stopping the run.",
+      "executionPolicy": {
+        "v": 1,
+        "timeoutMs": 2500,
+        "onFailure": [
+          {
+            "action": "retry",
+            "waitMs": 0
+          },
+          {
+            "action": "route",
+            "output": "error"
+          }
+        ]
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "=http://127.0.0.1:__LLM_PORT__/slow?ms=3000&name=reviews",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        540
+      ],
+      "id": "bb000000-0000-4000-8000-000000000005",
+      "name": "Reviews API",
+      "notes": "Healthy, 3 s."
+    },
+    {
+      "parameters": {
+        "numberInputs": 5
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        -180,
+        300
+      ],
+      "id": "bb000000-0000-4000-8000-000000000006",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "shipping",
+              "type": "string",
+              "value": "unavailable"
+            },
+            {
+              "id": "2",
+              "name": "reason",
+              "type": "string",
+              "value": "no response within 2.5 s; two attempts abandoned"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -300,
+        470
+      ],
+      "id": "bb000000-0000-4000-8000-000000000008",
+      "name": "Shipping Fallback",
+      "notes": "Only on the error arc. n8n's own error output never catches a thrown or timed-out node; the chain's 'route' step puts it here."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "outcome",
+              "type": "string",
+              "value": "3 of 4 services answered; shipping unavailable, order summarised without it"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        60,
+        300
+      ],
+      "id": "bb000000-0000-4000-8000-000000000007",
+      "name": "Order Summary"
+    }
+  ],
+  "connections": {
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "Inventory API",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pricing API",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Shipping API",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Reviews API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inventory API": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pricing API": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Shipping API": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ],
+        [
+          {
+            "node": "Shipping Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reviews API": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Order Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shipping Fallback": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    }
+  }
+}

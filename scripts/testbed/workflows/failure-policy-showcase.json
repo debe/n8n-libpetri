@@ -1,0 +1,88 @@
+{
+  "name": "Failure Policy Showcase",
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-460, 300],
+      "id": "aa000000-0000-4000-8000-000000000001",
+      "name": "When clicking 'Execute workflow'"
+    },
+    {
+      "parameters": {
+        "url": "=http://127.0.0.1:__LLM_PORT__/flaky?key={{ $execution.id }}&fail=2",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-240, 200],
+      "id": "aa000000-0000-4000-8000-000000000002",
+      "name": "Flaky Service",
+      "notes": "503 twice, then 200. onFailure retries with a growing delay and stops if it never recovers.",
+      "executionPolicy": {
+        "v": 1,
+        "onFailure": [
+          { "action": "retry", "waitMs": 250 },
+          { "action": "retry", "waitMs": 1000 },
+          { "action": "stop" }
+        ]
+      }
+    },
+    {
+      "parameters": {
+        "assignments": { "assignments": [
+          { "id": "1", "name": "outcome", "type": "string", "value": "flaky service recovered" }
+        ] },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-20, 200],
+      "id": "aa000000-0000-4000-8000-000000000003",
+      "name": "Recovered"
+    },
+    {
+      "parameters": {
+        "url": "=http://127.0.0.1:__LLM_PORT__/hang",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-240, 420],
+      "id": "aa000000-0000-4000-8000-000000000004",
+      "name": "Hung Service",
+      "notes": "Never answers. timeoutMs abandons each attempt (IO-013); the chain gives up and continues.",
+      "executionPolicy": {
+        "v": 1,
+        "timeoutMs": 1500,
+        "onFailure": [
+          { "action": "retry", "waitMs": 0 },
+          { "action": "continue" }
+        ]
+      }
+    },
+    {
+      "parameters": {
+        "assignments": { "assignments": [
+          { "id": "1", "name": "outcome", "type": "string", "value": "gave up on the hung service and carried on" }
+        ] },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-20, 420],
+      "id": "aa000000-0000-4000-8000-000000000005",
+      "name": "Gave Up"
+    }
+  ],
+  "connections": {
+    "When clicking 'Execute workflow'": { "main": [[
+      { "node": "Flaky Service", "type": "main", "index": 0 },
+      { "node": "Hung Service", "type": "main", "index": 0 }
+    ]] },
+    "Flaky Service": { "main": [[{ "node": "Recovered", "type": "main", "index": 0 }]] },
+    "Hung Service": { "main": [[{ "node": "Gave Up", "type": "main", "index": 0 }]] }
+  }
+}
