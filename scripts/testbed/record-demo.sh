@@ -9,6 +9,7 @@
 #   scripts/testbed/record-demo.sh --workflow="Agent · Two Tools"
 #   scripts/testbed/record-demo.sh --budget=1 --attach
 #   scripts/testbed/record-demo.sh --fps=4                  # play the time-lapse back faster
+#   scripts/testbed/record-demo.sh --viewport=1920x1200     # wider frame for a big canvas
 #
 # One screenshot costs about 1.2 s of CLI round trip, so this is a *time-lapse* of real editor
 # frames rather than a smooth screencast: a five-second run yields four or five frames of it.
@@ -23,6 +24,7 @@ HERE="$ROOT/scripts/testbed"
 TESTBED="$ROOT/.testbed"
 VIDEO="$TESTBED/video"
 ENGINE=libpetri; BUDGET=4; PORT=5678; ATTACH=0; FPS=2; WORKFLOW="Resilient Fan-Out"
+VIEWPORT=1600x1000
 
 for arg in "$@"; do
   case "$arg" in
@@ -31,6 +33,7 @@ for arg in "$@"; do
     --port=*)     PORT="${arg#--port=}" ;;
     --workflow=*) WORKFLOW="${arg#--workflow=}" ;;
     --fps=*)      FPS="${arg#--fps=}" ;;
+    --viewport=*) VIEWPORT="${arg#--viewport=}" ;;
     --attach)     ATTACH=1 ;;
     -h|--help)    sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (see --help)" >&2; exit 2 ;;
@@ -63,6 +66,7 @@ id=$(node -e '
 
 slug=$(printf '%s' "$WORKFLOW" | tr -cs '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]' | sed 's/-*$//')
 OUT="$VIDEO/$slug-$ENGINE-k$BUDGET.webm"
+RAW="$VIDEO/.raw-$slug-$ENGINE-k$BUDGET.webm"
 
 # Same ref helper as browser-check.sh: the last match wins, because the canvas repeats some
 # names and the toolbar's control is rendered last.
@@ -112,23 +116,9 @@ textWithin() {
 # So the capture is done by hand: click Execute, then screenshot the viewport on a fixed
 # interval until n8n says the run finished, and let ffmpeg assemble the frames. What comes out
 # is a real recording of the real editor at a known frame rate.
-agent-browser open "$BASE/signin" >/dev/null
-email=$(refWithin textbox Email 45 || true)
-if [ -n "$email" ]; then
-  password=$(ref textbox Password); submit=$(ref button "Sign in")
-  [ -n "$password" ] && [ -n "$submit" ] || die "the sign-in form did not render as expected"
-  agent-browser fill "@$email" "$(node -e 'console.log(require(process.argv[1]).email)' "$TESTBED/ids.json")" >/dev/null
-  agent-browser fill "@$password" "$(node -e 'console.log(require(process.argv[1]).password)' "$TESTBED/ids.json")" >/dev/null
-  agent-browser click "@$submit" >/dev/null
-  urlLeaves "/signin" 90 || die "sign-in did not leave the login page"
-fi
-
-agent-browser open "$BASE/workflow/$id" >/dev/null
-button=$(refWithin button "Execute workflow" 60 || true)
-[ -n "$button" ] || die "no Execute workflow button on '$WORKFLOW'"
-agent-browser wait 1200 >/dev/null   # let the canvas settle so the opening frames are readable
-
-# One REST session for the poll below, so the loop costs a GET rather than a sign-in.
+# A fixed frame, so every clip in a set is the same size and a wide workflow is not cropped to
+# whatever the browser defaulted to.
+agent-browser viewport "${VIEWPORT%x*}" "${VIEWPORT#*x}" >/dev/null 2>&1 || true
 COOKIE=$(node -e '
   const ids = require(process.argv[1]);
   fetch(`${ids.base}/rest/login`, {
@@ -142,18 +132,48 @@ COOKIE=$(node -e '
 ' "$TESTBED/ids.json")
 [ -n "$COOKIE" ] || die "could not authenticate against the REST API to poll the execution"
 
-FRAMES="$VIDEO/.frames-$slug"
-rm -rf "$FRAMES"; mkdir -p "$FRAMES"
-n=0
-shot() { n=$((n + 1)); agent-browser screenshot "$(printf '%s/f%04d.png' "$FRAMES" "$n")" >/dev/null 2>&1 || true; }
+# --- the recording ------------------------------------------------------------------------------
+# `agent-browser record start` opens its **own** browser context, which carries none of this
+# machine's cookies — it lands on /signin. So the sign-in happens inside the recording and is
+# cut off the front afterwards, rather than being done first and lost.
+log "recording '$WORKFLOW'"
+agent-browser record start "$RAW" "$BASE/signin" >/dev/null 2>&1 || die "could not start recording"
+REC_T0=$(node -e 'console.log(Date.now())')
 
-log "capturing '$WORKFLOW'"
-shot; shot   # two frames of the idle canvas, so the video opens on the workflow
+email=$(refWithin textbox Email 45 || true)
+if [ -n "$email" ]; then
+  password=$(ref textbox Password); submit=$(ref button "Sign in")
+  [ -n "$password" ] && [ -n "$submit" ] || die "the sign-in form did not render as expected"
+  agent-browser fill "@$email" "$(node -e 'console.log(require(process.argv[1]).email)' "$TESTBED/ids.json")" >/dev/null
+  agent-browser fill "@$password" "$(node -e 'console.log(require(process.argv[1]).password)' "$TESTBED/ids.json")" >/dev/null
+  agent-browser click "@$submit" >/dev/null
+  urlLeaves "/signin" 90 || die "sign-in did not leave the login page"
+fi
 
+agent-browser open "$BASE/workflow/$id" >/dev/null
+button=$(refWithin button "Execute workflow" 60 || true)
+[ -n "$button" ] || die "no Execute workflow button on '$WORKFLOW'"
+agent-browser wait 1200 >/dev/null
+
+# Frame the canvas. n8n's own "Zoom to Fit" control rather than its keyboard shortcut: the
+# shortcut only lands when focus is already on the canvas pane, and after a page load it is not.
+# A fresh snapshot first, because refs go stale across a navigation.
+agent-browser snapshot -i >/dev/null 2>&1 || true
+fit=$(ref button "Zoom to Fit" 2>/dev/null || true)
+if [ -n "$fit" ]; then
+  agent-browser click "@$fit" >/dev/null 2>&1 || true
+  agent-browser wait 900 >/dev/null
+else
+  log "no Zoom to Fit control found; recording at whatever zoom the editor restored"
+fi
+agent-browser wait 900 >/dev/null   # a beat of the framed idle canvas before anything moves
+
+# Everything before this instant is sign-in and navigation, and gets trimmed off the front.
+TRIM_MS=$(( $(node -e 'console.log(Date.now())') - REC_T0 ))
 started=$(node -e 'console.log(Date.now())')
 agent-browser click "@$button" >/dev/null
 
-# n8n's success toast auto-dismisses, and `get text` does not always carry it, so the run is
+# n8n's success toast auto-dismisses and `get text` does not always carry it, so the run is
 # considered finished when the *execution* is — read from n8n's own REST API, not the DOM.
 finishedRun() {
   node -e '
@@ -169,25 +189,31 @@ finishedRun() {
   ' "$TESTBED/ids.json" "$id" "$COOKIE" 2>/dev/null
 }
 
-deadline=$(( SECONDS + 120 ))
+deadline=$(( SECONDS + 180 ))
 while [ $SECONDS -lt $deadline ]; do
-  shot
   finishedRun && break
+  agent-browser wait 400 >/dev/null 2>&1 || sleep 1
 done
 finished=$(node -e 'console.log(Date.now())')
 log "'$WORKFLOW' finished in about $(( finished - started )) ms (browser round trip included)"
 
-for _ in 1 2 3 4 5 6; do shot; done   # hold on the result so the last frames are the outcome
+agent-browser wait 2500 >/dev/null   # hold on the result, so the video ends on the outcome
+agent-browser record stop >/dev/null 2>&1 || die "could not stop recording"
 
-count=$(find "$FRAMES" -name 'f*.png' | wc -l | tr -d ' ')
-[ "$count" -gt 2 ] || die "only $count frame(s) captured"
-log "$count frames; assembling"
-ffmpeg -y -v error -framerate "$FPS" -pattern_type glob -i "$FRAMES/f*.png" \
-  -c:v libvpx-vp9 -pix_fmt yuv420p -b:v 0 -crf 34 "$OUT" \
-  || die "ffmpeg could not assemble the frames"
-rm -rf "$FRAMES"
-[ -f "$OUT" ] || die "no video was written to $OUT"
-log "video: $OUT ($(du -h "$OUT" | cut -f1), ${count} frames at ${FPS} fps)"
+# The file is flushed asynchronously once the recording context closes.
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$RAW" ] && break; sleep 1; done
+[ -s "$RAW" ] || die "no video was written to $RAW"
+
+# Drop the sign-in and the navigation, keeping a second of framed idle canvas before the click.
+# Re-encoded rather than stream-copied: a copy can only cut on a keyframe, and at 10 fps with
+# long GOPs that rounds the cut to somewhere unhelpful.
+skip=$(node -e "console.log(Math.max(0, ($TRIM_MS - 1000) / 1000).toFixed(2))")
+ffmpeg -y -v error -ss "$skip" -i "$RAW" -c:v libvpx-vp9 -pix_fmt yuv420p -b:v 0 -crf 34 \
+  -an "$OUT" 2>/dev/null || die "ffmpeg could not trim the recording"
+rm -f "$RAW"
+[ -s "$OUT" ] || die "no video was written to $OUT"
+secs=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$OUT" 2>/dev/null | cut -d. -f1)
+log "video: $OUT ($(du -h "$OUT" | cut -f1), ${secs:-?} s, sign-in trimmed at ${skip}s)"
 
 if [ "$ENGINE" = libpetri ]; then
   grep -q 'engine entered' "$TESTBED/n8n.log" \
