@@ -266,6 +266,11 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       never-recovering script, and on `multiProducer` the chain spends 6 calls and completes
       where `retryOnFail` spends 4 and halts. Divergence rows 26–28 record what the feature
       changes; the live legs are in `docs/testbed.md`
+- [x] **The agent wait cliff, their half.** *Closed 2026-09-11.* `@n8n/agents` is drivable from
+      the testbed (`N8N_ENABLED_MODULES=agents`, the existing stub credential), and both sides of
+      the cliff are measured: a 30 s child blocks the agent's turn for 30.1 s, a 70 s child
+      becomes a human card in 0.7 s, and the 60 s poll window cannot fire for a Wait node because
+      the node's own threshold is 65 s. `docs/testbed.md`
 - [x] **Queue mode: the engine reaches the worker.** *Closed 2026-09-11.*
       `scripts/testbed/n8n-testbed.sh --queue` boots a producer and a worker against Redis and
       gates on `scheduler registered` in the *worker* log, because that is the only process that
@@ -705,10 +710,21 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
         the Success output under `continueErrorOutput`. `A_calls_out` and `A_rounds_out` are
         designed terminals precisely so exhaustion is a marking the author routes, not a
         finish-reason a consumer may forget to read
+      - **A waiting sub-workflow is either a blocked turn or a human button, never background
+        work.** Two constants in two packages, and they do not overlap: `Wait.node.ts:596`
+        blocks in-process under `65000` ms and never suspends, while the agent tool's
+        `WAIT_POLL_ELIGIBLE_MS = 60_000` (`tools/workflow-tool-factory.ts:87`) polls only a
+        `waitTill` within 60 s. Measured on their runtime: a 30 s child blocked the agent's turn
+        for 30.1 s; a 70 s child suspended in 0.7 s to a `workflow_wait` card with "Check for the
+        result" / "Stop waiting". The poll path cannot fire for a Wait node at all. Ours is a
+        marking that resumes on its own — across a worker-process boundary, at that
+        (`docs/testbed.md`)
       Not a blocker and not reachable through our seam — `@n8n/agents` does not go through
       `WorkflowExecute.processRunExecutionData()`, so it is a separate integration, and it is
-      Preview with queue mode unsupported. Recorded because it is the strongest evidence the
-      budget/exhaustion-routing ask is real: the same gap survived a from-scratch rewrite
+      Preview with queue mode unsupported. Reachable from the testbed for *measurement* though:
+      `N8N_ENABLED_MODULES=agents` plus the existing stub-OpenAI credential drives it, which is
+      how the wait-cliff numbers above were taken. Recorded because it is the strongest evidence
+      the budget/exhaustion-routing ask is real: the same gap survived a from-scratch rewrite
 
 ### 5. Harness and CI
 

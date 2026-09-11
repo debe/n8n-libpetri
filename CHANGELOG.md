@@ -38,6 +38,33 @@ All notable changes to this project are documented here. The format follows
   there are.
 
 ### Added
+- **The agent wait cliff, measured on n8n's own new agent runtime.** `@n8n/agents`
+  (`packages/cli/src/modules/agents`, not a default module) can be driven from the testbed:
+  `N8N_ENABLED_MODULES=agents`, an agent created over
+  `/rest/projects/:projectId/agents/v2`, and — because
+  `openai: (c) => ({ apiKey: c.apiKey, baseURL: c.url })` — the existing stub-OpenAI credential
+  unchanged. So `stub-llm.mjs` drives it, which was the open question.
+
+  Their half of the wait problem is decided by two constants in two packages that **do not
+  overlap**: `Wait.node.ts:596` blocks in-process on a `setTimeout` when the remaining wait is
+  under `65000` ms and never suspends, while the agent tool's
+  `WAIT_POLL_ELIGIBLE_MS = 60_000` polls only a `waitTill` within 60 s. Under 65 s there is no
+  `waiting` execution to poll; at 65 s or more the deadline is already past the poll window.
+  Measured, one agent with one workflow tool re-pointed between runs: a **30 s** child blocked
+  the agent's turn for **30.1 s** and then returned real output, and a **70 s** child produced
+  `tool-call-suspended` in **0.7 s** — a `workflow_wait` card with "Check for the result" and
+  "Stop waiting" buttons for a human to press. The poll path fired in neither, and cannot fire
+  for a Wait node at all; it is reachable only through `Form` / `sendAndWait` with
+  `limitWaitTime` set under a minute, which is a human-approval timeout rather than work
+  finishing. Default configuration throughout — `backgroundTasksEnabled` is `false`,
+  `supportsHitl` is `true`.
+
+  Ours is a marking: the parent records `executionTime: 0 ms`, the marking round-trips through
+  `IRunExecutionData`, and the execution resumes — and in queue mode it resumes as a *different
+  job id*. Nothing blocks and nobody presses a button. `docs/testbed.md` states plainly that
+  these are two different integration points and that n8n's choices are defensible; what it
+  claims is the third option neither of theirs offers.
+
 - **Queue mode: the engine reaches the worker.** `scripts/testbed/n8n-testbed.sh --queue` runs
   n8n the way production does — `n8n start` enqueues onto Redis, a separate `n8n worker`
   dequeues and executes — and gives the worker the same `--import` preload, because in queue

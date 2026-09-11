@@ -619,6 +619,77 @@ queue-mode leg on sqlite is n8n running outside its supported configuration, and
 it should be read as a statement about queue mode under load. A Postgres leg is the honest way
 to make that stronger claim and has not been run.
 
+## The agent wait cliff, measured on n8n's own agent
+
+```bash
+N8N_ENABLED_MODULES=agents scripts/testbed/n8n-testbed.sh --daemon
+```
+
+`scripts/testbed/n8n-testbed.sh` with `N8N_ENABLED_MODULES=agents` boots n8n's **new** agent
+runtime (`packages/cli/src/modules/agents`, not a default module). Its agents are created over
+REST at `/rest/projects/:projectId/agents/v2`, their model is `provider/model` with an ordinary
+n8n credential, and `openai: (c) => ({ apiKey: c.apiKey, baseURL: c.url })`
+(`json-config/credential-field-mapping.ts:18`) means the testbed's existing stub-OpenAI
+credential drives it unchanged. So `stub-llm.mjs` can drive `@n8n/agents`, which was the open
+question.
+
+What that buys is a measurement of **their** half of the wait problem: an agent calls a
+sub-workflow as a tool, and the sub-workflow waits. Two constants decide what happens, and they
+are in different packages:
+
+| constant | value | where |
+| --- | --- | --- |
+| the Wait node's hold-vs-suspend threshold | `65000` | `nodes-base/nodes/Wait/Wait.node.ts:596` |
+| the agent tool's poll-vs-human threshold | `WAIT_POLL_ELIGIBLE_MS = 60_000` | `cli/src/modules/agents/tools/workflow-tool-factory.ts:87` |
+
+`isPollableWait` is `waitTill - now <= 60_000` (`:784`). The Wait node computes `waitTill` and
+then, if the remaining wait is under 65 s, blocks in-process on a `setTimeout` and never suspends
+at all — for `timeInterval` and `specificTime` alike, since the check is on the computed
+`waitValue`. **So the two thresholds do not overlap**: under 65 s there is no `waiting` execution
+for the agent to poll, and at 65 s or more the `waitTill` is already further out than 60 s.
+
+Measured, both sides, one agent with one workflow tool re-pointed between runs:
+
+| child waits | what the agent's turn did | elapsed |
+| --- | --- | --- |
+| 30 s | `tool-execution-start` → `tool-execution-end`, `status: "success"`, real output | **blocked 30.1 s** |
+| 70 s | `tool-call-suspended`, a `workflow_wait` card | **0.7 s** |
+
+The 30 s tool call held the agent's turn open for the whole thirty seconds and then returned
+`{"Child Result":[{"childSaid":"the child woke up and finished"}]}` — no suspension, no polling,
+because the Wait node never let the execution reach `waiting`. The 70 s call suspended in under a
+second and handed back a card titled `Waiting on "Waiting Child"` with two buttons,
+**"Check for the result"** and **"Stop waiting"** (`buildWaitCard`, `:823`). A human has to press
+one.
+
+So `WAIT_POLL_ELIGIBLE_MS` cannot fire for a Wait node at all. It is reachable only where
+something else sets a short `waitTill` — `Form` and the `sendAndWait` operations through
+`configureWaitTillDate`, whose default is `WAIT_INDEFINITELY` and whose `limitWaitTime` would
+have to be set under a minute. That is a human-approval *timeout*, not work finishing.
+
+This is the default configuration and not a corner: `backgroundTasksEnabled` defaults to `false`
+(`@n8n/config/src/configs/agents.config.ts:80`), so the background-job path between the two is
+off, and `supportsHitl` defaults to `true` (`workflow-tool-factory.ts:994`).
+
+### What we do instead
+
+A waiting sub-workflow is a **marking**. The parent's `Call The Child` records
+`executionTime: 0 ms`, the marking is written to `IRunExecutionData`, and the execution resumes
+when the wait elapses — 70,143 ms end to end against legacy's 70,161 ms, every payload identical
+(*Waiting Child + Parent Waits On Child* above). In queue mode the same execution came back as a
+**different job id** and completed there (*Queue mode* above), so the marking survives a process
+boundary as well as a suspension.
+
+Nothing blocks and nobody presses a button. That is the difference worth claiming — not that
+n8n's choices are wrong. Blocking a chat turn for thirty seconds is defensible, and so is asking
+a human about a wait measured in hours. What n8n does not have is the third option: the work
+continues without either.
+
+**Be precise about what was compared.** These are two different integration points — n8n's agent
+tool in `modules/agents`, and our classic `Execute Workflow` node under the net. The question
+they answer is the same ("an agent's sub-workflow waits, now what") but the mechanisms are not,
+and no number in one table belongs in the other.
+
 ## Caveats
 
 - **Divergence #17 is not reachable here.** Neither workflow uses a `responseMode: responseNode`
