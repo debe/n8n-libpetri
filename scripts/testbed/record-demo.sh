@@ -23,7 +23,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$ROOT/scripts/testbed"
 TESTBED="$ROOT/.testbed"
 VIDEO="$TESTBED/video"
-ENGINE=libpetri; BUDGET=4; PORT=5678; ATTACH=0; FPS=2; WORKFLOW="Resilient Fan-Out"
+ENGINE=libpetri; BUDGET=4; PORT=5678; LLM_PORT=5699; ATTACH=0; FPS=2; WORKFLOW="Resilient Fan-Out"
 VIEWPORT=1600x1000
 
 for arg in "$@"; do
@@ -31,6 +31,7 @@ for arg in "$@"; do
     --engine=*)   ENGINE="${arg#--engine=}" ;;
     --budget=*)   BUDGET="${arg#--budget=}" ;;
     --port=*)     PORT="${arg#--port=}" ;;
+    --llm-port=*) LLM_PORT="${arg#--llm-port=}" ;;
     --workflow=*) WORKFLOW="${arg#--workflow=}" ;;
     --fps=*)      FPS="${arg#--fps=}" ;;
     --viewport=*) VIEWPORT="${arg#--viewport=}" ;;
@@ -136,6 +137,13 @@ COOKIE=$(node -e '
 # `agent-browser record start` opens its **own** browser context, which carries none of this
 # machine's cookies — it lands on /signin. So the sign-in happens inside the recording and is
 # cut off the front afterwards, rather than being done first and lost.
+# Seed before recording as well as after. The restore below guarantees the *fixture* is left
+# clean; this guarantees the *canvas in the video* starts clean, which is a different promise —
+# a recording that began after a dirtied save would show the dirt however tidy the database is
+# by the time it ends.
+TESTBED_BASE_URL="$BASE" TESTBED_DIR="$TESTBED" STUB_LLM_PORT="$LLM_PORT" \
+  node "$HERE/seed.mjs" >/dev/null 2>&1 || log "warning: could not re-seed before recording"
+
 log "recording '$WORKFLOW'"
 agent-browser record start "$RAW" "$BASE/signin" >/dev/null 2>&1 || die "could not start recording"
 REC_T0=$(node -e 'console.log(Date.now())')
@@ -200,9 +208,32 @@ log "'$WORKFLOW' finished in about $(( finished - started )) ms (browser round t
 agent-browser wait 2500 >/dev/null   # hold on the result, so the video ends on the outcome
 agent-browser record stop >/dev/null 2>&1 || die "could not stop recording"
 
-# The file is flushed asynchronously once the recording context closes.
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$RAW" ] && break; sleep 1; done
+# Restore the fixture. n8n saves a workflow before every manual execute, so whatever the editor
+# held — including anything a mis-landed click added — is written back to the database by the
+# act of running it. The canvas controls put "Add sticky note" in the same group as "Zoom to
+# Fit", and a stale ref between snapshot and click has hit it. Re-seeding after each recording
+# makes that harmless instead of permanent: the committed JSON is the authority, and a recording
+# must not be able to edit the thing it is recording.
+TESTBED_BASE_URL="$BASE" TESTBED_DIR="$TESTBED" STUB_LLM_PORT="$LLM_PORT" \
+  node "$HERE/seed.mjs" >/dev/null 2>&1 || log "warning: could not re-seed after recording"
+
+# The file is flushed asynchronously once the recording context closes, so wait for it to stop
+# growing rather than merely to exist. `[ -s ]` turns true on the first byte, while the encoder is
+# still writing the container — trimming that produced a 480-byte file with no decodable stream,
+# and the failure was silent because ffmpeg happily re-encodes an empty input.
+prev=-1; stable=0
+for _ in $(seq 1 60); do
+  cur=$(wc -c <"$RAW" 2>/dev/null | tr -d ' ' || echo 0)
+  if [ "${cur:-0}" -gt 4096 ] && [ "$cur" = "$prev" ]; then
+    stable=$((stable + 1)); [ "$stable" -ge 2 ] && break
+  else
+    stable=0
+  fi
+  prev="$cur"; sleep 0.5
+done
 [ -s "$RAW" ] || die "no video was written to $RAW"
+ffprobe -v error -show_entries format=duration -of csv=p=0 "$RAW" >/dev/null 2>&1 \
+  || die "the recording at $RAW has no decodable stream (it was read before the encoder finished)"
 
 # Drop the sign-in and the navigation, keeping a second of framed idle canvas before the click.
 # Re-encoded rather than stream-copied: a copy can only cut on a keyframe, and at 10 fps with
@@ -211,8 +242,9 @@ skip=$(node -e "console.log(Math.max(0, ($TRIM_MS - 1000) / 1000).toFixed(2))")
 ffmpeg -y -v error -ss "$skip" -i "$RAW" -c:v libvpx-vp9 -pix_fmt yuv420p -b:v 0 -crf 34 \
   -an "$OUT" 2>/dev/null || die "ffmpeg could not trim the recording"
 rm -f "$RAW"
-[ -s "$OUT" ] || die "no video was written to $OUT"
 secs=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$OUT" 2>/dev/null | cut -d. -f1)
+[ -n "$secs" ] && [ "$secs" -ge 1 ] 2>/dev/null \
+  || die "the trimmed video at $OUT is empty; the trim point (${skip}s) may be past its end"
 log "video: $OUT ($(du -h "$OUT" | cut -f1), ${secs:-?} s, sign-in trimmed at ${skip}s)"
 
 if [ "$ENGINE" = libpetri ]; then

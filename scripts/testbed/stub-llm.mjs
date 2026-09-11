@@ -32,6 +32,19 @@ const PORT = Number.parseInt(process.env.STUB_LLM_PORT ?? '5699', 10);
 const HOST = process.env.STUB_LLM_HOST ?? '127.0.0.1';
 const MODEL = 'stub-model';
 
+/**
+ * Milliseconds to wait before answering a chat completion. **Zero by default**, because every
+ * timing number this repository reports is taken with the stub answering instantly, and a stub
+ * that pauses would put itself into those wall clocks.
+ *
+ * It exists for recordings. A real model takes on the order of a second to answer and a real
+ * tool a few hundred milliseconds, so an agent round has visible beats: the model thinks, a tool
+ * runs, the model thinks again. With an instant stub the whole sequence collapses — the
+ * escalation ladder finishes in about 700 ms — and a recording of it shows a canvas that turns
+ * green all at once rather than a round unfolding. `--llm-latency` on the launcher sets this.
+ */
+const LATENCY_MS = Math.max(0, Number.parseInt(process.env.STUB_LLM_LATENCY_MS ?? '0', 10) || 0);
+
 /** Fills one tool's argument object from its own JSON schema. Strings get a value the tool can use. */
 function argumentsFor(tool) {
   const schema = tool?.function?.parameters ?? {};
@@ -186,9 +199,9 @@ const server = createServer((request, response) => {
       }
       const message = reply(body);
       const kind = message.tool_calls ? `tool_calls(${message.tool_calls.map((c) => c.function.name).join(', ')})` : 'answer';
-      process.stdout.write(`[stub-llm] ${body.messages?.length ?? 0} messages, ${body.tools?.length ?? 0} tools -> ${kind}\n`);
-      if (body.stream === true) return stream(response, message);
-      return json(response, 200, completion(message));
+      process.stdout.write(`[stub-llm] ${body.messages?.length ?? 0} messages, ${body.tools?.length ?? 0} tools -> ${kind}${LATENCY_MS ? ` after ${LATENCY_MS} ms` : ''}\n`);
+      const answer = () => (body.stream === true ? stream(response, message) : json(response, 200, completion(message)));
+      return LATENCY_MS > 0 ? setTimeout(answer, LATENCY_MS) : answer();
     });
     return;
   }

@@ -360,9 +360,13 @@ step routes the exhaustion to its error output instead of ending the execution. 
 a *second* agent with a different instruction — "you have one attempt left, answer from what you
 already know" — whose own error output is the give-up path.
 
+`Calculator` is a Code tool that sleeps 400 ms before answering, which is roughly what a real one
+costs. An instant tool would put the whole round in one frame.
+
 Measured, one run: `Calculator` ran twice, `Research Agent` ended `error` with
-`Tool-call budget (2) reached`, `Last Try Agent` answered without calling a tool, and
-`Give Up` never ran. 566 ms.
+`Tool-call budget (2) reached`, `Last Try Agent` answered without calling a tool, and `Give Up`
+never ran. 566 ms with the stub answering instantly; 6.2 s with `--llm-latency=1300`, which is
+what the clip above shows — three model calls of about 1.3 s, two tool calls of about 0.4 s.
 
 The point is where the escalation lives. No node asks "is this the last try"; the budget is a
 place, the second agent is reached only when that place is empty, and the give-up path is an
@@ -371,7 +375,9 @@ region of the graph, so each is something the verifier can reason about.
 
 <img alt="The Agent Escalation Ladder running. The first agent turns red when its tool-call budget is spent, its error output reaches a second agent which answers, and the give-up node stays grey." src="media/agent-escalation-ladder.gif" width="900" />
 
-*`Research Agent` spends its budget of two and routes the exhaustion down its error output. `Answer` and `Give Up` stay grey because neither path was taken. `Calculator` ran twice and carries no badge — divergence #29, below.*
+*`Research Agent` spends its budget of two and routes the exhaustion down its error output.
+`Answer` and `Give Up` stay grey because neither path was taken. Recorded with `--llm-latency=1300`
+so the round has beats.*
 
 ### Failure Policy Showcase — 5 nodes
 
@@ -558,7 +564,12 @@ scripts/testbed/record-demo.sh --workflow="Agent · Two Tools" --budget=1
 ```
 
 Video: `.testbed/video/<workflow>-<engine>-k<budget>.webm`, continuous at 10 fps.
-`scripts/testbed/make-gifs.sh` converts them to the GIFs this document embeds — GitHub sanitises
+`--llm-latency=MS` on the launcher makes the stub answer at a real model's pace, which is what
+makes an agent round legible: the model thinks, a tool runs, the model thinks again. It is **zero
+by default**, because every wall clock this document reports is measured with the stub answering
+instantly, and a pause would put itself into those numbers.
+
+`scripts/testbed/make-gifs.sh` converts the recordings to the GIFs this document embeds — GitHub sanitises
 `<video>` out of Markdown, so a committed WebM would render as a download link. Each GIF holds its
 final frame for two or three seconds, because a GIF loops without pausing and the shortest run
 here finishes in about 700 ms; without the hold the result is gone before it can be read.

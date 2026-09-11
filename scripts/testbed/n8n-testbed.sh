@@ -14,7 +14,9 @@
 #   scripts/testbed/n8n-testbed.sh --stop              # stop a --daemon instance
 #   scripts/testbed/n8n-testbed.sh --queue             # queue mode: a main and a worker process
 #
-# Flags: --engine=libpetri|legacy  --budget=N  --port=N  --llm-port=N
+#   scripts/testbed/n8n-testbed.sh --llm-latency=1300  # a stub that answers at a real model's pace
+#
+# Flags: --engine=libpetri|legacy  --budget=N  --port=N  --llm-port=N  --llm-latency=MS
 #        --fresh (wipe .testbed first)  --no-seed  --no-build  --seed-only  --daemon  --stop
 #        --queue  --redis-port=N
 #
@@ -34,7 +36,7 @@ N8N_DIR="$ROOT/.n8n"
 TESTBED="$ROOT/.testbed"
 HERE="$ROOT/scripts/testbed"
 
-ENGINE=libpetri; BUDGET=4; PORT=5678; LLM_PORT=5699; REDIS_PORT=6399
+ENGINE=libpetri; BUDGET=4; PORT=5678; LLM_PORT=5699; REDIS_PORT=6399; LLM_LATENCY=0
 FRESH=0; SEED=1; BUILD=1; SEED_ONLY=0; DAEMON=0; STOP=0; QUEUE=0
 for arg in "$@"; do
   case "$arg" in
@@ -42,6 +44,7 @@ for arg in "$@"; do
     --budget=*)   BUDGET="${arg#--budget=}" ;;
     --port=*)     PORT="${arg#--port=}" ;;
     --llm-port=*) LLM_PORT="${arg#--llm-port=}" ;;
+    --llm-latency=*) LLM_LATENCY="${arg#--llm-latency=}" ;;
     --fresh)      FRESH=1 ;;
     --no-seed)    SEED=0 ;;
     --no-build)   BUILD=0 ;;
@@ -185,8 +188,11 @@ if [ $QUEUE -eq 1 ]; then
   log "queue mode: Redis on 127.0.0.1:$REDIS_PORT (db 9)"
 fi
 
-log "starting the stub LLM on 127.0.0.1:$LLM_PORT"
-STUB_LLM_PORT="$LLM_PORT" node "$HERE/stub-llm.mjs" >"$TESTBED/stub-llm.log" 2>&1 &
+log "starting the stub LLM on 127.0.0.1:$LLM_PORT$([ "$LLM_LATENCY" -gt 0 ] 2>/dev/null && echo " (answering after ${LLM_LATENCY} ms)")"
+# Latency is zero unless asked for. Every wall clock this project reports is measured with the
+# stub answering instantly; a pause belongs only in a recording, where an agent round needs
+# visible beats to be legible at all.
+STUB_LLM_PORT="$LLM_PORT" STUB_LLM_LATENCY_MS="$LLM_LATENCY" node "$HERE/stub-llm.mjs" >"$TESTBED/stub-llm.log" 2>&1 &
 STUB_PID=$!
 
 log "starting n8n on 127.0.0.1:$PORT (engine=$ENGINE, budget=$BUDGET)"

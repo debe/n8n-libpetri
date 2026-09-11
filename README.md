@@ -397,9 +397,9 @@ node stays grey." src="docs/media/agent-escalation-ladder.gif" width="900" />
 
 *Agent · Escalation Ladder. `Research Agent` spends a declared budget of two tool calls and routes
 the exhaustion down its error output; `Last Try Agent`, reached only once that budget is empty,
-answers. `Answer` and `Give Up` stay grey because neither path was taken — which is the point.
-`Calculator` ran twice and carries no badge, which is divergence #29: n8n reserves a `runData` slot
-for every requested call, and the slot the budget refused leaves the node reading as unexecuted.*
+answers. `Answer` and `Give Up` stay grey because neither path was taken — which is the point. The
+stub answers at a real model's pace (1.3 s a call, 400 ms a tool) so the round has visible beats;
+with an instant stub the whole ladder finishes in 700 ms and shows nothing.*
 
 The testbed is an integration harness, not a conformance measurement. `scripts/run-conformance.sh`
 stays the authority on case counts, and no seeded workflow reaches divergence #17, the one k > 1
