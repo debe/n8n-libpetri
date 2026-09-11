@@ -218,6 +218,43 @@ function retryWaitAction(g: NodeGadget): TransitionAction {
   };
 }
 
+/** The `onFailure` step for one attempt: escalate to the next, or take the terminal arm. */
+function attemptAction(
+  g: NodeGadget, info: TransitionInfo, policy: RoutingPolicy, map: NetMapView,
+): TransitionAction {
+  const i = g.attempts.findIndex((att) => att.index === info.attempt);
+  const attempt = g.attempts[i]!;
+  switch (attempt.action) {
+    case 'retry': {
+      // The chain is unrolled, so "the next attempt" is a place rather than a decrement.
+      const next = g.attempts[i + 1]!;
+      return async (ctx) => {
+        ctx.output(next.running, ctx.input(attempt.failed));
+      };
+    }
+    case 'stop':
+      return async (ctx) => {
+        ctx.input(attempt.failed);
+        ctx.output(map.shared.halt, null);
+        ctx.output(map.shared.budget, null);
+      };
+    default:
+      // `route` and `continue` share the success spec; which output carries the data is the
+      // scheduler's decision, and the placeholder keeps its usual no-data routing.
+      return async (ctx) => {
+        succeed(ctx, g, policy, ctx.input(attempt.failed), map);
+      };
+  }
+}
+
+/** The deadline funnel: an expired attempt becomes the ordinary failure its step answers. */
+function deadlineAction(g: NodeGadget, info: TransitionInfo): TransitionAction {
+  const attempt = g.attempts.find((att) => att.index === info.attempt)!;
+  return async (ctx) => {
+    ctx.output(attempt.failed, ctx.input(attempt.timedOut!));
+  };
+}
+
 /** Binds a structural action for every role that declares an `Out` spec; sinks and `clear` keep passthrough. */
 export function structuralActions(policy: RoutingPolicy): ActionBinder {
   return (info, map) => {
@@ -236,6 +273,8 @@ export function structuralActions(policy: RoutingPolicy): ActionBinder {
       case 'skip': return skipAction(g);
       case 'arm': return armAction(g, info);
       case 'retry': return retryWaitAction(g);
+      case 'attempt': return attemptAction(g, info, policy, map);
+      case 'deadline': return deadlineAction(g, info);
       case 'done-request': return doneRequestAction(g, map);
       case 'dispatch': return dispatchAction(g, map);
       case 'resume': return resumeAction(g);

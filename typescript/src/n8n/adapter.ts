@@ -33,6 +33,8 @@ import type {
 import type {
   MainConnection, NodeDescription, NodeTypeShape, ToolConnection, WorkflowDescription,
 } from '../compiler/index.js';
+import type { ExecutionPolicy } from '../compiler/index.js';
+import { mergePolicies, parseExecutionPolicy, POLICY_SCHEMA_VERSION } from '../compiler/index.js';
 import type { NodeHelpersLike } from './host.js';
 
 /** Node types compiled as Loop Over Items (informational, carried into `NetMap`). */
@@ -88,6 +90,55 @@ export function scanExpressionReferences(parameters: unknown, nodeNames: Readonl
 }
 
 /** `workflow.connectionsBySourceNode[*].main` as compiler connections; dangling targets dropped. */
+/**
+ * n8n node types that are annotations, not work: the canvas draws them and the engine never
+ * schedules them. A quarter of the nodes in n8n's public template library are sticky notes,
+ * and compiling one produces a gadget that can never fire — dead weight in the net and a
+ * "this node can never run" finding that is true and useless.
+ */
+export const NON_EXECUTABLE_TYPES: ReadonlySet<string> = new Set([
+  'n8n-nodes-base.stickyNote',
+]);
+
+/**
+ * Whether a node belongs to the *scheduler's* graph at all.
+ *
+ * Two kinds do not. An annotation ({@link NON_EXECUTABLE_TYPES}) never runs. And a **sub-node**
+ * — a language model, a memory, an output parser, an embedding — reaches its consumer over an
+ * `ai_*` connection that is *not* `ai_tool`, and every one of those is resolved by `supplyData`
+ * inside `runNode`, never by a scheduler (CLAUDE.md; ADR 0008). Such a node has no `main`
+ * connection either way, so compiling it yields an unreachable gadget and a false dead-node
+ * report — measured at 523 sticky notes and ~100 sub-nodes across 200 published templates.
+ *
+ * The test is deliberately conservative: a node is dropped only when it has **no** `main`
+ * connection in either direction and **no** `ai_tool` connection, and does appear as the source
+ * of some other `ai_*` connection. A node wired both ways keeps its gadget.
+ */
+export function isSchedulerNode(
+  name: string,
+  type: string,
+  hasMain: (node: string) => boolean,
+  hasToolWiring: (node: string) => boolean,
+  isSubNodeSource: (node: string) => boolean,
+): boolean {
+  if (NON_EXECUTABLE_TYPES.has(type)) return false;
+  if (hasMain(name) || hasToolWiring(name)) return true;
+  return !isSubNodeSource(name);
+}
+
+/** Nodes that are the source of an `ai_*` connection other than `ai_tool`. */
+export function subNodeSourcesOf(workflow: Workflow): Set<string> {
+  const out = new Set<string>();
+  for (const [from, byType] of Object.entries(workflow.connectionsBySourceNode)) {
+    for (const key of Object.keys(byType ?? {})) {
+      if (key === 'main' || key === 'ai_tool') continue;
+      const groups = (byType as Record<string, unknown>)[key];
+      if (Array.isArray(groups) && groups.some((g) => Array.isArray(g) && g.length > 0)) out.add(from);
+    }
+  }
+  return out;
+}
+
 export function mainConnectionsOf(workflow: Workflow): MainConnection[] {
   const out: MainConnection[] = [];
   for (const [from, byType] of Object.entries(workflow.connectionsBySourceNode)) {
@@ -146,11 +197,77 @@ export function maxRoundsOf(node: INode): number | undefined {
  * no such parameter, so this is forward-compatible plumbing for the scheduler's own bound: a
  * workflow that sets it gets that budget, one that does not gets `maxAgentToolCalls`.
  */
-export function maxToolCallsOf(node: INode): number | undefined {
+export function maxToolCallsOf(node: INode, policy?: ExecutionPolicy): number | undefined {
+  if (policy?.maxToolCalls !== undefined) return policy.maxToolCalls;
   const options = (node.parameters as Record<string, unknown> | undefined)?.['options'];
   if (typeof options !== 'object' || options === null) return undefined;
   const raw = (options as Record<string, unknown>)['maxToolCalls'];
   return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined;
+}
+
+/**
+ * The workflow's declared execution policy, and the per-node policy resolved against it.
+ *
+ * **The carrier, and why it is where it is.** Both keys round-trip through n8n untouched:
+ * `workflow.settings.executionPolicy` survives the REST DTO's `.passthrough()` schema, the
+ * `@JsonColumn` on `WorkflowEntity` and the editor's spread-based settings modal, and
+ * `Workflow.setSettings` stores it verbatim; a top-level `node.executionPolicy` survives the
+ * DTO (which validates only that `nodes` is an array), `normalizeNodeShape`'s `{...node}` and
+ * the editor's own copy loop in `nodeTransforms.ts`, which skips a fixed list of keys and
+ * anything beginning with `_` — so the name must not start with an underscore.
+ *
+ * **`node.parameters` is not a carrier**, which is why the policy is not there.
+ * `getNodeParameters` rebuilds a `collection` from the node type's *declared* options into a
+ * fresh object, so an undeclared key inside `parameters.options` is dropped on the editor's
+ * save path and again in the `Workflow` constructor. That is why `options.maxToolCalls` — the
+ * knob the README's known limits tell users to declare — cannot be set in a live n8n at all,
+ * and why {@link maxToolCallsOf} now reads the policy first and keeps the old path only for
+ * the verify CLI's raw-JSON fixtures.
+ */
+export function workflowPolicyOf(workflow: Workflow, diagnostics: string[]): ExecutionPolicy | undefined {
+  const settings = workflow.settings as Record<string, unknown> | undefined;
+  const parsed = parseExecutionPolicy(settings?.['executionPolicy'], 'workflow settings');
+  diagnostics.push(...parsed.diagnostics);
+  return parsed.policy;
+}
+
+/** A group's policy from `settings.executionPolicy.groups`, by name. */
+function groupPolicyOf(
+  workflowPolicy: ExecutionPolicy | undefined, raw: unknown, group: string, diagnostics: string[],
+): ExecutionPolicy | undefined {
+  void workflowPolicy;
+  const settings = raw as Record<string, unknown> | undefined;
+  const declared = settings?.['executionPolicy'] as Record<string, unknown> | undefined;
+  const groups = declared?.['groups'];
+  if (typeof groups !== 'object' || groups === null) return undefined;
+  const entry = (groups as Record<string, unknown>)[group];
+  if (entry === undefined) return undefined;
+  const parsed = parseExecutionPolicy(
+    { v: POLICY_SCHEMA_VERSION, ...(entry as Record<string, unknown>) }, `group '${group}'`);
+  diagnostics.push(...parsed.diagnostics);
+  return parsed.policy;
+}
+
+/**
+ * One node's resolved policy: workflow default, then the group it names, then its own — node
+ * wins over group wins over workflow, per key.
+ *
+ * The group is named by the *node's* policy, so a node opts into a shared limit rather than a
+ * workflow assigning one to it. That keeps the node readable on its own, which is the same
+ * reason the policy sits on the node rather than in a settings map keyed by node name.
+ */
+export function nodePolicyOf(
+  node: INode, workflow: Workflow, workflowPolicy: ExecutionPolicy | undefined, diagnostics: string[],
+): ExecutionPolicy | undefined {
+  const parsed = parseExecutionPolicy(
+    (node as unknown as Record<string, unknown>)['executionPolicy'], `node '${node.name}'`);
+  diagnostics.push(...parsed.diagnostics);
+  const own = parsed.policy;
+  const group = own?.concurrency?.group ?? own?.rate?.group;
+  const groupPolicy = group === undefined
+    ? undefined
+    : groupPolicyOf(workflowPolicy, workflow.settings, group, diagnostics);
+  return mergePolicies(workflowPolicy, groupPolicy, own);
 }
 
 /**
@@ -226,9 +343,30 @@ export function describeWorkflow(
   const used = new Set<string>();
   const shapes = new Map<string, NodeTypeShape>();
   const references = new Map<string, string[]>();
-  const nodes: NodeDescription[] = Object.values(workflow.nodes).map((node, index) => {
+  const policyDiagnostics: string[] = [];
+  const workflowPolicy = workflowPolicyOf(workflow, policyDiagnostics);
+
+  // The scheduler's graph, not the canvas's: annotations and `supplyData` sub-nodes are
+  // dropped before anything is compiled, so the net holds only nodes that can run.
+  const mainConnections = mainConnectionsOf(workflow);
+  const toolConnections = toolConnectionsOf(workflow);
+  const wiredMain = new Set<string>();
+  for (const c of mainConnections) { wiredMain.add(c.from); wiredMain.add(c.to); }
+  const wiredTool = new Set(toolConnections.flatMap((c) => [c.agent, c.tool]));
+  const subNodes = subNodeSourcesOf(workflow);
+  const scheduled = Object.values(workflow.nodes).filter((node) => isSchedulerNode(
+    node.name, node.type, (n) => wiredMain.has(n), (n) => wiredTool.has(n), (n) => subNodes.has(n)));
+  const dropped = Object.values(workflow.nodes).length - scheduled.length;
+  if (dropped > 0) {
+    policyDiagnostics.push(
+      `${dropped} node(s) are not part of the scheduler's graph (annotations, or sub-nodes ` +
+      'resolved by supplyData inside runNode) and are not compiled');
+  }
+
+  const nodes: NodeDescription[] = scheduled.map((node, index) => {
     shapes.set(node.name, nodeShapeOf(workflow, node, options));
     references.set(node.name, scanExpressionReferences(node.parameters, names));
+    const policy = nodePolicyOf(node, workflow, workflowPolicy, policyDiagnostics);
     return {
       id: prefixOf(node, index, used),
       name: node.name,
@@ -241,16 +379,19 @@ export function describeWorkflow(
       ...(node.maxTries === undefined ? {} : { maxTries: node.maxTries }),
       ...(node.waitBetweenTries === undefined ? {} : { waitBetweenTries: node.waitBetweenTries }),
       ...(maxRoundsOf(node) === undefined ? {} : { maxRounds: maxRoundsOf(node) }),
-      ...(maxToolCallsOf(node) === undefined ? {} : { maxToolCalls: maxToolCallsOf(node) }),
+      ...(maxToolCallsOf(node, policy) === undefined
+        ? {} : { maxToolCalls: maxToolCallsOf(node, policy) }),
+      ...(policy === undefined ? {} : { executionPolicy: policy }),
     };
   });
   const startNodes = startNodesOf(runExecutionData);
   return {
+    ...(policyDiagnostics.length === 0 ? {} : { diagnostics: policyDiagnostics }),
     id: workflow.id,
     ...(workflow.name === undefined ? {} : { name: workflow.name }),
     nodes,
-    connections: mainConnectionsOf(workflow),
-    toolConnections: toolConnectionsOf(workflow),
+    connections: mainConnections,
+    toolConnections,
     startNodes,
     nodeTypes: (n) => shapes.get(n.name)!,
     expressionReferences: (n) => references.get(n.name) ?? [],

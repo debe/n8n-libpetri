@@ -102,3 +102,20 @@ export function toolCallBudgetExceeded(node: INode, undispatched: number, budget
     'scheduler. The budget counts every tool call across every round of one execution.',
   );
 }
+
+/**
+ * An attempt overran its `executionPolicy.timeoutMs` and libpetri abandoned the firing
+ * (IO-013, ADR 0009 §4).
+ *
+ * The node itself never threw — it may still be working, because IO-013 is explicit that
+ * stopping abandoned work is "a capability, not a guarantee" — so the message says what the
+ * engine did rather than blaming the node, and the hint names the knob.
+ */
+export function attemptDeadlineExceeded(node: INode, timeoutMs: number, attempt: number): SchedulerNodeError {
+  return new SchedulerNodeError(
+    node,
+    `Attempt ${attempt} of "${node.name}" did not finish within ${timeoutMs} ms and was abandoned`,
+    'Raise executionPolicy.timeoutMs on this node, or give it an onFailure step that retries. ' +
+    'The node\'s own work is not cancelled: only its result is discarded.',
+  );
+}

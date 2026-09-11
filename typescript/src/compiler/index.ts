@@ -14,15 +14,23 @@
  */
 export { compile, kSafety, readySlot } from './compile.js';
 export {
-  analyse, isAllRequired, joinFormOf, requiredInputsOf, retryParamsOf,
+  analyse, isAllRequired, joinFormOf, requiredInputsOf, retryParamsOf, resolveFailureChain,
   DEFAULT_MAX_TRIES, DEFAULT_WAIT_BETWEEN_TRIES_MS, MIN_MAX_TRIES, MAX_MAX_TRIES, MAX_WAIT_BETWEEN_TRIES_MS,
   DEFAULT_MAX_AGENT_ROUNDS, DEFAULT_MAX_AGENT_TOOL_CALLS,
 } from './graph.js';
 export type { AnalysisOptions } from './graph.js';
 export { SPLIT_ROUTING_ABOVE } from './gadget.js';
 export type {
-  AnalysedNode, MultiProducerInput, ReferenceKind, ResolvedReference, RetryParams, WorkflowAnalysis,
+  AnalysedNode, FailureChain, MultiProducerInput, ReferenceKind, ResolvedReference, ResolvedStep,
+  RetryParams, WorkflowAnalysis,
 } from './graph.js';
+export {
+  parseExecutionPolicy, mergePolicies, plannedBehavioursOf, isTerminalAction, PolicyError,
+  BEHAVIOURS, POLICY_SCHEMA_VERSION,
+} from './policy.js';
+export type {
+  BehaviourEntry, BehaviourStatus, ExecutionPolicy, FailureAction, FailureStep, PolicyParse,
+} from './policy.js';
 export { structuralHash } from './hash.js';
 export { NetMap } from './net-map.js';
 export { placeholderActions, forwardAllActions, routingActions, structuralActions } from './actions.js';
@@ -30,7 +38,8 @@ export type { RoutingMode, RoutingPolicy } from './actions.js';
 export type {
   ActionBinder, BudgetRestriction, CompileOptions, CompiledWorkflow, EdgeKind, EdgeRef, EdgeSlot,
   ExpressionReferences, InputGadget, JoinForm, JoinReadyPlaces, MainConnection, NetMapView, NodeDescription, NodeGadget,
-  NodeGadgetTransitions, NodeTypeResolver, NodeTypeShape, OnError, OutputGadget, PlaceInfo, PlaceRole,
+  AttemptGadget, NodeGadgetTransitions, NodeTypeResolver, NodeTypeShape, OnError, OutputGadget,
+  PlaceInfo, PlaceRole,
   SharedPlaces, ToolConnection, TransitionInfo, TransitionRole, UnmetReferencePayload, Variant,
   WorkflowDescription,
 } from './types.js';

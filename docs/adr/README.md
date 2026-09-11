@@ -10,11 +10,12 @@
 | [0006](0006-concurrency.md) | Payload safety and the k > 1 semantics | accepted |
 | [0007](0007-verification.md) | The verification surface: what the property table proves, and what it cannot | accepted (amended M5: the state-class graph is the primary route, z3 the fallback) |
 | [0008](0008-agent-tool-dispatch.md) | Agent tool dispatch: the round is a marking | accepted |
+| [0009](0009-execution-policy.md) | Execution policy in workflow JSON: the attempt chain | accepted (compiler, carrier and scheduler built; codec and the per-attempt bound remain) |
 
 Each ADR has Context / Decision / Consequences / Evidence; Evidence names the spike under
 `typescript/tests/spikes/` that pins the behaviour it rests on.
 
-All seven are accepted and none is superseded; 0003, 0004, 0005 and 0007 carry amendments
+All nine are accepted and none is superseded; 0003, 0004, 0005 and 0007 carry amendments
 recorded in
 the ADR itself rather than as a new record. 0007's M5 amendment inverts the routes (§9-§12):
 libpetri's state-class graph (VER-010) decides proper completion and the other reachability

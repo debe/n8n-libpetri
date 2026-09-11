@@ -77,7 +77,13 @@ export interface RunPayload {
  */
 export type RetryReason =
   | { readonly kind: 'error'; readonly error: unknown }
-  | { readonly kind: 'soft'; readonly runNodeData: IRunNodeResponse };
+  | { readonly kind: 'soft'; readonly runNodeData: IRunNodeResponse }
+  /**
+   * The attempt overran `executionPolicy.timeoutMs` and libpetri abandoned its firing
+   * (IO-013). Distinct from `error` because n8n never threw — the node may still be working —
+   * so the step that answers it reports the deadline rather than a node error (ADR 0009).
+   */
+  | { readonly kind: 'timeout'; readonly timeoutMs: number };
 
 /** The token on `X/retry`. `X_retry_wait` turns it back into a {@link RunPayload}; `X_exhausted` resolves it. */
 export interface RetryPayload {

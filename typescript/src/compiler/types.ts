@@ -15,6 +15,7 @@
  */
 import type { PetriNet, Place, PrecompiledNet, Token, Transition, TransitionAction } from 'libpetri';
 import type { WorkflowAnalysis } from './graph.js';
+import type { ExecutionPolicy, FailureAction } from './policy.js';
 
 /** n8n `INode.onError`. `undefined` on a node means `'stopWorkflow'`. */
 export type OnError = 'stopWorkflow' | 'continueRegularOutput' | 'continueErrorOutput';
@@ -75,6 +76,17 @@ export interface NodeDescription {
    * unit per firing of `A_dispatch`, the count becomes a path length, which the graph sees.
    */
   readonly maxToolCalls?: number;
+  /**
+   * The node's declared behaviour (ADR 0009): attempt-indexed failure handling, a per-attempt
+   * deadline, admission and rate. Already merged from node, group and workflow scope by
+   * whichever adapter produced this description — the compiler receives one resolved policy
+   * and does not know the scopes it came from.
+   *
+   * `onFailure` and n8n's `retryOnFail` / `onError` are mutually exclusive: the two express the
+   * same thing at different resolutions, and `analyse()` rejects a node carrying both rather
+   * than picking a precedence a workflow author cannot see.
+   */
+  readonly executionPolicy?: ExecutionPolicy;
 }
 
 /** One `main` connection `from.outputIndex → to.inputIndex`, by node name. */
@@ -171,6 +183,13 @@ export interface WorkflowDescription {
   /** One-element alias of {@link startNodes}. */
   readonly startNode?: string;
   readonly nodeTypes: NodeTypeResolver;
+  /**
+   * Anything the producer of this description already decided to report — a policy at an
+   * unknown schema version, an ignored key. `analyse()` seeds its own diagnostics with these,
+   * so a finding made while reading the workflow reaches the same report as one made while
+   * analysing it.
+   */
+  readonly diagnostics?: readonly string[];
   readonly expressionReferences?: ExpressionReferences;
 }
 
@@ -211,11 +230,16 @@ export interface CompileOptions {
  *   node has one, which is what puts the refund one scheduling cycle after the edge tokens;
  * - `skip`: an empty activation; `arm`: an edge arrival of a join / OR input; `clear`:
  *   the OR-input round closer (a genuine sink, CORE-043 AC4);
- * - `retry` (`X_retry_wait`), `exhausted`, `sink` (`nil` drain).
+ * - `retry` (`X_retry_wait`), `exhausted`, `sink` (`nil` drain);
+ * - `attempt`: one step of a declared `onFailure` policy (ADR 0009). It is what `retry` and
+ *   `exhausted` become when the allowance is a chain rather than a counter: the *i*-th step
+ *   consumes `X/failed_i` and either escalates to `X/running_{i+1}` or takes a terminal arm;
+ * - `deadline`: the funnel that turns an expired per-attempt deadline (`X/timedout_i`) into the
+ *   ordinary failure (`X/failed_i`), so one step answers both.
  */
 export type TransitionRole =
   | 'start' | 'start-unmet' | 'run' | 'route' | 'done' | 'skip' | 'arm' | 'clear' | 'retry' | 'exhausted'
-  | 'sink'
+  | 'sink' | 'attempt' | 'deadline'
   | 'done-request' | 'dispatch' | 'collect' | 'resume' | 'rounds-out' | 'calls-out';
 
 /**
@@ -234,11 +258,16 @@ export type TransitionRole =
  * them has a tool call or a re-entry the codec must write back, so they join the codec's rest
  * set inside a designed terminal exactly as `in-data` and `ready` do. `rounds` and `calls` are
  * budgets, consumed like `_budget` and never pending.
+ *
+ * A declared `onFailure` policy adds `failed` (ADR 0009): `X/failed_i` holds the *i*-th
+ * attempt's failure until its step acts on it. It is `retry`'s analogue and classifies like it
+ * — pending work, so a quiescent marking holding one is a stranding unless the class is a
+ * designed terminal, where the codec writes it back.
  */
 export type PlaceRole =
   | 'in-data' | 'in-empty' | 'edge-data' | 'edge-empty' | 'nil' | 'ready' | 'hasdata' | 'ran' | 'free'
   | 'idle' | 'running' | 'ok' | 'routed' | 'done' | 'skipped' | 'retry' | 'tries' | 'waiting' | 'stopped'
-  | 'budget' | 'halt' | 'pause'
+  | 'budget' | 'halt' | 'pause' | 'failed'
   | 'in-tool' | 'routed-request' | 'queue' | 'drained' | 'outstanding' | 'response'
   | 'dispatched' | 'rounds' | 'calls';
 
@@ -275,6 +304,12 @@ export interface TransitionInfo {
   readonly combination?: readonly Variant[];
   /** The referenced node a `start-unmet` twin reports as unmet. */
   readonly reference?: string;
+  /**
+   * 1-based attempt an `onFailure` chain's transition serves (ADR 0009): the `run` of attempt
+   * *i*, the step that answers its failure, or the funnel that turns its expired deadline into
+   * that failure.
+   */
+  readonly attempt?: number;
 }
 
 export interface PlaceInfo {
@@ -378,6 +413,15 @@ export interface NodeGadgetTransitions {
   readonly clear: readonly string[];
   readonly retryWait: string | null;
   readonly exhausted: string | null;
+  /**
+   * `X_run` per attempt of an `onFailure` chain, ascending. `attemptRuns[0]` is `X_run` itself,
+   * so a policy-free node has this empty and its `run` is unchanged.
+   */
+  readonly attemptRuns: readonly string[];
+  /** The step answering each attempt's failure, ascending. */
+  readonly attemptSteps: readonly string[];
+  /** The deadline funnel per attempt (`X/timedout_i` into `X/failed_i`); empty without one. */
+  readonly attemptTimeouts: readonly string[];
   readonly sinks: readonly string[];
   /** `A_done_req`: refunds `_budget` and opens the round (agent nodes only). */
   readonly doneRequest: string | null;
@@ -401,6 +445,37 @@ export interface NodeGadgetTransitions {
    * policy — the same shape as `maxIterations` throwing inside n8n's node.
    */
   readonly callsOut: string | null;
+}
+
+/**
+ * One attempt of an `onFailure` chain: where it runs, where its failure lands, and what the
+ * step answering that failure does (ADR 0009).
+ *
+ * The chain is *unrolled* rather than counted. n8n evaluates `getRetryParams(executionData)`
+ * per activation, but `X/tries` is seeded once per execution and refunded by nothing, so a node
+ * that activates twice gets its leftover allowance. Every token here is created and consumed
+ * inside one activation, so the allowance is per activation by construction.
+ */
+export interface AttemptGadget {
+  /** 1-based. `index === 1` is the ordinary run. */
+  readonly index: number;
+  /** `X/running` for attempt 1, `X/running_i` after it. */
+  readonly running: Place<unknown>;
+  /** `X/failed_i`: this attempt failed and its step has not yet acted. */
+  readonly failed: Place<unknown>;
+  /**
+   * `X/timedout_i`: the deadline expired. A distinct place from `failed`, because IO-013's
+   * timeout child is an `Xor` sibling of the normal outcome and two branches claiming the same
+   * set would make every failing firing ambiguous under IO-015. A funnel transition moves it to
+   * `failed`, which is what makes "a timeout is another way an attempt fails" true in the net.
+   */
+  readonly timedOut: Place<unknown> | null;
+  /** What the step answering this attempt's failure does. */
+  readonly action: FailureAction;
+  /** `retry` only: the delay before the next attempt. */
+  readonly waitMs: number | null;
+  /** `route` only: the connected output the failure takes. */
+  readonly outputIndex: number | null;
 }
 
 /** Everything the scheduler needs to drive one node's gadget. */
@@ -453,6 +528,17 @@ export interface NodeGadget {
   readonly hasdata: Place<unknown> | null;
   readonly retry: Place<unknown> | null;
   readonly tries: Place<unknown> | null;
+  /**
+   * The `onFailure` chain, one entry per attempt, ascending (ADR 0009). Empty when the node
+   * declares no policy, in which case `retry` / `tries` carry n8n's own `retryOnFail` — the two
+   * are mutually exclusive and `analyse()` rejects a node carrying both.
+   *
+   * `attempts[0].running` **is** {@link NodeGadget.running}: the first attempt is the ordinary
+   * run, so `X_start` is unchanged and a policy-free node compiles byte-identically.
+   */
+  readonly attempts: readonly AttemptGadget[];
+  /** `executionPolicy.timeoutMs`: the per-attempt deadline (IO-013). `null` when undeclared. */
+  readonly attemptTimeoutMs: number | null;
   /** `X/waiting`: the node put the execution to wait (PlaceRole `waiting`). */
   readonly waiting: Place<unknown>;
   /** `X/stopped`: the destination-node stop, or a cancellation before the run (PlaceRole `stopped`). */

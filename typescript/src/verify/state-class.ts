@@ -216,7 +216,11 @@ export type TerminalKind = 'none' | 'pause' | 'halt';
  * terminal, so a marking holding it is classified against {@link HALT_REST_ROLES} instead.
  */
 export const PAUSE_REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
-  ...REST_ROLES, 'in-data', 'ready', 'hasdata', 'retry',
+  // `failed` is `retry`'s analogue for an `onFailure` chain (ADR 0009): an attempt that failed
+  // and whose step has not acted. Pending work, so it is *not* in `REST_ROLES` — a quiescent
+  // marking holding one outside a designed terminal is a stranding and is reported as one —
+  // but inside a pause or a halt the codec writes it back, exactly as it does `retry`.
+  ...REST_ROLES, 'in-data', 'ready', 'hasdata', 'retry', 'failed',
   // An agent round the pause caught mid-flight: the tool calls not yet dispatched (`queue`) or
   // the mark that there are none (`drained`), the one dispatched but not yet started
   // (`in-tool`), the ones still out (`outstanding`) and the agent's own re-entry

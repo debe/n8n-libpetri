@@ -331,7 +331,33 @@ export const agentAssumedRounds = workflow('agentAssumedRounds', [
 
 export const AGENTS = { agentOneTool, agentTwoTools, agentSharedTool, agentAssumedRounds } as const;
 
+/**
+ * An `onFailure` chain (ADR 0009): `A` retries twice on its own delay, then routes the failure
+ * down its second output, with a per-attempt deadline. Trigger -> A.0 -> Ok, A.1 -> Fallback.
+ *
+ * Deliberately the shape with every chain place in it — three `running`, three `failed`, three
+ * `timedout` — so the codec round trip and the structural counts both see the full gadget.
+ */
+export const failurePolicy = workflow('failure-policy', [
+  node('Trigger', 'trigger', [0, 0]),
+  node('A', 'if', [200, 0], {
+    executionPolicy: {
+      timeoutMs: 30_000,
+      onFailure: [
+        { action: 'retry', waitMs: 10 },
+        { action: 'retry', waitMs: 20 },
+        { action: 'route', output: 'false' },
+      ],
+    },
+  }),
+  node('Ok', 'set', [400, -100]),
+  node('Fallback', 'set', [400, 100]),
+], [
+  conn('Trigger', 0, 'A', 0), conn('A', 0, 'Ok', 0), conn('A', 1, 'Fallback', 0),
+], 'Trigger');
+
 export const ALL = {
   linear, fanOut, diamond, switch20, chooseBranch, multiProducer, loopOverItems, userCycle,
   twoTriggers, expressionRef, retry, continueErrorOutput, ifHalf, ifBothOutputs, fanOut4, partialRequired,
+  failurePolicy,
 } as const;

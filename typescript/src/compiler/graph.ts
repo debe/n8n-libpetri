@@ -8,6 +8,8 @@
 import type {
   EdgeRef, JoinForm, NodeDescription, NodeTypeShape, OnError, ToolConnection, WorkflowDescription,
 } from './types.js';
+import type { FailureAction } from './policy.js';
+import { isTerminalAction } from './policy.js';
 
 /**
  * n8n's retry parameters as `WorkflowExecute.getRetryParams` reads them
@@ -97,6 +99,111 @@ export interface ResolvedReference {
   readonly kind: ReferenceKind;
 }
 
+/**
+ * A node's declared `onFailure` into a {@link FailureChain}, with output names resolved.
+ *
+ * Rejects rather than guesses in three places, because each would otherwise run a net the
+ * workflow did not describe: `onFailure` beside n8n's own `retryOnFail` / `onError` (the two
+ * say the same thing at different resolutions), a `route` to an output the node does not have
+ * or nobody wired (the emission rule writes connected outputs only, so the step would have
+ * nowhere to put its token), and a `timeoutMs` with no chain to receive the expiry.
+ */
+export function resolveFailureChain(
+  node: NodeDescription,
+  shape: NodeTypeShape,
+  outputCount: number,
+  errorOutputIndex: number | null,
+  connectedOutputs: ReadonlySet<number>,
+  diagnostics: string[],
+): FailureChain | null {
+  const policy = node.executionPolicy;
+  if (policy === undefined) return null;
+  const steps = policy.onFailure;
+  const where = `node '${node.name}'`;
+
+  if (steps === undefined) {
+    if (policy.timeoutMs !== undefined) {
+      throw new Error(
+        `${where}: executionPolicy.timeoutMs needs an onFailure chain to say what an expired ` +
+        'attempt does');
+    }
+    return null;
+  }
+  if (node.retryOnFail === true) {
+    throw new Error(
+      `${where}: executionPolicy.onFailure and retryOnFail both set; onFailure is the same ` +
+      'policy at a finer resolution, so declare one of them');
+  }
+  // `continueErrorOutput` is allowed beside a chain, and is the only way to get a second arc
+  // out of a node that has one main output: `NodeHelpers.getNodeOutputs` appends the error
+  // output purely on this field, which is what makes the editor draw the port and lets a user
+  // wire it. So the two divide cleanly — `onError` declares the *shape*, `onFailure` decides
+  // the *policy* — and a `route` step can then name `'error'`.
+  //
+  // `continueRegularOutput` is refused because it declares no port and claims the terminal the
+  // chain already owns.
+  if (node.onError !== undefined
+    && node.onError !== 'stopWorkflow'
+    && node.onError !== 'continueErrorOutput') {
+    throw new Error(
+      `${where}: executionPolicy.onFailure and onError '${node.onError}' both set; the chain's ` +
+      "last step is this node's error policy, so declare one of them (onError " +
+      "'continueErrorOutput' is the exception: it declares the error output the chain routes to)");
+  }
+
+  /** An output name or index into a connected output index. */
+  const outputOf = (raw: string | number, at: string): number => {
+    let index: number;
+    if (typeof raw === 'number') {
+      index = raw;
+    } else if (raw === 'error' && errorOutputIndex !== null) {
+      index = errorOutputIndex;
+    } else {
+      const named = shape.outputNames?.indexOf(raw) ?? -1;
+      if (named < 0) {
+        throw new Error(
+          `${where}: ${at} routes to output '${raw}', which this node type does not name` +
+          (shape.outputNames === undefined
+            ? ' (the node type declares no output names; use an index)'
+            : ` (it names ${shape.outputNames.map((n) => `'${n}'`).join(', ')})`));
+      }
+      index = named;
+    }
+    if (index >= outputCount) {
+      throw new Error(
+        `${where}: ${at} routes to output ${index}, but the node has ${outputCount}`);
+    }
+    if (!connectedOutputs.has(index)) {
+      throw new Error(
+        `${where}: ${at} routes to output ${index}, which has no connection; wire it or ` +
+        "use 'stop' / 'continue'");
+    }
+    return index;
+  };
+
+  const resolved: ResolvedStep[] = steps.map((step, i) => {
+    const at = `onFailure[${i}]`;
+    return {
+      attempt: i + 1,
+      action: step.action,
+      waitMs: step.action === 'retry' ? (step.waitMs ?? 0) : null,
+      outputIndex: step.action === 'route' ? outputOf(step.output!, at) : null,
+    };
+  });
+  // `parseExecutionPolicy` already truncated at the first terminal, so this is a defence
+  // against a hand-built description rather than against a workflow.
+  const last = resolved[resolved.length - 1];
+  if (last === undefined || !isTerminalAction(last.action)) {
+    throw new Error(`${where}: executionPolicy.onFailure must end with a terminal step`);
+  }
+  if (policy.timeoutMs !== undefined) positiveInt(policy.timeoutMs, `${where} timeoutMs`);
+  diagnostics.push(
+    `${where}: onFailure declares ${resolved.length} attempt(s)` +
+    (policy.timeoutMs === undefined ? '' : ` with a ${policy.timeoutMs} ms deadline each`) +
+    `, ending in '${last.action}'`);
+  return { steps: resolved, timeoutMs: policy.timeoutMs ?? null };
+}
+
 export interface AnalysedNode {
   readonly node: NodeDescription;
   readonly shape: NodeTypeShape;
@@ -143,6 +250,35 @@ export interface AnalysedNode {
   readonly maxToolCalls: number | null;
   /** `maxToolCalls` is the scheduler's default rather than a value the workflow declared. */
   readonly toolCallsAssumed: boolean;
+  /**
+   * The node's resolved `onFailure` chain (ADR 0009), or `null` when it declares none and the
+   * node keeps n8n's `retryOnFail` gadget. Output names are already resolved to indexes here,
+   * so the gadget never re-reads the policy.
+   */
+  readonly failure: FailureChain | null;
+}
+
+/** One attempt's step, with its `route` output resolved to an index. */
+export interface ResolvedStep {
+  /** 1-based: the attempt whose failure this step answers. */
+  readonly attempt: number;
+  readonly action: FailureAction;
+  /** `retry` only; `null` elsewhere. */
+  readonly waitMs: number | null;
+  /** `route` only; `null` elsewhere. Always a connected output of the node. */
+  readonly outputIndex: number | null;
+}
+
+/**
+ * A node's resolved failure policy: one step per attempt, the last of them terminal.
+ *
+ * `steps.length` is the number of attempts, so `steps[0]` answers the first run's failure.
+ * `timeoutMs` arms libpetri's output timeout (IO-013) on every attempt, and an expired budget
+ * lands on the same failure place a thrown error does.
+ */
+export interface FailureChain {
+  readonly steps: readonly ResolvedStep[];
+  readonly timeoutMs: number | null;
 }
 
 export interface MultiProducerInput {
@@ -278,7 +414,10 @@ interface RawNode {
 }
 
 export function analyse(workflow: WorkflowDescription, options: AnalysisOptions = {}): WorkflowAnalysis {
-  const diagnostics: string[] = [];
+  // Whatever the adapter already had to say — a policy at a version this build does not know,
+  // an unknown key it ignored — carried forward so the CLI and the scheduler report it beside
+  // the analysis's own findings instead of the adapter dropping it on the floor.
+  const diagnostics: string[] = [...(workflow.diagnostics ?? [])];
   if (workflow.nodes.length === 0) throw new Error('compile: workflow has no nodes');
 
   // ---- nodes: uniqueness, prefix validity, canvas order ----
@@ -577,6 +716,9 @@ export function analyse(workflow: WorkflowDescription, options: AnalysisOptions 
     }
     const declaredCalls = r.node.maxToolCalls;
     if (isAgent && declaredCalls !== undefined) positiveInt(declaredCalls, `node '${r.node.name}' maxToolCalls`);
+    const connectedOutputs = new Set((outgoing.get(r.node.name) ?? []).map((e) => e.outputIndex));
+    const failure = resolveFailureChain(
+      r.node, r.shape, r.outputCount, r.errorOutputIndex, connectedOutputs, diagnostics);
     return {
       node: r.node, shape: r.shape, index: r.index, outputCount: r.outputCount,
       errorOutputIndex: r.errorOutputIndex, onError: r.onError, retryOnFail: r.retryOnFail,
@@ -589,6 +731,7 @@ export function analyse(workflow: WorkflowDescription, options: AnalysisOptions 
       roundsAssumed: isAgent && declared === undefined,
       maxToolCalls: isAgent ? (declaredCalls ?? defaultCalls) : null,
       toolCallsAssumed: isAgent && declaredCalls === undefined,
+      failure,
     };
   });
   const byName = new Map<string, AnalysedNode>();

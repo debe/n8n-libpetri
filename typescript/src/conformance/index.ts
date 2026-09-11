@@ -32,7 +32,7 @@ export type {
   SchedulerContract, DataContext,
 } from './differ.js';
 export {
-  activationKey, activationsOf, runReference, runPetri, firstDifference, compareData, descendantsOf,
+  activationKey, activationsOf, runReference, runPetri, firstDifference, compareData, comparableTask, descendantsOf,
   strandedNodesOf, orInputNodesOf, dependencyEdges, checkHappensBefore, executionOrder, attribute,
   compareOrdering, diffFixture, diffAll, renderDiffReport,
 } from './differ.js';

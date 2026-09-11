@@ -86,7 +86,7 @@ export class PetriScheduler implements WorkflowScheduler {
   private readonly state: SchedulerState = {
     haltError: undefined, leftoverError: undefined, closeFunction: undefined, fatal: undefined,
     waitingNode: undefined, waitTillAtStart: undefined,
-    starts: new Map(), inFlight: 0, maxInFlight: 0,
+    starts: new Map(), inFlight: 0, maxInFlight: 0, abandoned: new WeakSet(), startedData: new WeakMap(),
   };
   private readonly cache: CompiledWorkflowCache;
   /** Diagnostics of the last `run()`, in order. */

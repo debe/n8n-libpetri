@@ -71,6 +71,12 @@ const EXPECTED: Record<keyof typeof ALL, { transitions: number; places: number }
   // M = choose-branch(3 inputs, required [0, 1]): 3 + skips de ed ee + 6 arms = 12 /
   //   5 + 3 free + ready_0_data ready_0_empty ready_1_data ready_1_empty ready_2 = 13. 7 tree edges.
   partialRequired: { transitions: 3 + 12 + 4 * 4, places: 5 + 13 + 4 * 5 + 7 * 2 + 2 + pauseOutcomes(6) },
+  // `onFailure`, 3 attempts + a 30 s deadline (ADR 0009). Trigger 3/5; Ok and Fallback 4/5 each
+  // (direct, tree edge, acyclic) plus 2 edge places each; A: start + 3 runs + done + skip +
+  // 3 attempt steps + 3 deadline funnels = 12 transitions, and idle/routed/done/skipped plus
+  // in/in_empty plus 3 running (one is `X/running`) + 3 failed + 3 timedout = 13 places, minus
+  // the 2 counted as its own edge pair. Measured against the gadget:
+  failurePolicy: { transitions: 23, places: 45 },
 };
 
 const DEPTHS: Record<keyof typeof ALL, Record<string, number>> = {
@@ -90,6 +96,7 @@ const DEPTHS: Record<keyof typeof ALL, Record<string, number>> = {
   ifBothOutputs: { Trigger: 0, IF: 1, C: 2, Merge: 3, End: 4 },
   fanOut4: { Trigger: 0, Q: 1, S0: 2, S3: 2 },
   partialRequired: { T: 0, A: 1, B: 1, Cc: 1, M: 2, End: 3 },
+  failurePolicy: { Trigger: 0, A: 1, Ok: 2, Fallback: 2 },
 };
 
 /** Canvas order: (y, x) ascending. */
@@ -110,6 +117,7 @@ const CANVAS_ORDER: Record<keyof typeof ALL, string[]> = {
   ifBothOutputs: ['Trigger', 'IF', 'C', 'Merge', 'End'],
   fanOut4: ['Trigger', 'Q', 'S0', 'S1', 'S2', 'S3'],
   partialRequired: ['A', 'T', 'B', 'M', 'End', 'Cc'],
+  failurePolicy: ['Ok', 'Trigger', 'A', 'Fallback'],
 };
 
 describe.each(Object.entries(ALL) as [keyof typeof ALL, (typeof ALL)[keyof typeof ALL]][])('fixture %s', (name, wf) => {
@@ -150,6 +158,14 @@ describe.each(Object.entries(ALL) as [keyof typeof ALL, (typeof ALL)[keyof typeo
       }
       if (g.transitions.retryWait !== null) expect(prio(g.transitions.retryWait)).toBe(depth);
       if (g.transitions.exhausted !== null) expect(prio(g.transitions.exhausted)).toBe(depth + 1);
+      // An `onFailure` chain keeps the same bands: a run is depth + 1 wherever it sits in the
+      // chain, a `retry` step is `X_retry_wait`'s depth, a terminal step is `X_exhausted`'s
+      // depth + 1, and the deadline funnel rides with the run it answers.
+      for (const r of g.transitions.attemptRuns) expect(prio(r), r).toBe(depth + 1);
+      for (const t of g.transitions.attemptTimeouts) expect(prio(t), t).toBe(depth + 1);
+      g.transitions.attemptSteps.forEach((step, i) => {
+        expect(prio(step), step).toBe(g.attempts[i]!.action === 'retry' ? depth : depth + 1);
+      });
     }
   });
 
@@ -180,7 +196,10 @@ describe.each(Object.entries(ALL) as [keyof typeof ALL, (typeof ALL)[keyof typeo
       expect(t.node, t.name).not.toBeNull();
       expect(c.netMap.transitionsOf(t.node!)).toContain(t);
     }
-    expect(c.runningPlaces).toHaveLength(wf.nodes.length);
+    // One per node, plus one for every attempt after the first: an `onFailure` chain spreads
+    // "this node is running" across `X/running_i` (ADR 0009).
+    const extraAttempts = c.netMap.nodes.reduce((n, g) => n + Math.max(0, g.attempts.length - 1), 0);
+    expect(c.runningPlaces).toHaveLength(wf.nodes.length + extraAttempts);
     expect(c.joinInputPlaces.map((p) => p.name)).toEqual(c.netMap.places.filter((p) => p.role === 'ready').map((p) => p.name));
   });
 

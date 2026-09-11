@@ -1301,6 +1301,88 @@ export function producersOf(flat: FlatNet, place: Place<unknown>): string[] {
 }
 
 /**
+ * An `onFailure` chain's bound, in the same two halves as the retry bound below (ADR 0009 §3).
+ *
+ * The **place bound** is `placeBound(X/failed_i, 1)` per attempt: one activation can have at
+ * most one failure outstanding at each position. The **structural** half is what turns that
+ * into "the node runs at most `steps.length` times per activation": the chain is a line, so
+ * every `X/running_i` after the first must be produced by exactly one transition — the step of
+ * the attempt before it — and nothing may put a token back on an earlier one. A compiler change
+ * that wired a step to an earlier attempt would make the chain a cycle and is exactly what this
+ * half catches; the place bound alone would still hold.
+ *
+ * Read off the flattened net, so it costs no route and cannot come back `unknown`.
+ */
+async function runAttemptBound(ctx: Context): Promise<void> {
+  for (const g of ctx.map.nodes) {
+    if (g.attempts.length === 0) continue;
+    let weakest: CheckVerdict = 'proven';
+    for (const attempt of g.attempts) {
+      const property = placeBound(attempt.failed, 1);
+      const decision = graphBound(ctx, attempt.failed, 1)
+        ?? boundedOrUnknown(ctx, await smtDecision(ctx, property));
+      if (decision.verdict !== 'proven') {
+        weakest = decision.verdict === 'violated' ? 'violated'
+          : weakest === 'violated' ? 'violated' : decision.verdict;
+      }
+      record(ctx, {
+        property: 'retry-bound',
+        name: `${g.node} attempt ${attempt.index} has at most one failure outstanding`,
+        subject: { kind: 'node', node: g.node, place: attempt.failed.name },
+        verdict: decision.verdict,
+        explanation: explain(decision.verdict, {
+          proven: `${attempt.failed.name} never holds more than one token, so attempt ${attempt.index} of ` +
+            `${g.node} can fail at most once before its onFailure step acts on it.`,
+          violated: `${attempt.failed.name} can hold more than one token: two activations are at the same ` +
+            'attempt position at once, and the step would answer them in an order nothing fixes.',
+          unknown: `Whether ${attempt.failed.name} stays within one token was not decided.`,
+        }),
+        reason: unknownReason(ctx, decision),
+        elapsedMs: decision.elapsedMs,
+        query: queryRecord(property, decision),
+        counterexample: decision.counterexample,
+      });
+    }
+
+    // The chain must be a line, not a loop: each later attempt has exactly one producer, and it
+    // is the step of the attempt before it.
+    const wrong: string[] = [];
+    g.attempts.forEach((attempt, i) => {
+      if (i === 0) return;
+      const expected = g.transitions.attemptSteps[i - 1];
+      const producers = producersOf(ctx.flat, attempt.running);
+      if (producers.length !== 1 || producers[0] !== expected) {
+        wrong.push(`${attempt.running.name} <- [${producers.join(', ') || 'nothing'}] (expected ${expected})`);
+      }
+    });
+    const attempts: CheckVerdict = wrong.length > 0 ? 'violated' : weakest;
+    const structural: Decision = {
+      verdict: wrong.length > 0 ? 'violated' : 'proven',
+      reason: null, route: 'structural', method: 'structural', elapsedMs: 0, counterexample: null,
+    };
+    record(ctx, {
+      property: 'retry-bound',
+      name: `${g.node} attempts at most ${g.attempts.length} times per activation`,
+      subject: { kind: 'node', node: g.node, place: g.attempts[0]!.failed.name },
+      verdict: attempts,
+      explanation: explain(attempts, {
+        proven: `The chain is a line of ${g.attempts.length} attempt(s): each is reached only from the step ` +
+          'before it and no failure place holds more than one token, so the node runs at most that many times ' +
+          'for one activation — and, unlike X/tries, the next activation starts the chain over.',
+        violated: wrong.length > 0
+          ? `The chain is not a line: ${wrong.join('; ')}. An attempt reachable from anywhere else is a cycle, ` +
+            'and the number of runs is not bounded by the step count.'
+          : 'A failure place can hold more than one token, so the attempt count is not bounded by the chain.',
+        unknown: 'The chain is a line, but the bound on its failure places was not established.',
+      }),
+      reason: attempts === 'unknown' || attempts === 'bounded' ? 'the per-attempt place bound did not close' : null,
+      elapsedMs: 0,
+      query: { ...queryRecord('none', structural), place: g.attempts[0]!.failed.name },
+    });
+  }
+}
+
+/**
  * The retry bound is two checks, because the place bound alone does not entail it.
  *
  * `placeBound(X/tries, maxTries − 1)` is true in the initial marking — `X/tries` is seeded
@@ -1314,6 +1396,7 @@ export function producersOf(flat: FlatNet, place: Place<unknown>): string[] {
  * net — and it is the half a future compiler change would break.
  */
 async function runRetryBound(ctx: Context): Promise<void> {
+  await runAttemptBound(ctx);
   for (const g of ctx.map.nodes) {
     if (g.tries === null || g.maxTries === null) continue;
     const bound = g.maxTries - 1;

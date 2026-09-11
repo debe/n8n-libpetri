@@ -201,10 +201,16 @@ describe('the solver-free route (VER-010)', () => {
       // places. So the pause widening is exactly the four it writes back — no more.
       // The agent round adds five: a round the pause caught mid-flight rests on them, and
       // `encodeMarking` writes every one back onto `nodeExecutionStack` in n8n's own shape.
+      // `failed` is an `onFailure` chain's `retry` (ADR 0009) and rests for the same reason and
+      // in the same modes; it must never reach REST_ROLES, which the assertion below pins.
       const pauseWidening = [...PAUSE_REST_ROLES].filter((r) => !REST_ROLES.has(r)).sort();
       expect(pauseWidening).toEqual([
-        'dispatched', 'drained', 'hasdata', 'in-data', 'in-tool', 'outstanding', 'queue', 'ready', 'retry',
+        'dispatched', 'drained', 'failed', 'hasdata', 'in-data', 'in-tool', 'outstanding', 'queue',
+        'ready', 'retry',
       ]);
+      // An attempt whose step has not acted is pending work in a *finished* run: quiescing on
+      // one outside a designed terminal is a stranding and must be reported as one.
+      expect(REST_ROLES.has('failed')).toBe(false);
       // A *halted* class is encoded in mode `cancelled`, the one mode that legitimately sees
       // an undrained marking: it also handles the empty and the edge places, which a halt
       // stops draining (X_skip and the arms inhibit on _halt, not on _pause).

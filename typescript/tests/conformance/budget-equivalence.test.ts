@@ -45,6 +45,9 @@ const OVERLAPS = [
   // onto one stack and runs them one at a time, so the overlap is the model's, not the
   // workflow's. `agentTwoRounds` asks for one tool per round and stays sequential.
   'agentRound',
+  // `failurePolicy` overlaps for the ordinary reason: `A` has two connected outputs and the
+  // differ's routing sends data down both, so `Ok` and `Fallback` are independent branches.
+  'failurePolicy',
   'complicatedMulti', 'diamond', 'expressionRef', 'fanOut', 'fanOut4', 'haltInFlight',
   'parallelBranches', 'partialRequired', 'runFilter', 'switch20', 'webhookRespond',
 ];

@@ -20,6 +20,7 @@ import type {
   IWorkflowExecuteAdditionalData, Workflow, WorkflowExecuteMode,
 } from 'n8n-workflow';
 import type { NodeDescription, WorkflowDescription } from '../compiler/index.js';
+import { POLICY_SCHEMA_VERSION } from '../compiler/index.js';
 import type { NodeHelpersLike, PlannedNode, SchedulerHooks, SchedulerHost } from '../n8n/host.js';
 
 // ==================== fake Workflow ====================
@@ -58,6 +59,13 @@ export function toINode(n: NodeDescription, options: FakeWorkflowOptions = {}): 
     ...(n.retryOnFail === undefined ? {} : { retryOnFail: n.retryOnFail }),
     ...(n.maxTries === undefined ? {} : { maxTries: n.maxTries }),
     ...(n.waitBetweenTries === undefined ? {} : { waitBetweenTries: n.waitBetweenTries }),
+    // The fixture holds the *resolved* policy (layer 2); n8n carries the *declared* one
+    // (layer 1), which is what `describeWorkflow` parses. Writing the schema version back is
+    // what makes a fixture's `executionPolicy` survive the same round trip `maxRounds` does —
+    // and it exercises the real carrier rather than a shortcut past it (ADR 0009 §2).
+    ...(n.executionPolicy === undefined
+      ? {}
+      : { executionPolicy: { v: POLICY_SCHEMA_VERSION, ...n.executionPolicy } }),
     ...(options.nodeExtras?.[n.name] ?? {}),
   };
 }

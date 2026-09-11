@@ -19,7 +19,7 @@
 import { flatten } from 'libpetri/verification';
 import { compile } from '../../src/compiler/index.js';
 import {
-  conn, diamond, fanOut, linear, loopOverItems, multiProducer, node, switch20, twoTriggers, workflow,
+  conn, diamond, fanOut, linear, loopOverItems, multiProducer, node, switch20, twoTriggers, workflow, failurePolicy,
 } from '../fixtures/workflows.js';
 import {
   DEFAULT_MAX_CLASSES, alternativeEntryReach, effectiveMaxClasses, producersOf, verify, verifyCompiled,
@@ -106,6 +106,28 @@ describeZ3('verify: properties', () => {
 
       const none = await verify(linear, { ...base, properties: ['retry-bound'] });
       expect(checksOf(none, 'retry-bound')).toHaveLength(0);
+    });
+
+    it('an onFailure chain proves one bound per attempt plus that the chain is a line', { timeout: CASE_TIMEOUT_MS }, async () => {
+      const report = await verify(failurePolicy, { ...base, properties: ['retry-bound'] });
+      const checks = checksOf(report, 'retry-bound');
+      // Three attempts, so three place bounds plus the structural line check.
+      expect(checks).toHaveLength(4);
+      expect(checks.slice(0, 3).map((c) => c.name)).toEqual([
+        'A attempt 1 has at most one failure outstanding',
+        'A attempt 2 has at most one failure outstanding',
+        'A attempt 3 has at most one failure outstanding',
+      ]);
+      expect(checks.slice(0, 3).every((c) => c.verdict === 'proven'), digest(report)).toBe(true);
+      expect(checks.slice(0, 3).every((c) => c.query.property === 'place-bound')).toBe(true);
+
+      const line = checks[3]!;
+      expect(line.name).toBe('A attempts at most 3 times per activation');
+      expect(line.verdict, digest(report)).toBe('proven');
+      // The half a compiler change would break, and it needs no solver: each later attempt is
+      // reachable from exactly one place — the step before it — so the chain cannot loop.
+      expect(line.query.method).toBe('structural');
+      expect(line.explanation).toContain('the next activation starts the chain over');
     });
 
     it('the producer half is what carries the attempt bound: nothing in the net produces X/tries', () => {

@@ -28,8 +28,9 @@ export function structuralHash(analysis: WorkflowAnalysis): string {
     // `A/rounds`. Neither is derivable from the main graph, so two workflows differing only in
     // their tool wiring would otherwise share a cached net and an agent would dispatch through
     // the wrong one; 9: the tool-call budget `A/calls` replaces the `A/pending` count, and its
-    // seed `maxToolCalls` is part of the marking
-    v: 9,
+    // seed `maxToolCalls` is part of the marking; 10: the resolved `onFailure` chain and its
+    // per-attempt deadline, which decide how many `running` / `failed` places the node has
+    v: 10,
     start: analysis.startNode,
     starts: [...analysis.startNodes],
     nodes: analysis.nodes.map((a) => ({
@@ -60,6 +61,14 @@ export function structuralHash(analysis: WorkflowAnalysis): string {
       roundsAssumed: a.roundsAssumed,
       maxToolCalls: a.maxToolCalls,
       toolCallsAssumed: a.toolCallsAssumed,
+      // The *resolved* chain, not the declared policy: output names are already indexes here,
+      // so two workflows that name the same output differently share an entry, and two that
+      // resolve differently never do. ADR 0008's boundary review found the cost of omitting a
+      // field that changes the net — two workflows sharing one compiled net.
+      failure: a.failure === null ? null : {
+        timeoutMs: a.failure.timeoutMs,
+        steps: a.failure.steps.map((step) => [step.action, step.waitMs, step.outputIndex]),
+      },
     })),
     edges: analysis.edges.map((e) => [e.from, e.outputIndex, e.to, e.inputIndex]),
     toolEdges: analysis.toolConnections.map((c) => [c.tool, c.agent]),

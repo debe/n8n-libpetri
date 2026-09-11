@@ -54,7 +54,7 @@ import type {
 import { entryForEdge } from '../codec.js';
 import type { ActionBinder, InputGadget, NetMapView, NodeGadget, TransitionInfo } from '../compiler/index.js';
 import type { PlannedNode, SchedulerHooks, SchedulerHost } from '../n8n/host.js';
-import { engineRequestUnsupported, toolCallBudgetExceeded, UnmetReferenceError } from './errors.js';
+import { attemptDeadlineExceeded, engineRequestUnsupported, toolCallBudgetExceeded, UnmetReferenceError } from './errors.js';
 import {
   isDispatchPayload, isEdgePayload, isEntryPayload,
   type DispatchPayload, type EdgePayload, type OkPayload, type RequestPayload, type ResponsePayload,
@@ -106,6 +106,30 @@ export interface SchedulerState {
   inFlight: number;
   /** The high-water mark of {@link SchedulerState.inFlight}: never above the budget k. */
   maxInFlight: number;
+  /**
+   * Run payloads whose firing a deadline abandoned (ADR 0009 §4).
+   *
+   * IO-013 discards what the abandoned firing wrote to the *marking*, but our action is not
+   * only a computation: it goes on to call `upsertTaskData`, `nodeExecuteAfter` and
+   * `handleNodeExecutionError`. A `runNode` that resolves after the budget expired would write
+   * task data for an attempt the net has already disowned, and the execution would end holding
+   * it. Membership here is what those writes check.
+   *
+   * Keyed on the payload object's identity, which is unique per activation and which
+   * `forwardInput` (IO-014) preserves into the timeout place — so the funnel and the late
+   * completion are talking about the same run.
+   */
+  readonly abandoned: WeakSet<object>;
+  /**
+   * The `ITaskStartedData` of each in-flight run, by run-payload identity.
+   *
+   * A deadline can abandon attempt 1's firing *before* the action has put anything back into
+   * the marking, and `createTaskStartedData` is what assigns n8n's `executionIndex` — called
+   * once per activation, never once per attempt. So the step answering the expiry cannot
+   * recreate it and cannot read it off the token: it reads it here, keyed on the very payload
+   * `forwardInput` carried into the timeout place.
+   */
+  readonly startedData: WeakMap<object, ITaskStartedData>;
 }
 
 export interface ExecutionEnv {
@@ -393,6 +417,13 @@ async function record(
   nodeSuccessDataIn: INodeExecutionData[][] | null | undefined,
   executionError: ExecutionBaseError | undefined,
   wait: WaitProbe,
+  /**
+   * An `onFailure` `route` step's target (ADR 0009): the connected output the failure takes,
+   * and the message the item carries. Applied *before* the task data is written, so the run the
+   * editor shows is the run that happened — a rewrite afterwards would route one way and record
+   * another.
+   */
+  routeTo?: { readonly index: number; readonly message: string },
 ): Promise<Outcome> {
   const { host, runExecutionData, hooks } = env;
   let nodeSuccessData = nodeSuccessDataIn;
@@ -423,6 +454,14 @@ async function record(
   // until the *next* iteration starts), and `undefined` when the attempt succeeded.
   env.state.leftoverError = executionError;
 
+  if (routeTo !== undefined) {
+    // n8n's own handler continued this failure down output 0 with the input passed through;
+    // the step said which output it belongs on, and it carries the error as data.
+    const branch: INodeExecutionData[][] = [];
+    for (let o = 0; o <= routeTo.index; o++) branch.push([]);
+    branch[routeTo.index] = [{ json: { error: routeTo.message }, pairedItem: { item: 0 } }];
+    nodeSuccessData = branch;
+  }
   host.normalizeNodeErrors(nodeSuccessData!);
   taskData.data = { main: nodeSuccessData } as ITaskDataConnections;
   host.rewireOutputLog(executionNode, taskData, nodeSuccessData!, runIndex);
@@ -501,6 +540,26 @@ async function softAttempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload
   }
 }
 
+/**
+ * Whether a deadline abandoned this activation's firing while it was still running.
+ *
+ * IO-013 discards what an abandoned firing wrote to the marking, but not what our action went
+ * on to do to n8n: `postRun`, `record` and the hooks all write. A `runNode` that resolves after
+ * the budget expired must therefore stop here, or the execution ends holding task data for an
+ * attempt the net disowned and n8n reports a node the workflow already escalated past.
+ *
+ * Checked at each point the action can still write — after `runNode` resolves, after `postRun`,
+ * and on the error path. The residual window is the inside of those awaits, which is the same
+ * shape as divergence #15's `waitTill` race and is recorded with it.
+ */
+function abandoned(env: ExecutionEnv, payload: RunPayload): boolean {
+  if (!env.state.abandoned.has(payload)) return false;
+  env.diagnostic(
+    `node '${payload.executionData.node.name}': attempt ${payload.attempt + 1} finished after its ` +
+    'deadline abandoned it; the late result is discarded and nothing is recorded for it');
+  return true;
+}
+
 /** One attempt: lines 49–212 with the retry loop unrolled, then {@link record} unless the net may retry. */
 async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): Promise<Outcome> {
   const { host, workflow, runExecutionData, hooks, state } = env;
@@ -529,13 +588,18 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
   } else {
     taskStartedData = payload.taskStartedData!;
   }
+  // Reachable by the deadline funnel, which sees this payload and nothing else.
+  state.startedData.set(payload, taskStartedData);
   // Line 67. Recomputed per attempt: runData of this node does not change between attempts.
   const runIndex = host.computeRunIndex(executionData);
   // Lines 69–72, the endless-loop guard: abandoned (divergence #6).
   // Line 101, read once per popped entry as n8n reads it (outside the try loop): `[1, 0]` for
   // a node without retryOnFail or resuming with `metadata.resumeError`. A later attempt only
   // exists because that read allowed one, so the net (`X/tries`) decides from there on.
-  let canRetry = g.retry !== null;
+  // An `onFailure` chain answers this for every attempt, including the last: the failure always
+  // lands on that attempt's `X/failed_i` and the *step* decides, so the run itself never
+  // records and never consults `onError` (ADR 0009 §3).
+  let canRetry = g.attempts.length > 0 ? true : g.retry !== null;
   if (payload.attempt === 0) {
     // Lines 74–76: a filtered-out node is skipped entirely — no run, no task data, no hook.
     if (host.isNodeFilteredOut(executionNode.name)) {
@@ -556,8 +620,11 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
     if (!executionData.metadata?.nodeWasResumed) {
       await hooks.runHook('nodeExecuteBefore', [executionNode.name, taskStartedData]);
     }
+    // An `onFailure` chain replaces n8n's counter (ADR 0009): every failure lands on this
+    // attempt's `X/failed_i` and the *step* decides what happens, so the run never consults
+    // `getRetryParams` and never records — the terminal step does that, as `X_exhausted` does.
     const [maxTries] = host.getRetryParams(executionData);
-    canRetry = maxTries > 1 && g.retry !== null;
+    canRetry = g.attempts.length > 0 ? true : (maxTries > 1 && g.retry !== null);
   }
 
   const waitTillBefore = runExecutionData.waitTill;
@@ -581,6 +648,9 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
         subNodeExecutionResults,
       ); // lines 132–141
       wait(); // claim in the same turn as the resolution (divergence #15)
+      // The deadline may have fired while `runNode` was outstanding. Everything below this
+      // line writes to n8n, so this is where a late completion stops.
+      if (abandoned(env, payload)) return { kind: 'ok', nodeSuccessData: [], runIndex };
       // Lines 163–174: an agent asking for its tools. n8n `continue`s the loop here — nothing
       // is recorded for this activation, no `nodeExecuteAfter`, no output — and the net does
       // the same: the request outcome opens a round and the agent re-enters through `A_resume`.
@@ -595,9 +665,11 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
       }
       nodeSuccessData = await postRun(env, executionNode, executionData, taskStartedData, runIndex, runNodeData);
     }
+    if (abandoned(env, payload)) return { kind: 'ok', nodeSuccessData: [], runIndex };
     return await finishSuccess(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, wait);
   } catch (error) {
     const executionError = host.reportNodeExecutionError(error, executionNode, workflow); // line 210
+    if (abandoned(env, payload)) return { kind: 'ok', nodeSuccessData: [], runIndex };
     if (canRetry) {
       return retryOutcome({ executionData, attempt: payload.attempt + 1, taskStartedData, waitTillBefore, reason: { kind: 'error', error: executionError } });
     }
@@ -606,7 +678,10 @@ async function attempt(env: ExecutionEnv, g: NodeGadget, payload: RunPayload): P
 }
 
 /** `X_exhausted`: the after-loop handling of the last attempt. */
-async function exhaust(env: ExecutionEnv, payload: RetryPayload): Promise<Outcome> {
+async function exhaust(
+  env: ExecutionEnv, payload: RetryPayload,
+  routeTo?: { readonly index: number; readonly message: string },
+): Promise<Outcome> {
   const { host } = env;
   const { executionData, taskStartedData, reason } = payload;
   const executionNode = executionData.node;
@@ -616,7 +691,15 @@ async function exhaust(env: ExecutionEnv, payload: RetryPayload): Promise<Outcom
   const wait = probeWait(env, executionNode, payload.waitTillBefore);
   wait();
   if (reason.kind === 'error') {
-    return record(env, executionNode, executionData, taskStartedData, runIndex, null, reason.error as ExecutionBaseError, wait);
+    return record(env, executionNode, executionData, taskStartedData, runIndex, null, reason.error as ExecutionBaseError, wait, routeTo);
+  }
+  if (reason.kind === 'timeout') {
+    // The node never threw; the engine abandoned its firing. Recorded like any other node
+    // failure so `runData`, the hooks and `onError` all see one, which is what lets the
+    // terminal step reuse n8n's own error handling unchanged.
+    const error = host.reportNodeExecutionError(
+      attemptDeadlineExceeded(executionNode, reason.timeoutMs, payload.attempt), executionNode, env.workflow);
+    return record(env, executionNode, executionData, taskStartedData, runIndex, null, error, wait, routeTo);
   }
   // A soft failure with no try left is processed like any other output (line 176 on).
   try {
@@ -624,7 +707,7 @@ async function exhaust(env: ExecutionEnv, payload: RetryPayload): Promise<Outcom
     return await finishSuccess(env, executionNode, executionData, taskStartedData, runIndex, nodeSuccessData, wait);
   } catch (error) {
     const executionError = host.reportNodeExecutionError(error, executionNode, env.workflow);
-    return record(env, executionNode, executionData, taskStartedData, runIndex, null, executionError, wait);
+    return record(env, executionNode, executionData, taskStartedData, runIndex, null, executionError, wait, routeTo);
   }
 }
 
@@ -669,6 +752,17 @@ function write(ctx: TransitionContext, g: NodeGadget, map: NetMapView, outcome: 
       succeed(ctx, g, { nodeSuccessData: outcome.nodeSuccessData, runIndex: outcome.runIndex }, map, run);
       return;
     case 'retry':
+      // With a chain the failure is a *position*, not a counter decrement: it goes to the
+      // place belonging to the attempt that just failed, which `run.attempt` names (0-based,
+      // as `X_start` seeds it). Without one it is n8n's single `X/retry`.
+      if (g.attempts.length > 0) {
+        const failing = g.attempts[run?.attempt ?? 0];
+        if (failing === undefined) {
+          throw new Error(`internal: node '${g.node}' has no attempt ${run?.attempt ?? 0} in its onFailure chain`);
+        }
+        ctx.output(failing.failed, outcome.payload);
+        return;
+      }
       ctx.output(g.retry!, outcome.payload);
       return;
     case 'halt':
@@ -826,10 +920,15 @@ function startAction(g: NodeGadget, map: NetMapView, unmetReference?: string): T
 
 // ==================== the other roles ====================
 
-function runAction(g: NodeGadget, map: NetMapView): TransitionAction {
+function runAction(g: NodeGadget, map: NetMapView, info?: TransitionInfo): TransitionAction {
+  // With a chain each attempt has its own run transition and its own `X/running_i`; attempt 1
+  // reuses `X/running`, so a policy-free node is untouched.
+  const from = g.attempts.length === 0
+    ? g.running
+    : g.attempts.find((a) => a.index === (info?.attempt ?? 1))!.running;
   return async (ctx) => {
     const { state } = envOf(ctx);
-    const payload = ctx.input(g.running) as RunPayload;
+    const payload = ctx.input(from) as RunPayload;
     state.inFlight++;
     if (state.inFlight > state.maxInFlight) state.maxInFlight = state.inFlight;
     try {
@@ -951,6 +1050,107 @@ function roundsOutAction(g: NodeGadget, map: NetMapView): TransitionAction {
   };
 }
 
+/**
+ * `X/timedout_i` into `X/failed_i`: the deadline funnel (ADR 0009 §4).
+ *
+ * The token it moves is the very `RunPayload` the abandoned firing consumed — `forwardInput`
+ * (IO-014) reproduces it, where IO-013's plain timeout child would have deposited a sentinel
+ * and left the step with no `executionData`. Registering it as abandoned is what stops the
+ * still-running `runNode` writing to n8n when it eventually resolves.
+ */
+function deadlineAction(g: NodeGadget, info: TransitionInfo): TransitionAction {
+  const attempt = g.attempts.find((a) => a.index === info.attempt)!;
+  return async (ctx) => {
+    const { state } = envOf(ctx);
+    const run = ctx.input(attempt.timedOut!) as RunPayload;
+    state.abandoned.add(run);
+    const started = state.startedData.get(run) ?? run.taskStartedData;
+    if (started === undefined) {
+      throw new Error(
+        `internal: node '${g.node}' timed out before its task-started data was recorded`);
+    }
+    const failure: RetryPayload = {
+      executionData: run.executionData,
+      // Same convention as `retryOutcome`: a failure carries the *next* attempt's number.
+      attempt: run.attempt + 1,
+      taskStartedData: started,
+      reason: { kind: 'timeout', timeoutMs: g.attemptTimeoutMs! },
+      ...(run.agent === undefined ? {} : { agent: run.agent }),
+      ...(run.roundId === undefined ? {} : { roundId: run.roundId }),
+    };
+    ctx.output(attempt.failed, failure);
+  };
+}
+
+/** Why this attempt failed, in one line, for the item a `route` step emits. */
+function failureMessage(payload: RetryPayload): string {
+  const reason = payload.reason;
+  if (reason.kind === 'timeout') return `did not finish within ${reason.timeoutMs} ms`;
+  if (reason.kind === 'error') {
+    // `.message` rather than `instanceof Error`: `reportNodeExecutionError` is the host's, and it
+    // is only contracted to return something error-*shaped* — `FakeHost` returns a plain object.
+    const message = (reason.error as { message?: unknown } | null | undefined)?.message;
+    return typeof message === 'string' && message !== '' ? message : String(reason.error);
+  }
+  const item = reason.runNodeData.data?.[0]?.[0]?.json?.['error'];
+  return typeof item === 'string' ? item : 'the attempt returned an error item';
+}
+
+/**
+ * One step of an `onFailure` chain (ADR 0009 §3).
+ *
+ * The mapping is exact rather than new machinery: a `retry` step **is** `X_retry_wait` with the
+ * step's own delay, and a terminal step **is** `X_exhausted` with the outcome the workflow chose
+ * instead of the one `onError` fixed.
+ */
+function attemptStepAction(g: NodeGadget, info: TransitionInfo, map: NetMapView): TransitionAction {
+  const i = g.attempts.findIndex((a) => a.index === info.attempt);
+  const attempt = g.attempts[i]!;
+  if (attempt.action === 'retry') {
+    const next = g.attempts[i + 1]!;
+    return async (ctx) => {
+      const r = ctx.input(attempt.failed) as RetryPayload;
+      const payload: RunPayload = {
+        // `retryOutcome` already advanced the counter when it built this failure, so the next
+        // run carries `r.attempt` as it stands — the same convention `X_retry_wait` uses.
+        executionData: r.executionData, attempt: r.attempt, taskStartedData: r.taskStartedData,
+        // A soft failure resumes inside n8n's inner loop; a thrown or timed-out one re-enters
+        // the whole try body, since neither left a `runNodeData` to resume from.
+        softRetry: r.reason.kind === 'soft',
+        ...(r.agent === undefined ? {} : { agent: r.agent }),
+        ...(r.roundId === undefined ? {} : { roundId: r.roundId }),
+      };
+      ctx.output(next.running, payload);
+    };
+  }
+  return async (ctx) => {
+    const payload = ctx.input(attempt.failed) as RetryPayload;
+    // The terminal step *is* this node's error policy, so n8n's own `handleNodeExecutionError`
+    // is reused rather than reimplemented — with `executionData.node.onError` set to the value
+    // the step named. n8n reads `onError` off `executionData.node` (`continuesOnError`), not off
+    // the `executionNode` argument, which is why the clone is on the execution data.
+    // `route` borrows n8n's `continueErrorOutput`, `continue` its `continueRegularOutput`.
+    // Both make `continuesOnError` true, so n8n's own handler continues the execution; which
+    // output the payload lands on is decided below, because n8n itself never routes a *thrown*
+    // failure to the error output — `handleNodeErrorOutput` only sorts per-item errors out of
+    // an otherwise successful run (divergence #27).
+    const onError = attempt.action === 'stop' ? 'stopWorkflow'
+      : attempt.action === 'route' ? 'continueErrorOutput' : 'continueRegularOutput';
+    const executionData: IExecuteData = {
+      ...payload.executionData,
+      node: { ...payload.executionData.node, onError },
+    };
+    const routed: RetryPayload = { ...payload, executionData };
+    // `route` names the output; `continue` leaves n8n's input passthrough on output 0.
+    const routeTo = attempt.outputIndex === null
+      ? undefined
+      : { index: attempt.outputIndex, message: failureMessage(payload) };
+    await guarded(ctx, g, map, executionData,
+      async () => await exhaust(envOf(ctx), routed, routeTo),
+      { executionData, attempt: payload.attempt, taskStartedData: payload.taskStartedData });
+  };
+}
+
 function retryWaitAction(g: NodeGadget): TransitionAction {
   return async (ctx) => {
     const r = ctx.input(g.retry!) as RetryPayload;
@@ -997,7 +1197,9 @@ export function schedulerActions(): ActionBinder {
     switch (info.role) {
       case 'start': return startAction(g, map);
       case 'start-unmet': return startAction(g, map, info.reference!);
-      case 'run': return runAction(g, map);
+      case 'run': return runAction(g, map, info);
+      case 'attempt': return attemptStepAction(g, info, map);
+      case 'deadline': return deadlineAction(g, info);
       case 'route': return routeAction(g, info);
       case 'retry': return retryWaitAction(g);
       case 'exhausted': return exhaustedAction(g, map);

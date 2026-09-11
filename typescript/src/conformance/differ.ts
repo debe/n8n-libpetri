@@ -387,7 +387,7 @@ function errorShape(task: ITaskData): unknown {
  * `usedDynamicCredentials` / `attemptedDynamicCredentials` — divergence #18's observable,
  * which no scheduler can scope above k = 1 and which this host does not mirror anyway.
  */
-function comparableTask(task: ITaskData): Record<string, unknown> {
+export function comparableTask(task: ITaskData): Record<string, unknown> {
   return {
     data: task.data,
     source: task.source,

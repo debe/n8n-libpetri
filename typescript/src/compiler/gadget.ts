@@ -87,13 +87,15 @@
  * their prefixed names (MOD-012). Actions are bound after composition on the flat net
  * (CORE-042), so the body carries libpetri's default `passthrough()` until then.
  */
-import { SubnetDef, Transition, place, one, all, exactly, and, xor, outPlace, delayed } from 'libpetri';
+import {
+  SubnetDef, Transition, place, one, all, exactly, and, xor, outPlace, delayed, timeout, forwardInput,
+} from 'libpetri';
 import type { Out, Place, PortDirection } from 'libpetri';
 import type { AnalysedNode, WorkflowAnalysis } from './graph.js';
 import { joinFormOf } from './graph.js';
 import type {
-  EdgeRef, EdgeSlot, InputGadget, NodeGadget, OutputGadget, PlaceInfo, PlaceRole, SharedPlaces,
-  TransitionInfo, TransitionRole, Variant,
+  AttemptGadget, EdgeRef, EdgeSlot, InputGadget, NodeGadget, OutputGadget, PlaceInfo, PlaceRole,
+  SharedPlaces, TransitionInfo, TransitionRole, Variant,
 } from './types.js';
 
 /**
@@ -279,7 +281,9 @@ export function buildNodeGadget(
   const incoming = analysis.incoming.get(name) ?? [];
   const outgoing = analysis.outgoing.get(name) ?? [];
   const form = joinFormOf(a, incoming);
-  const stopWorkflow = a.onError === 'stopWorkflow';
+  // A chain needs the halt branch whatever `onError` says: its own `stop` step deposits it, and
+  // `guarded()` falls back to it for a fatal raised outside n8n's node try (ADR 0009 §3).
+  const stopWorkflow = a.onError === 'stopWorkflow' || a.failure !== null;
   const required = new Set<number>(a.requiredInputs ?? []);
 
   // Agent tool dispatch (README "Agent tool dispatch"). `tools` is non-empty exactly on an
@@ -496,6 +500,23 @@ export function buildNodeGadget(
   const retry = a.retryOnFail ? internal('retry', 'retry', null) : null;
   const tries = a.retryOnFail ? internal('tries', 'tries', null) : null;
 
+  // ---- onFailure chain places (ADR 0009) ----
+  // One `running` / `failed` pair per attempt, plus a `timedout` when a deadline is declared.
+  // Attempt 1 reuses `X/running`, so `X_start` never learns the node has a policy and a
+  // policy-free node compiles exactly as before.
+  const chain = a.failure;
+  const chainSteps = chain?.steps ?? [];
+  const chainTimeoutMs = chain?.timeoutMs ?? null;
+  const attemptRunning: Place<unknown>[] = [];
+  const attemptFailed: Place<unknown>[] = [];
+  const attemptTimedOut: (Place<unknown> | null)[] = [];
+  chainSteps.forEach((step, i) => {
+    attemptRunning.push(i === 0 ? running : internal(`running_${step.attempt}`, 'running', null));
+    attemptFailed.push(internal(`failed_${step.attempt}`, 'failed', null));
+    attemptTimedOut.push(
+      chainTimeoutMs === null ? null : internal(`timedout_${step.attempt}`, 'failed', null));
+  });
+
   // ---- agent round places (patterns.md §5, "fan-out and join with pending markers") ----
   // `routed_req` phases the budget refund exactly as `routed` does for every other outcome;
   // `queue` carries the undispatched actions and `drained` marks that there are none;
@@ -602,19 +623,54 @@ export function buildNodeGadget(
   // cycle later — so `_budget + Σ(running + retry + routed) = k` still holds with `routed_req`
   // counted among the in-flight markers.
   const requestBranch = isAgent ? [outPlace(routedRequest!)] : [];
-  const outcome = xorOf([
+  /**
+   * The outcome of one attempt. Without a policy this is the historical shape and `failure` is
+   * `null`; with one, the retry alternative is that attempt's own `X/failed_i` — a chain
+   * position rather than a counter decrement.
+   */
+  const outcomeOf = (failure: Place<unknown> | null): Out => xorOf([
     success,
-    ...(retry !== null ? [outPlace(retry)] : []),
+    ...(failure !== null ? [outPlace(failure)] : retry !== null ? [outPlace(retry)] : []),
     ...(stopWorkflow ? [haltBranch] : []),
     waitingBranch,
     stoppedBranch,
     ...requestBranch,
   ]);
-  body.push(Transition.builder('run')
-    .inputs(one(running))
-    .outputs(and(outcome, outPlace(idle)))
-    .priority(depth + 1).build());
-  tinfo('run', 'run');
+
+  const attemptRunNames: string[] = [];
+  if (chainSteps.length === 0) {
+    body.push(Transition.builder('run')
+      .inputs(one(running))
+      .outputs(and(outcomeOf(null), outPlace(idle)))
+      .priority(depth + 1).build());
+    tinfo('run', 'run');
+  } else {
+    chainSteps.forEach((step, i) => {
+      // Attempt 1 keeps the name `run`, so every consumer that addresses a node's run
+      // transition by name — the scheduler's binder, `NetMap`, the differ — is unchanged.
+      const local = i === 0 ? 'run' : `run_${step.attempt}`;
+      const normal = and(outcomeOf(attemptFailed[i]!), outPlace(idle));
+      // IO-013's timeout child is an `Xor` sibling of the normal spec, and IO-015 needs
+      // exactly one assignment to explain a write. It therefore has to claim a place the
+      // normal branches do not, or every failing firing would be ambiguous — hence the
+      // separate `timedout_i`, funnelled into `failed_i` below.
+      const timedOut = attemptTimedOut[i];
+      body.push(Transition.builder(local)
+        .inputs(one(attemptRunning[i]!))
+        .outputs(timedOut == null
+          ? normal
+          // `forwardInput`, not `outPlace`: IO-013 AC3 gives the timeout child *sentinel*
+          // tokens, so a plain output would land a `null` on `timedout_i` and the step would
+          // have no `executionData` to act on. IO-014 forwards the very token the firing
+          // consumed from `X/running_i` — the run payload — which is what "this enables retry
+          // patterns without losing tokens" means.
+          : xor(normal, timeout(chainTimeoutMs!,
+              and(forwardInput(attemptRunning[i]!, timedOut), outPlace(idle)))))
+        .priority(depth + 1).build());
+      tinfo(local, 'run', { attempt: step.attempt });
+      attemptRunNames.push(F(local));
+    });
+  }
 
   // ---- X_route_o (split shape only) and X_done: the budget refund, one cycle later ----
   const routeNames: string[] = [];
@@ -860,6 +916,54 @@ export function buildNodeGadget(
     tinfo('exhausted', 'exhausted');
   }
 
+  // ---- the onFailure chain: one step per attempt, plus the deadline funnel (ADR 0009) ----
+  //
+  // This is `retry_wait` + `exhausted` generalised: a `retry` step is `retry_wait` with its own
+  // delay, and a terminal step is `exhausted` with the outcome the workflow chose instead of
+  // the one `onError` fixed. What it does not have is a counter — the position is the place,
+  // so the allowance cannot leak across activations the way `X/tries` does.
+  const attemptStepNames: string[] = [];
+  const attemptTimeoutNames: string[] = [];
+  chainSteps.forEach((step, i) => {
+    const failed = attemptFailed[i]!;
+    const timedOut = attemptTimedOut[i];
+    if (timedOut != null) {
+      // A rename, structurally: it inhibits `_halt` like an arm and not `_pause`, so a paused
+      // net still funnels and quiesces with one failure place marked rather than two.
+      const local = `timeout_${step.attempt}`;
+      body.push(Transition.builder(local)
+        .inputs(one(timedOut))
+        .inhibitors(halt)
+        .outputs(outPlace(failed))
+        .priority(depth + 1).build());
+      tinfo(local, 'deadline', { attempt: step.attempt });
+      attemptTimeoutNames.push(F(local));
+    }
+    const local = `attempt_${step.attempt}`;
+    const b = Transition.builder(local).inputs(one(failed));
+    if (step.action === 'retry') {
+      // Holds `_budget` across the wait, as n8n's retry loop does and as `retry_wait` does.
+      b.inputs(one(idle))
+        .inhibitors(halt, pause)
+        .timing(delayed(step.waitMs ?? 0))
+        .outputs(outPlace(attemptRunning[i + 1]!))
+        .priority(depth);
+    } else {
+      // A terminal step *is* `X_exhausted` with the outcome the workflow chose rather than the
+      // one `onError` fixed, so it offers the same union: the recording it performs can still
+      // end in a wait (the node set `waitTill`), a destination stop, or a halt — either because
+      // the step said `stop` or because `guarded` caught a fatal outside n8n's own try.
+      // `route` and `continue` differ only in which output carries the data, which is a value
+      // decision the action makes inside the one `success` branch.
+      b.inhibitors(halt)
+        .outputs(xorOf([success, haltBranch, waitingBranch, stoppedBranch]))
+        .priority(depth + 1);
+    }
+    body.push(b.build());
+    tinfo(local, 'attempt', { attempt: step.attempt });
+    attemptStepNames.push(F(local));
+  });
+
   // ---- nil sinks (CORE-043 AC4: genuine sinks carry no Out spec) ----
   const sinkNames: string[] = [];
   for (const out of outputs) {
@@ -925,6 +1029,16 @@ export function buildNodeGadget(
       hasdata: opt(hasdata, 'hasdata'),
       retry: opt(retry, 'retry'),
       tries: opt(tries, 'tries'),
+      attempts: chainSteps.map((step, i): AttemptGadget => ({
+        index: step.attempt,
+        running: lookup(F(i === 0 ? 'running' : `running_${step.attempt}`)),
+        failed: lookup(F(`failed_${step.attempt}`)),
+        timedOut: chainTimeoutMs === null ? null : lookup(F(`timedout_${step.attempt}`)),
+        action: step.action,
+        waitMs: step.waitMs,
+        outputIndex: step.outputIndex,
+      })),
+      attemptTimeoutMs: chainTimeoutMs,
       waiting: lookup(F('waiting')), stopped: lookup(F('stopped')),
       inTool: opt(inToolLocal, 'in_tool'),
       routedRequest: opt(routedRequest, 'routed_req'),
@@ -944,6 +1058,9 @@ export function buildNodeGadget(
         skip: skipNames, arms: armNames, clear: clearNames,
         retryWait: retry === null ? null : F('retry_wait'),
         exhausted: retry === null ? null : F('exhausted'),
+        attemptRuns: attemptRunNames,
+        attemptSteps: attemptStepNames,
+        attemptTimeouts: attemptTimeoutNames,
         sinks: sinkNames,
         doneRequest: doneRequestName, dispatch: dispatchName, collect: collectName, resume: resumeName,
         roundsOut: roundsOutName, callsOut: callsOutName,

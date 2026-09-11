@@ -48,6 +48,7 @@
  * |---|---|
  * | `X/waiting` | `nodeExecutionStack[0]`: the node's own `executionData` (n8n `pushExecutionStack`) |
  * | `X/stopped` with `ran: false`, `X/retry` (pause, cancelled), `X/running` (cancelled) | a stack entry (the activation re-runs from scratch; the budget a retry held is re-seeded on decode) |
+ * | `X/failed_i` (pause, cancelled), `X/timedout_i` (cancelled), `X/running_i` (cancelled) | a stack entry, as `X/retry` and `X/running` are — the attempt *position* is not persisted, so the activation resumes at its first attempt (ADR 0009) |
  * | `X/in` / `X/hasdata_i` data token | a stack entry: `{ node, data: { main }, source: { main: [source] } }` with `main[inputIndex]` the items and `null` below (n8n `addNodeToBeExecuted`); an entry verbatim |
  * | complete join slot (every input has a token, at least one with data) | a stack entry `{ node, data: { main: items \| [] per input }, source: { main } }`; an entry-headed slot is the entry verbatim |
  * | partial join slot; complete all-empty slot (a skip, seen under `cancelled` only) | `waitingExecution[X][k]` / `waitingExecutionSource[X][k]`: items + source, `[]` + `null`, `null` |
@@ -545,11 +546,21 @@ export function encodeMarking(
       // that inhibits on nothing — so a quiesced net has drained them whatever stopped it.
       const inFlight: Array<Place<unknown> | null> = [
         g.running, g.routed, g.routedRequest, g.inEmpty, ...g.outputs.flatMap((o) => [o.ok, o.routed]),
+        // An `onFailure` chain's later attempts are `X/running` for every purpose here, and its
+        // deadline funnel inhibits `_halt` alone — so a *paused* net has already moved every
+        // `X/timedout_i` on to `X/failed_i` and only a halted one can still hold it
+        // (ADR 0009 §3).
+        ...g.attempts.slice(1).map((a) => a.running),
+        ...g.attempts.map((a) => a.timedOut),
       ];
       if (g.form === 'or') for (const e of g.inputs[0]!.edges) inFlight.push(e.data, e.empty);
       for (const p of inFlight) if (p !== null && marking.tokenCount(p) > 0) throw undrained(g, p);
     }
-    if (mode === 'stranded' && g.retry !== null && marking.tokenCount(g.retry) > 0) throw undrained(g, g.retry);
+    if (mode === 'stranded') {
+      if (g.retry !== null && marking.tokenCount(g.retry) > 0) throw undrained(g, g.retry);
+      // `X/failed_i` is `X/retry` for a chain: a pending activation, not residue.
+      for (const a of g.attempts) if (marking.tokenCount(a.failed) > 0) throw undrained(g, a.failed);
+    }
   }
 
   const routed = collectRouted(marking, nodes);
@@ -599,6 +610,20 @@ export function encodeMarking(
       for (const t of marking.peekTokens(g.retry)) push((t.value as RetryPayload).executionData);
     }
     for (const t of marking.peekTokens(g.running)) push((t.value as RunPayload).executionData);
+    // An `onFailure` chain, in the same order and for the same reason: a failure whose step has
+    // not acted (`X/failed_i`), an attempt a deadline abandoned in a halted net
+    // (`X/timedout_i`), and a later attempt cancellation caught mid-run (`X/running_i`). Each
+    // becomes an ordinary stack entry and the activation re-runs from its first attempt —
+    // n8n has nowhere to persist the position, which `tasks/todo.md` §4b records.
+    for (const a of g.attempts) {
+      for (const t of marking.peekTokens(a.failed)) push((t.value as RetryPayload).executionData);
+      if (a.timedOut !== null) {
+        for (const t of marking.peekTokens(a.timedOut)) push((t.value as RunPayload).executionData);
+      }
+      if (a.index > 1) {
+        for (const t of marking.peekTokens(a.running)) push((t.value as RunPayload).executionData);
+      }
+    }
 
     // ---- an agent round the pause or the halt caught mid-flight ----
     // The tokens carry the very `IExecuteData` values n8n's own `handleRequest` produced, so
@@ -671,6 +696,11 @@ export function encodeMarking(
         ...marking.peekTokens(g.stopped).filter((t) => !(t.value as StoppedPayload).ran).map((t) => sourceOfEntry((t.value as StoppedPayload).executionData)),
         ...(g.retry === null ? [] : marking.peekTokens(g.retry).map((t) => sourceOfEntry((t.value as RetryPayload).executionData))),
         ...marking.peekTokens(g.running).map((t) => sourceOfEntry((t.value as RunPayload).executionData)),
+        ...g.attempts.flatMap((a) => [
+          ...marking.peekTokens(a.failed).map((t) => sourceOfEntry((t.value as RetryPayload).executionData)),
+          ...(a.timedOut === null ? [] : marking.peekTokens(a.timedOut).map((t) => sourceOfEntry((t.value as RunPayload).executionData))),
+          ...(a.index === 1 ? [] : marking.peekTokens(a.running).map((t) => sourceOfEntry((t.value as RunPayload).executionData))),
+        ]),
         ...armed.map((a) => sourceOfValue(a.value)),
       ];
       const counted = activationSources.filter((source) => countsTowardRound(compiled, i, source)).length;

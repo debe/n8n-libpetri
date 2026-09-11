@@ -251,7 +251,12 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
     this.edgeDataPlaces = netMap.places
       .filter((p) => p.role === 'in-data' || p.role === 'edge-data')
       .map((p) => p.place);
-    this.runningPlaces = netMap.nodes.map((g) => g.running);
+    // Every attempt's running place, not only the first: `no-double-activation` and the
+    // mutual-exclusion pass ask about "this node is running", and an `onFailure` chain spreads
+    // that across `X/running_i` (ADR 0009). `attempts` is empty for a policy-free node, so this
+    // is `g.running` alone there.
+    this.runningPlaces = netMap.nodes.flatMap((g) =>
+      g.attempts.length === 0 ? [g.running] : g.attempts.map((att) => att.running));
   }
 
   get program(): PrecompiledNet {
