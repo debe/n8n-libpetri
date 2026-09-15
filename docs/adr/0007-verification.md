@@ -511,7 +511,7 @@ name-coloured encoder, the certificate check, abstract replay and Route B's `dec
 encoding is one extra conjunct per conditional place (`m_p ≥ 1 ∧ m_marker = 0`), and a script
 that declares nothing is byte-identical to before.
 
-`verify.ts` declares exactly the graph's rule: `_pause` admits `PAUSE_REST_ROLES ∖ REST_ROLES`
+`route.ts` `completionSinksOf` declares exactly the graph's rule: `_pause` admits `PAUSE_REST_ROLES ∖ REST_ROLES`
 and `_halt` admits `HALT_REST_ROLES ∖ REST_ROLES`. Two markers suffice although `terminalKindOf`
 also reads a marked `waiting` / `stopped` as a pause, because every branch that produces one of
 those produces `_pause` beside it and nothing ever consumes `_pause` (`compiler/gadget.ts`); and
@@ -545,7 +545,7 @@ as `SmtVerifier.stateEquation(true)`: every rule body conjoins `M' = M0 + C·n'`
 places, so every linear consequence of the marking equation — the ordering laws above included —
 is a fact in the body rather than a lemma to invent; enumerating the inequality cone instead was
 tried upstream and does not finish on the depth-1 net in 300 s, which is why the counters are the
-vehicle. `verify.ts` turns it on for the quiescence fallback only: counters slow witness search
+vehicle. `route.ts` (`query`) turns it on for the quiescence fallback only: counters slow witness search
 by about 1.5×, and the reachability families are witness hunts on a truncated graph. With the
 widenings declared and the equation on, `agentTwoTools` at `maxToolCalls` 64 is **proven in
 1.5 s**, and `loopOverItems` — the cyclic fixture §11 could only bound — is **proven in 0.5 s**,

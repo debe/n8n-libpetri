@@ -42,6 +42,7 @@ export type CompileErrorCode =
   | 'invalid-count'
   | 'no-ready-place'
   | 'tool-start-node'
+  | 'tool-main-consumer'
   | 'unknown-node'
   | 'unknown-transition';
 

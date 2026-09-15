@@ -27,7 +27,7 @@ export type {
   RetryReason, RoundPayload, RunPayload, StoppedPayload, WaitingPayload,
 } from './scheduler/index.js';
 export {
-  SchedulerNodeError, UnmetReferenceError, UnexpectedTokenError, UNMET_REFERENCE_MESSAGE_TEMPLATE,
+  SchedulerNodeError, UnmetReferenceError, UnexpectedTokenError, InternalSchedulerError, UNMET_REFERENCE_MESSAGE_TEMPLATE,
   isDispatchPayload, isEdgePayload, isEntryPayload, isOkPayload, isRequestPayload, isRetryPayload, isRoundPayload,
   isRunPayload, isStoppedPayload, isWaitingPayload,
 } from './scheduler/index.js';

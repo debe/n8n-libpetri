@@ -23,16 +23,23 @@ function compareCanvas(a: NodeDescription, b: NodeDescription): number {
  */
 export function raising(
   check: (v: unknown, what: string, problems: string[]) => number | undefined,
-): (v: number, what: string, node?: string) => void {
+  kind: 'positive' | 'non-negative',
+): (v: unknown, what: string, node?: string) => void {
   return (v, what, node) => {
+    // A required count. The collecting check lets `undefined` through (an option not given)
+    // and prints the value as JSON, where NaN and Infinity read as `null`; neither is right for
+    // a count the analysis needs, so a missing or non-finite one is refused here, as written.
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      throw new CompileError('invalid-count', `${what} must be a ${kind} integer, got ${String(v)}`, node);
+    }
     const problems: string[] = [];
     check(v, what, problems);
     const [problem] = problems;
     if (problem !== undefined) throw new CompileError('invalid-count', problem, node);
   };
 }
-export const requireNonNegativeInt = raising(nonNegativeInt);
-export const requirePositiveInt = raising(positiveInt);
+export const requireNonNegativeInt = raising(nonNegativeInt, 'non-negative');
+export const requirePositiveInt = raising(positiveInt, 'positive');
 
 export interface RawNode {
   readonly node: NodeDescription;

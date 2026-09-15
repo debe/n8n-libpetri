@@ -52,7 +52,7 @@
  * is `X/routed` for a node that routes inside `X_run` and `X/ok_o + X/routed_o` for **one**
  * output `o` of a node above {@link SPLIT_ROUTING_ABOVE}: a split node has no single
  * `X/routed`, so the Farkas enumeration returns one such law **per output** instead of one
- * folded law, and `verify.ts` `nodeCarriesUnit` accepts any of them ("at least one", not
+ * folded law, and `verify/invariants.ts` `nodeCarriesUnit` accepts any of them ("at least one", not
  * "all"). A workflow with no split node yields the single folded
  * `_budget + Σ_X(X/running + X/retry + X/routed) = k`.
  *

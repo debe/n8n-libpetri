@@ -220,6 +220,15 @@ cost of omitting such a field.
 `no-double-activation` and the mutual-exclusion pass ask about the node rather than about its
 first attempt.
 
+**A soft failure is a failure like any other** *(amended 2026-09)*. n8n's soft failure, an error
+item on the first output (`checkFailure`), re-runs inside its inner loop (lines 143–160). Under a
+chain it takes the retry step with `softRetry` set, and the re-run goes through the same
+`attempt()` as every other attempt (`scheduler/run-loop.ts`). It therefore carries that
+attempt's deadline, so a re-run the deadline abandoned writes nothing (IO-013), and its own
+failure consults the chain rather than the node's `onError`. Until the 2026-09 TypeScript
+refactor the re-run had a separate path with neither; `tests/scheduler/soft-retry.test.ts` pins
+both.
+
 **The scheduler runs the chain, and the mapping is exact rather than new machinery.** A `retry`
 step *is* `X_retry_wait` with the step's own delay; a terminal step *is* `X_exhausted` with the
 outcome the workflow chose. n8n's own `handleNodeExecutionError` is reused rather than

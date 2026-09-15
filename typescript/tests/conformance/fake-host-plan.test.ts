@@ -2,8 +2,8 @@
  * `FakeHost.planEngineRequest`: the round is planned without writing, then reserved. These
  * pin what that split keeps — one `runData` slot per action, consecutive when a node is asked
  * twice, the `rewireOutputLogTo` tag, and each action's reserved index in the agent's
- * re-entry — and the one thing it changed: a request naming a node the workflow lacks is
- * refused before any slot is reserved.
+ * re-entry — and n8n's order on a request naming a node the workflow lacks: every action
+ * before it is reserved and tagged, then the request is refused, as `handleRequest` does.
  */
 import { describe, expect, it } from 'vitest';
 import type { EngineRequest, IExecuteData, INode } from 'n8n-workflow';
@@ -51,10 +51,11 @@ describe('FakeHost.planEngineRequest', () => {
     expect((workflow.nodes['Calculator'] as INode & { rewireOutputLogTo?: string }).rewireOutputLogTo).toBeUndefined();
   });
 
-  it('refuses a request naming a node the workflow lacks before it reserves anything', () => {
-    const { runData, plan } = setup();
+  it('reserves the actions before an unknown node, then refuses, as handleRequest does', () => {
+    const { workflow, runData, plan } = setup();
     expect(() => plan([{ nodeName: 'Calculator', id: 'c1' }, { nodeName: 'Nope', id: 'n1' }]))
       .toThrow('Workflow does not contain a node with the name of "Nope".');
-    expect(runData['Calculator']).toBeUndefined();
+    expect(runData['Calculator']).toHaveLength(1);
+    expect((workflow.nodes['Calculator'] as INode & { rewireOutputLogTo?: string }).rewireOutputLogTo).toBe('ai_tool');
   });
 });

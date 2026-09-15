@@ -10,6 +10,7 @@ import {
   ALL, agentTwoTools, conn, diamond, linear, loopOverItems, node, twoTriggers, userCycle, workflow, SHAPES,
 } from '../fixtures/workflows.js';
 import { inOf, readyDataOf, retryOf } from './support.js';
+import type { NodeDescription, NodeTypeShape } from '../../src/compiler/index.js';
 
 describe('analyse: validation', () => {
   it('rejects an empty workflow, duplicate names or ids, ids containing "/", and an unknown start node', () => {
@@ -283,5 +284,24 @@ describe('compile over a precomputed analysis', () => {
     expect(() => compile(agentTwoTools, { analysis: a, maxAgentRounds: 3 })).toThrow(/pass them to analyse\(\)/);
     expect(() => compile(agentTwoTools, { analysis: a, maxAgentToolCalls: 3 })).toThrow(/pass them to analyse\(\)/);
     expect(() => compile(agentTwoTools, { structuralHash: 'x' })).toThrow(/without the analysis it hashes/);
+  });
+});
+
+describe('a required count', () => {
+  it('refuses a missing or non-finite count, printing the value as written', () => {
+    const refusal = (f: () => unknown): string => {
+      try { f(); } catch (e) { if (e instanceof CompileError) return `${e.code}: ${e.message}`; throw e; }
+      return 'nothing thrown';
+    };
+    expect(refusal(() => compile(linear, { maxAgentRounds: Number.NaN })))
+      .toBe('invalid-count: maxAgentRounds must be a positive integer, got NaN');
+    expect(refusal(() => compile(linear, { maxAgentToolCalls: Number.POSITIVE_INFINITY })))
+      .toBe('invalid-count: maxAgentToolCalls must be a positive integer, got Infinity');
+    const missing = {
+      ...linear,
+      nodeTypes: (n: NodeDescription) => (n.name === 'A' ? ({ outputCount: 1 } as unknown as NodeTypeShape) : linear.nodeTypes(n)),
+    };
+    expect(refusal(() => compile(missing)))
+      .toBe("invalid-count: node 'A' inputCount must be a non-negative integer, got undefined");
   });
 });

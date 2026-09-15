@@ -14,6 +14,7 @@ import {
   agentAssumedRounds, agentNested, agentOneTool, agentSharedTool, agentTwoTools, conn, linear, node,
 } from '../fixtures/workflows.js';
 import { agentOf, asForm, inOf, inToolOf, outputNames, transitionOf } from './support.js';
+import { CompileError } from '../../src/compiler/index.js';
 
 describe('analysis', () => {
   it('classifies the tool and the agent', () => {
@@ -182,6 +183,24 @@ describe('a tool wired to main consumers', () => {
     const consumerIn = inOf(c.netMap.node('C0'));
     expect(outputNames(transitionOf(c, 'Calculator', 'run'))).not.toContain(consumerIn.name);
     expect(c.netMap.placesOf('Calculator').some((p) => p.role === 'edge-data')).toBe(false);
+  });
+
+  it('refuses a consumer that also takes main input from another node', () => {
+    // Dropping the tool's edge would leave `M` one wired input of two: an all-required join that
+    // runs on `Trigger` alone, which n8n never does (it waits for both inputs). The net cannot
+    // feed the tool's side, so the workflow is refused instead (divergence #30).
+    const wf = {
+      ...agentOneTool,
+      nodes: [...agentOneTool.nodes, node('M', 'set', [400, 200])],
+      connections: [...agentOneTool.connections, conn('Trigger', 0, 'M', 0), conn('Calculator', 0, 'M', 1)],
+      nodeTypes: (n: NodeDescription) => (n.name === 'Calculator' ? { inputCount: 0, outputCount: 1 }
+        : n.name === 'M' ? { inputCount: 2, outputCount: 1 } : agentOneTool.nodeTypes(n)),
+    };
+    let refusal: unknown;
+    try { compile(wf); } catch (e) { refusal = e; }
+    expect(refusal).toBeInstanceOf(CompileError);
+    expect((refusal as CompileError).code).toBe('tool-main-consumer');
+    expect((refusal as CompileError).node).toBe('M');
   });
 });
 

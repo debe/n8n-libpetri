@@ -54,9 +54,10 @@ function completion(report: VerificationReport): { whole: PropertyCheck; all: Pr
  *
  * `timeoutMs: 1` bounds each z3 query; it does not switch the fallback off. In one full-suite
  * run a join slot's arrival-bound row on `loopOverItems` came back `proven` from it anyway,
- * which failed a test asserting that nothing in the family is proven. A test that asserts
- * that passes `smtFallback: 'off'` (`VerifyOptions.smtFallback`), which never starts the SMT
- * route, so every row it reads was decided by the graph or left to the bound.
+ * which failed a test asserting that nothing in the family is proven. So every test here that
+ * asserts a verdict on a truncated graph — `bounded`, `unknown`, a count of bounds, or that
+ * nothing is `proven` — passes `smtFallback: 'off'` (`VerifyOptions.smtFallback`), which never
+ * starts the SMT route: every row it reads was decided by the graph or left to the bound.
  */
 async function completionOf(
   workflow: Parameters<typeof verify>[0], maxClasses?: number,
@@ -257,7 +258,7 @@ describe('the solver-free route (VER-010)', () => {
 
   describe('truncation is the honest limit, never a pass', () => {
     it('a cyclic workflow truncates and says so — bounded, with the cause, the cap and the bound', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await completionOf(loopOverItems, 2_000);
+      const report = await completionOf(loopOverItems, 2_000, 'off');
       expect(report.stateSpace.complete).toBe(false);
       expect(report.stateSpace.truncation).toBe('cycle');
       expect(report.stateSpace.maxClasses).toBe(2_000);
@@ -292,7 +293,7 @@ describe('the solver-free route (VER-010)', () => {
       // makes the whole surface trustworthy — an `unknown` is a limit, a `proven` is a claim.
       for (const cap of [50, 500, 5_000]) {
         for (const workflow of [loopOverItems, switch20]) {
-          const report = await completionOf(workflow, cap);
+          const report = await completionOf(workflow, cap, 'off');
           expect(report.stateSpace.complete).toBe(false);
           const { whole } = completion(report);
           expect(whole.verdict, `cap=${cap}\n${digest(report)}`).not.toBe('proven');
@@ -443,7 +444,7 @@ describe('the solver-free route (VER-010)', () => {
       // At a cap this small the BFS has not closed a single whole iteration, so "nothing goes
       // wrong in runs where the loop never runs" is all that could be said — which is not a
       // statement about the loop at all, and is refused.
-      const report = await completionOf(loopOverItems, 30);
+      const report = await completionOf(loopOverItems, 30, 'off');
       expect(report.stateSpace.boundedCyclicRuns).toBeNull();
       expect(completion(report).whole.verdict, digest(report)).toBe('unknown');
     });
@@ -505,7 +506,7 @@ describe('the solver-free route (VER-010)', () => {
     });
 
     it('`--strict` treats a bound as unproven, and a plain run does not fail on it', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await completionOf(loopOverItems, 2_000);
+      const report = await completionOf(loopOverItems, 2_000, 'off');
       expect(report.counts.bounded).toBeGreaterThan(0);
       // `ok` is about findings, so a bound leaves it true; the strict gate is the CLI's, and
       // it reads `counts.unknown + counts.bounded` (cli.ts).

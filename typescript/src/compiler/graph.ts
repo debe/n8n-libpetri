@@ -6,8 +6,7 @@
  * the required-input facts of the join gadget and the k-safety facts the budget check needs.
  *
  * `analyse()` orchestrates the phases, each in `analysis/`; the failure vocabulary it reads per
- * node is in `failure-chain.ts`. Both are re-exported here under the names this module has
- * always exported.
+ * node is in `failure-chain.ts`. What the compiler barrel takes from here is re-exported below.
  */
 import type { WorkflowAnalysis, WorkflowDescription } from './types.js';
 import { CompileError } from './errors.js';
@@ -22,10 +21,7 @@ import { decompose } from './analysis/scc.js';
 import { wireTools } from './analysis/tools.js';
 import { requirePositiveInt, validateNodes } from './analysis/validate.js';
 
-export {
-  DEFAULT_MAX_TRIES, MIN_MAX_TRIES, MAX_MAX_TRIES, DEFAULT_WAIT_BETWEEN_TRIES_MS, MAX_WAIT_BETWEEN_TRIES_MS,
-  retryParamsOf, resolveFailureChain,
-} from './failure-chain.js';
+export { retryParamsOf } from './failure-chain.js';
 export { isAllRequired, joinFormOf, requiredInputsOf } from './analysis/inputs.js';
 export { reachableFrom } from './analysis/reachability.js';
 

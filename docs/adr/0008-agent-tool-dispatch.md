@@ -73,7 +73,7 @@ two agents, which is what n8n does.
 The request outcome is **phased like the success outcome**: `A/routed_req` here, the budget
 refunded by `A_done_req` one cycle later (ADR 0004). So the agent releases its slot for the tools
 it asked for, and the P-semiflow is unchanged with `routed_req` counted among the in-flight
-markers (`verify.ts` `nodeCarriesUnit`).
+markers (`verify/invariants.ts` `nodeCarriesUnit`).
 
 ### 2. The round's size is a budget, not a count
 

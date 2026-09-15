@@ -327,8 +327,11 @@ run_scope() {
         log "== legacy (StackScheduler behind the seam)"
         run_suite legacy "$legacy_label"
         # A pure refactor: same cases, same outcomes as the unpatched baseline.
-        if matrix "$legacy_label" "$baseline" baseline --require-identical; then
+        rc=0; matrix "$legacy_label" "$baseline" baseline --require-identical || rc=$?
+        if [ "$rc" -eq 0 ]; then
           log "$legacy_label: identical to baseline"
+        elif [ "$rc" -eq 2 ]; then
+          log "$legacy_label: the matrix could not read its input (exit 2; the reason is above)"; status=1
         else
           log "$legacy_label: NOT identical to baseline; see $RESULTS/$legacy_label.matrix.md"; status=1
         fi
@@ -373,8 +376,13 @@ run_scope() {
             log "$libpetri_label: no k=1 leg at $RESULTS/$k1_label.junit.xml; comparing to the baseline for information only"
           fi
         fi
-        if matrix "$libpetri_label" "$reference" "$reference_label"; then
+        # The matrix exits 1 on a regression and 2 when it could not read its input; an input
+        # error fails the run even on an ungated leg, and names no matrix that was never written.
+        rc=0; matrix "$libpetri_label" "$reference" "$reference_label" || rc=$?
+        if [ "$rc" -eq 0 ]; then
           log "$libpetri_label: no regression against $reference_label"
+        elif [ "$rc" -eq 2 ]; then
+          log "$libpetri_label: the matrix could not read its input (exit 2; the reason is above)"; status=1
         elif [ "$gates" -eq 1 ]; then
           log "$libpetri_label: regressions against $reference_label; see $RESULTS/$libpetri_label.matrix.md"; status=1
         else

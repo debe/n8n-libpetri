@@ -372,6 +372,17 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       its own row — if a workflow can register two close functions it deserves one
 - [ ] Divergence #4: confirm the slot-overwrite clobber path in `addNodeToBeExecuted` (440–851)
       before citing it as a data-loss defect; ADR 0003 defers
+- [ ] After a soft-failure re-run whose `postRun` succeeded, a throw later in `finishSuccess` (a
+      rejecting `nodeExecuteAfter` hook) records `null` output (`scheduler/run-loop.ts`, the catch
+      in `attempt`), where the first try and n8n's own loop record the processed output. It shows
+      only when `handleNodeExecutionError` continues and the node's input `main[0]` is null. No
+      test pins it, so it was left as it was
+- [ ] The codec drops a routed arrival with a null payload into a direct-form node without a
+      diagnostic, while a token already on `X/in_empty` gets one ("n8n never enqueues an empty").
+      Neither is an error; the asymmetry is only in what is reported
+- [ ] Decode attributes a pending tool call, or a nested agent's round, to the tool's first agent
+      when two open rounds both name it (`codec/agent-round.ts`, `ownerOf`), although n8n planned
+      it for one of them. The heuristic predates the 2026-09 refactor, which only narrowed it
 
 ### 3. Verifier
 
@@ -453,7 +464,7 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
 
 - [ ] **A tool shared by two agents verifies as `violated`, and it is a false alarm.** The
       tool's success branch is `xor` over its agents' `A/response` places, resolved at run time
-      by the dispatch token (`scheduler/actions.ts`, `succeed`, which throws if the named agent
+      by the dispatch token (`scheduler/outcomes.ts`, `succeed`, which throws if the named agent
       is not wired). The state-class graph is value-blind (VER-004), so it explores the arm
       that hands A1's response to A2 and reports the dispatcher stranded: `agentSharedTool`
       quiesces on `A1/dispatched` + `A1/drained` + `A1/outstanding` with an uncollected
@@ -651,6 +662,10 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       routing moved back inside `X_run` (ADR 0004's M6 amendment), pinned by
       `tests/spikes/out-spec.test.ts` and `tests/spikes/collapsed-outcome.test.ts`. Java/Rust
       validators still unchecked for the same behaviour
+- [ ] **`exactOptionalPropertyTypes` is off here and in `libpetri/typescript`**, whose tsconfig is
+      otherwise identical. Turning it on here costs 18 errors (7 in `src`, 11 in `tests`, measured
+      2026-09-11), four of them impedance against n8n's own types. Worth doing in both repositories
+      together rather than here alone
 
 ### 4b. Upstream (n8n)
 
@@ -747,6 +762,9 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
 - [ ] The generated vitest shim (`.n8n/packages/<pkg>/.n8n-libpetri-setup.mjs` and
       `vitest.libpetri.config.mts`) is left in the clone, covered by `.git/info/exclude`; it embeds
       an absolute `file://` URL and is regenerated if this checkout moves
+- [ ] `FakeHost.planToolRound` refuses a request with no parent before it reserves any tool slot;
+      n8n's `handleRequest` reserves first (`requests-response.ts` 256–269). The order was kept
+      when the harness was split. Whether any differ number moves if it follows n8n is not measured
 
 ### 6. Timing sensitivity (run gates on an idle machine)
 
@@ -787,3 +805,7 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       total 100); pinned as Switch 45, net 151
 - [ ] `conformance-results/` artefacts are regenerated per leg and are not all from one run: the
       k > 1, core and workflow legs date from their own sessions
+- [ ] Since the 2026-09 TypeScript refactor the `n8n-libpetri/conformance` entry point exports only
+      what this repository imports: `FakeHost`, `StackReferenceScheduler`, the report's `cell` and
+      the matrix types left the barrel and stay importable from their modules. The package is
+      private, so nothing outside the repository is affected today

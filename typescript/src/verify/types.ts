@@ -166,7 +166,7 @@ export interface Stranding extends Witness {
  *   prefix is reachable whatever the BFS did next), and neither does a `bounded`, which is
  *   the route reporting exactly how far the prefix reaches.
  * - `smt` — libpetri's IC3/PDR encoding through z3, the fallback for a truncated graph. Not
- *   every question reaches it: a net above `verify.ts`'s measured size ceiling gets none, and
+ *   every question reaches it: a net above `route.ts`'s measured size ceiling gets none, and
  *   neither does a question the graph has already shown the query cannot decide.
  * - `structural` — read off the flattened net or the P-invariants, with no reachability
  *   question at all (the retry producer check, the budget semiflow).
@@ -400,7 +400,7 @@ export interface VerifyOptions {
    * Whether the SMT route may run at all, and on how big a net (VER-001/VER-013).
    *
    * - `'auto'` (default) — run it, but only below the measured size ceiling
-   *   (`verify.ts` `SMT_MAX_FLAT_PLACES` / `SMT_MAX_JOIN_INPUTS`). Above it the pipeline
+   *   (`route.ts` `SMT_MAX_FLAT_PLACES` / `SMT_MAX_JOIN_INPUTS`). Above it the pipeline
    *   libpetri runs before z3 (flatten, structural pre-check, P-invariants, semiflows)
    *   exhausts the V8 heap, and a heap exhaustion **aborts the process** — there is no
    *   exception to catch, so the only safe handling is not to start it. Refusing yields

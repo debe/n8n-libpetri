@@ -35,6 +35,12 @@ interface ToolReservation {
 interface ToolRound {
   readonly planned: PlannedNode[];
   readonly reservations: readonly ToolReservation[];
+  /**
+   * Set when an action names a node the workflow lacks. `handleRequest` walks the actions in
+   * order, reserving each before it looks at the next, so the actions before the unknown one
+   * keep their slots and tags: the caller reserves {@link reservations}, then throws this.
+   */
+  readonly error?: Error;
 }
 
 /**
@@ -57,11 +63,15 @@ function planToolRound(args: EngineRequestArgs): ToolRound {
   const reservations: ToolReservation[] = [];
   /** Slots this round has already claimed per node, on top of what `runData` holds. */
   const claimed = new Map<string, number>();
+  let error: Error | undefined;
   for (const action of request.actions as Array<{
     nodeName: string; input?: IDataObject; type: IConnection['type']; id: string;
   }>) {
     const node = workflow.nodes[action.nodeName];
-    if (node === undefined) throw new Error(`Workflow does not contain a node with the name of "${action.nodeName}".`);
+    if (node === undefined) {
+      error = new Error(`Workflow does not contain a node with the name of "${action.nodeName}".`);
+      break;
+    }
     const agentInput = executionData.data.main?.[0]?.[0];
     const json = { ...(agentInput?.json ?? {}), ...(action.input ?? {}), toolCallId: action.id };
     const display = { ...(action.input ?? {}) };
@@ -103,7 +113,7 @@ function planToolRound(args: EngineRequestArgs): ToolRound {
       subNodeExecutionData: { actions, metadata: request.metadata },
     } as unknown as ITaskMetadata,
   }, ...tools];
-  return { planned, reservations };
+  return { planned, reservations, ...(error === undefined ? {} : { error }) };
 }
 
 /** Write a round's reservations, in plan order: each `runData` slot and each tag. */
@@ -213,6 +223,7 @@ export class FakeHost implements SchedulerHost {
     this.record('planEngineRequest', args.currentNode.name);
     const round = planToolRound(args);
     reserveToolRound(args.runData, round.reservations);
+    if (round.error !== undefined) throw round.error;
     return round.planned;
   }
 
@@ -432,7 +443,7 @@ export class FakeHost implements SchedulerHost {
   /**
    * `upsertTaskData` (`workflow-execute.ts:2154-2161`). n8n indexes `runData[nodeName]`
    * without a check because its loop created the array just before (`stack-scheduler.ts:216-218`),
-   * as the scheduler's action does (`src/scheduler/actions.ts`); creating it here on a miss
+   * as the scheduler's run loop does (`src/scheduler/run-loop.ts`); creating it here on a miss
    * is that same behaviour, minus the `TypeError` a caller that skipped the step would
    * otherwise get from the mirror.
    */

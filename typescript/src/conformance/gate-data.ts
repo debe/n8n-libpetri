@@ -137,9 +137,9 @@ function compareResumableState(reference: EngineRun, candidate: EngineRun): Node
 export function compareData(
   reference: EngineRun,
   candidate: EngineRun,
-  context: DataContext | ReadonlyMap<string, ReadonlySet<string>> = {},
+  context: DataContext | Map<string, ReadonlySet<string>> = {},
 ): DataComparison {
-  const ctx: DataContext = context instanceof Map ? { descendants: context } : context as DataContext;
+  const ctx: DataContext = context instanceof Map ? { descendants: context } : context;
   const descendants = ctx.descendants ?? new Map<string, ReadonlySet<string>>();
   const raw: NodeDifference[] = [];
   const permuted: string[] = [];

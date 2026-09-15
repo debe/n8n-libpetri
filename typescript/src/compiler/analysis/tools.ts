@@ -79,8 +79,10 @@ export function wireTools(
   // A tool's result goes to its agent's `A/response` and nowhere else (ADR 0008), so a main
   // edge out of a tool never carries a token. Dropped here rather than modelled: kept, the
   // gadget would declare an output port no transition writes, and above `SPLIT_ROUTING_ABOVE`
-  // a per-output routing the tool form cannot take. The consumer keeps its own `in` place and
-  // is simply unreachable, which is what it was.
+  // a per-output routing the tool form cannot take. A consumer fed only by tools keeps its own
+  // `in` place and never runs, where n8n would run it after every tool call (divergence #30). A
+  // consumer that also has another main producer is refused: dropping the tool's edge would
+  // change its join form, so an all-required join would run on its other input alone.
   const toolsWithConsumers = new Set<string>();
   for (const tool of agentsOf.keys()) {
     if (raw.some((e) => e.from === tool)) {
@@ -88,6 +90,16 @@ export function wireTools(
       diagnostics.push(
         `ai_tool node '${tool}' has main consumers; a tool's output goes to its agent, ` +
         'so those connections never carry a token; ignored');
+    }
+  }
+  for (const e of raw) {
+    if (!toolsWithConsumers.has(e.from)) continue;
+    const other = raw.find((o) => o.to === e.to && !toolsWithConsumers.has(o.from));
+    if (other !== undefined) {
+      throw new CompileError('tool-main-consumer',
+        `compile: node '${e.to}' takes main input from ai_tool node '${e.from}', whose output goes ` +
+        `to its agent and never to a main edge, and from '${other.from}'; the net cannot feed the ` +
+        "tool's side, so the workflow is refused", e.to);
     }
   }
   const mainEdges = toolsWithConsumers.size === 0 ? raw : raw.filter((e) => !toolsWithConsumers.has(e.from));

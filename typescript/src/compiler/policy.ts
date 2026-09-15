@@ -127,7 +127,8 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'v', 'timeoutMs', 'onFailure', 'concurrency', 'rate', 'maxRuns', 'maxToolCalls', 'maxRounds',
   // Known here so it is not diagnosed as unknown, but deliberately not parsed here: `groups`
   // holds one nested policy per name, and each is parsed on demand against the node that names
-  // it (`groupPolicyOf` in `n8n/adapter.ts`, `groupsOf` in `verify/workflow-json.ts`). Without
+  // it (`groupPolicyOf` in `n8n/adapter.ts`, which the verify CLI reaches through the adapter's
+  // `resolveNodePolicy`, so both paths resolve a group the same way). Without
   // this entry a workflow that uses groups was told on every compile that they were ignored,
   // which was the opposite of what happened.
   'groups',
@@ -140,8 +141,8 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 /**
  * A positive integer, or `undefined`. Anything else is a problem the caller records. The one
- * definition: `graph.ts` raises the same check at once, over this, where it has no list to
- * accumulate into.
+ * definition: `analysis/validate.ts` (`raising`) raises the same check at once, over this,
+ * where it has no list to accumulate into, and refuses a missing or non-finite count first.
  */
 export function positiveInt(v: unknown, what: string, problems: string[]): number | undefined {
   if (v === undefined) return undefined;

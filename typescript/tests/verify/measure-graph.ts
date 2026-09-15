@@ -25,7 +25,8 @@
  *    two routes is comparable.
  */
 import { performance } from 'node:perf_hooks';
-import { SmtVerifier, deadlockFree, z3Available } from 'libpetri/verification';
+import { SmtVerifier, deadlockFree } from 'libpetri/verification';
+import { Z3_AVAILABLE } from '../support/z3.js';
 import type { Place } from 'libpetri';
 import { compile } from '../../src/compiler/index.js';
 import type { WorkflowDescription } from '../../src/compiler/index.js';
@@ -189,7 +190,7 @@ async function main(): Promise<void> {
   }
 
   if (withSmt) {
-    if (!z3Available()) {
+    if (!Z3_AVAILABLE) {
       process.stderr.write('no usable z3 (PATH or LIBPETRI_Z3): skipping the fallback table\n');
     } else {
       const smtRows: string[][] = [

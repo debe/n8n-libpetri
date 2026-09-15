@@ -17,7 +17,7 @@ Three things could break that, and this ADR settles all three.
 
 1. **Payload aliasing.** A token holds the very `INodeExecutionData[]` array n8n produced,
    and the routing hands the *same* `EdgePayload` to every edge of an output
-   (`scheduler/actions.ts`, `routeOutput`). Two consumers of one output therefore hold the
+   (`scheduler/outcomes.ts`, `routeOutput`). Two consumers of one output therefore hold the
    same array and the same item objects. If either of them writes through that reference
    while the other is running, k > 1 is a data race.
 2. **Execution-global fields.** `IRunExecutionData` and `IWorkflowExecuteAdditionalData` carry
@@ -93,7 +93,7 @@ The copy is not the thing to optimise; it is what makes the 6.4× safe.
 ### 2. Execution-global fields
 
 - **`waitTill` (divergence #15).** The claim is made in the same synchronous turn in which
-  the node's own `runNode` resolves (`probeWait` / `observeWait` in `scheduler/actions.ts`),
+  the node's own `runNode` resolves (`probeWait` / `observeWait` in `scheduler/wait-claim.ts`),
   so claim order is the order the runs finished, not the order the recording paths happen to
   reach the test. A node that *started* after the field was already set never claims
   (`waitTill === before`). A refused claim is reported by diagnostic, and the

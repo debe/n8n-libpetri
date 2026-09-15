@@ -131,12 +131,23 @@ proof — and never widen a check's claim past its query.
 
 ## Source layout (`typescript/src/`)
 
-- `index.ts` — `PetriScheduler` (action = run node + route result) and `MarkingCodec`.
+- `index.ts` — the package root: `PetriScheduler`, the marking codec and the n8n adapter.
 - `compiler/` — n8n workflow → `CompiledWorkflow` (one `PetriNet`, cached `PrecompiledNet`,
   `NetMap` transition ↔ node, place ↔ (node, port)). Takes a structural description, no n8n
-  dependency.
-- `verify/` — properties over the compiled net; counterexample → node path.
-- `conformance/` — trace recorder, differ, junit → matrix report.
+  dependency. `analysis/` holds the phases of `analyse()`, `gadget/` the phases of the per-node
+  gadget and `types/` the types by audience. `names.ts` is the one vocabulary every place and
+  transition name comes from; `errors.ts` has `CompileError` and `InternalCompilerError`.
+- `scheduler/` — `PetriScheduler` and its transition actions. `run-loop.ts` mirrors n8n's loop,
+  `outcomes.ts` turns an outcome into the tokens a firing deposits and `round.ts` runs agent
+  rounds (ADR 0008). `payloads.ts` is the token vocabulary the codec shares.
+- `codec.ts`, `codec/` — the marking codec: n8n's execution state ↔ a marking (ADR 0005).
+- `n8n/` — `host.ts` mirrors patch 0001's interfaces; `adapter.ts` turns an n8n `Workflow`
+  into a compiler description.
+- `verify/` — properties over the compiled net; counterexample → node path. `families/` has one
+  module per property family, and `route.ts` decides how each query is answered.
+- `conformance/` — trace recorder, differ, harness, junit → matrix report.
+- `cli/` — the I/O, flag parsing and exit handling the command lines share.
+- `internal/` — cross-layer helpers (`assertNever`, `messageOf`, unit tokens).
 
 ## Memory / process
 

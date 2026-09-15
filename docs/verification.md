@@ -371,7 +371,7 @@ Value-blindness has one consequence sharp enough to name, because it turns into 
 `violated`** rather than a missing proof. When two agents share one tool, the tool's success
 branch is an `xor` over its agents' `A/response` places and the scheduler picks the agent the
 dispatch token names — correct at run time, and the routing is asserted rather than assumed
-(`scheduler/actions.ts`, `succeed`). The state-class graph cannot read that token, so it
+(`scheduler/outcomes.ts`, `succeed`). The state-class graph cannot read that token, so it
 explores the arm where the response lands on the *other* agent, and that arm strands the
 dispatcher: proper completion on `agentSharedTool` reports `violated`, quiescing on
 `A1/dispatched` + `A1/outstanding` with an uncollected `A2/response`. The workflow is fine and

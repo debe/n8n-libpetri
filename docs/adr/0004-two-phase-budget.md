@@ -279,7 +279,7 @@ design decision rather than a leftover:
   libpetri never calls it, so a timed-out execution would be saved as a **success**.
 - n8n polls it **between** activations (`executionLoop` lines 49-51), never inside one, and
   the scheduler polls it in exactly the same place: once per activation, at the top of
-  `attempt` (`src/scheduler/actions.ts`). A wall-clock deadline handed to `run()` would stop
+  `attempt` (`src/scheduler/run-loop.ts`). A wall-clock deadline handed to `run()` would stop
   the net at an arbitrary instant instead, so an activation n8n would have let finish could
   be recorded differently — a data difference, which is always a defect here.
 - `run(ms, 'close')` **rejects**, so it returns no quiescent marking. `finish()` needs one to

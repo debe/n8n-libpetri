@@ -25,7 +25,7 @@
 import { performance } from 'node:perf_hooks';
 import {
   MarkingState, SmtVerifier, deadlockFree, flatten, mutualExclusion, placeBound, unreachable,
-  z3Available, type SmtProperty,
+  type SmtProperty,
 } from 'libpetri/verification';
 import type { Place, Token } from 'libpetri';
 import { compile } from '../../src/compiler/index.js';
@@ -33,6 +33,7 @@ import type { CompiledWorkflow, PlaceRole, WorkflowDescription } from '../../src
 import { diamond, multiProducer } from '../fixtures/workflows.js';
 import { HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES } from '../../src/verify/index.js';
 import { generateWorkflow, liveSampleNode, orphanBranch } from './support.js';
+import { Z3_AVAILABLE } from '../support/z3.js';
 
 interface Sample {
   readonly family: string;
@@ -175,7 +176,7 @@ async function main(): Promise<void> {
   const sizesIndex = argv.indexOf('--sizes');
   const wanted = sizesIndex >= 0 ? (argv[sizesIndex + 1] ?? '').split(',') : null;
 
-  if (!z3Available()) {
+  if (!Z3_AVAILABLE) {
     process.stderr.write('no usable z3 (PATH or LIBPETRI_Z3): nothing to measure\n');
     process.exitCode = 1;
     return;
