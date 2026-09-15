@@ -14,101 +14,14 @@
  * mixes cases that run the loop with cases that mock it away. Both lists are the whole
  * rule; the counts each pattern yields on the unpatched baseline are pinned in
  * `tests/conformance/classify.test.ts`.
+ *
+ * The rule's data, `LOOP_DRIVING_FILE` and `LOOP_DRIVING_PATTERNS`, lives in `classify/patterns.ts`.
  */
 import type { JunitCase } from './junit.js';
+import { LOOP_DRIVING_FILE, LOOP_DRIVING_PATTERNS } from './classify/patterns.js';
 
-export interface LoopDrivingPattern {
-  readonly id: string;
-  /** Tested against each describe block name of the case. */
-  readonly pattern: RegExp;
-  /**
-   * When set, the case's own title must match as well. Narrows a block whose cases are
-   * not all loop-driving; never widens (a title match without a block match is nothing).
-   */
-  readonly title?: RegExp;
-  /** Why matching cases are scheduler semantics, and what the pattern deliberately avoids. */
-  readonly rationale: string;
-}
-
-/**
- * The files whose cases can be loop-driving:
- *
- * - `workflow-execute*.test.ts` — `workflow-execute`,
- *   `workflow-execute-process-process-run-execution-data`, `workflow-execute-run-node` and
- *   `workflow-execute-node-error-reporting`. Only the first two run whole workflows through
- *   the loop; the patterns below select those cases.
- * - `webhook-respond-branch-order.test.ts` — **added in M4**. Every one of its eight cases
- *   calls `workflowExecute.run()` on a two-child fan-out and asserts which child ran first,
- *   which is the loop and nothing else; M2 and M3 left it in the helper column, so the one
- *   k > 1 regression it carries (divergence #17) was reported outside the headline. Both
- *   of its describe blocks are matched, so the file rule alone does not decide.
- *
- * Widening this regex moves cases between the two columns, so the counts it yields on the
- * baseline are pinned in `tests/conformance/classify.test.ts`.
- */
-export const LOOP_DRIVING_FILE = /(^|\/)(workflow-execute[^/]*|webhook-respond-branch-order)\.test\.ts$/;
-
-export const LOOP_DRIVING_PATTERNS: readonly LoopDrivingPattern[] = [
-  {
-    id: 'execution-order',
-    pattern: /^v\d execution order$/i,
-    rationale:
-      "n8n's `v0 execution order` / `v1 execution order` suites run fixture workflows " +
-      'end to end and assert which nodes ran, in which order, with which data: the loop ' +
-      'itself. Whole-block match, so `runNode`\'s "execution order and input data ' +
-      'handling" helper suite does not count.',
-  },
-  {
-    id: 'hook-order',
-    pattern: /^v\d hook order$/i,
-    rationale:
-      'The `v0/v1 hook order` suites assert which nodes run at all (run-node filter, ' +
-      'missing input data, destination node in exclusive mode) through the per-node hooks ' +
-      'the loop fires.',
-  },
-  {
-    id: 'branch-order',
-    pattern: /\bbranch(?:es)? order(?:ing)?\b/i,
-    rationale:
-      'Ordering between sibling branches: `webhook responseNode branch ordering` in ' +
-      '`webhook-respond-branch-order.test.ts`, four cases that run a `responseMode: ' +
-      'responseNode` webhook fanning out to a work node and a shared Respond node and ' +
-      'assert which of the two the loop ran first. Nothing in the workflow-execute files ' +
-      'matches it at the pinned commit.',
-  },
-  {
-    id: 'respond-layout',
-    pattern: /^the reported workflow layout$/,
-    rationale:
-      'The other block of `webhook-respond-branch-order.test.ts`: four `test.each` rows ' +
-      'that replay the canvas y coordinates of the workflow in n8n issue #36175 through ' +
-      'the same `workflowExecute.run()` helper and assert whether the Respond node ' +
-      'acknowledged before the agent. Same loop, same fan-out, different fixture.',
-  },
-  {
-    id: 'waiting',
-    pattern: /^(?:runExecutionData\.waitTill|waiting tools)$/,
-    rationale:
-      "Resuming a waiting execution (`waitTill`, the marking codec's job) and the " +
-      '`waiting tools` engine-request round trip that re-queues an agent after its tools ' +
-      'ran. Whole-block match, so the `prepareWaitingToExecution` helper suite does not count. ' +
-      'Since M7 these are engine results like any other — agent tool dispatch is implemented ' +
-      '(ADR 0008) — so no headline needs an "excluding out-of-scope" restatement.',
-  },
-  {
-    id: 'partial',
-    pattern: /^runPartialWorkflow2$/,
-    title: /^increments partial execution index\b/,
-    rationale:
-      '`runPartialWorkflow2` rebuilds the execution stack from the previous run data and ' +
-      'hands it to `processRunExecutionData`. Eleven of its thirteen cases at the pinned ' +
-      'commit replace `processRunExecutionData` with a mock and assert on the stack, the ' +
-      'run-node filter or the graph handed over: partial-execution-utils behaviour, not the ' +
-      'loop. The two "increments partial execution index …" cases let the loop run and ' +
-      'assert the `executionIndex` it stamps on `nodeExecuteBefore`; the title narrows the ' +
-      'block to exactly those.',
-  },
-];
+export { LOOP_DRIVING_FILE, LOOP_DRIVING_PATTERNS } from './classify/patterns.js';
+export type { LoopDrivingPattern } from './classify/patterns.js';
 
 export interface CaseClassification {
   readonly loopDriving: boolean;

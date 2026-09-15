@@ -14,19 +14,26 @@
  * happens-before are intact — but it is a behaviour with no row, and `docs/divergences.md`
  * says nothing is skipped silently, so a CI leg driving this command must not go green on
  * one.
+ *
+ * The command line is parsed in `differ-cli/args.ts`; the tally and the exit code of a run
+ * are `differ-cli/verdict.ts`.
  */
 import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { exitWith } from '../cli/exit.js';
-import { parseFlags, UsageError } from '../cli/flags.js';
 import { nodeOutput } from '../cli/io.js';
 import type { CliOutput } from '../cli/io.js';
 import { messageOf } from '../internal/errors.js';
+import { parseDifferArgs } from './differ-cli/args.js';
+import { verdictOf } from './differ-cli/verdict.js';
 import {
-  diffFixture, fixtureStatics, novelMechanismsOf, renderDiffReport,
+  diffFixture, fixtureStatics, renderDiffReport,
   type DifferFixture, type DiffResult, type FixtureStatics,
 } from './differ.js';
+
+/** Runs one fixture at one budget, with the fixture's statics. */
+type DiffOne = (fixture: DifferFixture, budget: number, statics: FixtureStatics) => Promise<DiffResult>;
 
 export interface DifferCliIo extends CliOutput {
   readonly load: (specifier: string) => Promise<unknown>;
@@ -34,11 +41,8 @@ export interface DifferCliIo extends CliOutput {
    * Runs one fixture at one budget; {@link diffFixture} unless a test substitutes one. The
    * statics are the fixture's, computed once for every budget it runs at.
    */
-  readonly diff?: (fixture: DifferFixture, budget: number, statics: FixtureStatics) => Promise<DiffResult>;
+  readonly diff?: DiffOne;
 }
-
-const DIFFER_USAGE =
-  'usage: differ-cli <fixtures-module> [--budget N]… [--fixture NAME]… [--out FILE] [--title T]';
 
 /** Pull the fixture array out of a loaded module. */
 export function fixturesOf(module: unknown): readonly DifferFixture[] {
@@ -50,72 +54,45 @@ export function fixturesOf(module: unknown): readonly DifferFixture[] {
   return candidate as readonly DifferFixture[];
 }
 
+/** Every fixture at every budget: `budgets` when given, else the fixture's own (default 1, 2 and 4). */
+async function diffAll(fixtures: readonly DifferFixture[], budgets: readonly number[], diff: DiffOne): Promise<DiffResult[]> {
+  const results: DiffResult[] = [];
+  for (const fixture of fixtures) {
+    const statics = fixtureStatics(fixture.workflow);
+    for (const budget of budgets.length > 0 ? budgets : (fixture.budgets ?? [1, 2, 4])) {
+      results.push(await diff(fixture, budget, statics));
+    }
+  }
+  return results;
+}
+
 export async function runDifferCli(argv: readonly string[], io: DifferCliIo): Promise<number> {
-  const budgets: number[] = [];
-  const only: string[] = [];
-  let modulePath: string | undefined;
-  let out: string | undefined;
-  let title = 'Differential report';
-  try {
-    parseFlags(argv, {
-      values: {
-        '--budget': (v) => { budgets.push(Number.parseInt(v, 10)); },
-        '--fixture': (v) => { only.push(v); },
-        '--out': (v) => { out = v; },
-        '--title': (v) => { title = v; },
-      },
-      positional: (word) => {
-        if (modulePath !== undefined) throw new UsageError('only one fixtures module');
-        modulePath = word;
-      },
-    });
-  } catch (e) {
-    if (!(e instanceof UsageError)) throw e;
-    io.stderr(`${e.message}\n${DIFFER_USAGE}\n`);
-    return 2;
-  }
-  if (modulePath === undefined) {
-    io.stderr(`${DIFFER_USAGE}\n`);
-    return 2;
-  }
-  if (budgets.some((b) => !Number.isInteger(b) || b < 1)) {
-    io.stderr(`--budget must be a positive integer\n${DIFFER_USAGE}\n`);
+  const args = parseDifferArgs(argv);
+  if ('usage' in args) {
+    io.stderr(args.usage);
     return 2;
   }
   // A module that cannot be found, does not evaluate, or exports no fixture array is an input
   // error: exit 2 naming it, like `n8n-libpetri verify` on an unreadable workflow.
   let fixtures: readonly DifferFixture[];
   try {
-    fixtures = fixturesOf(await io.load(modulePath));
+    fixtures = fixturesOf(await io.load(args.modulePath));
   } catch (e) {
-    io.stderr(`${modulePath}: ${messageOf(e)}\n`);
+    io.stderr(`${args.modulePath}: ${messageOf(e)}\n`);
     return 2;
   }
-  const selected = only.length === 0 ? fixtures : fixtures.filter((f) => only.includes(f.name));
+  const selected = args.only.length === 0 ? fixtures : fixtures.filter((f) => args.only.includes(f.name));
   if (selected.length === 0) {
-    io.stderr(`no fixture matched ${only.join(', ')}\n`);
+    io.stderr(`no fixture matched ${args.only.join(', ')}\n`);
     return 2;
   }
-  const results: DiffResult[] = [];
-  const diff = io.diff ?? diffFixture;
-  for (const fixture of selected) {
-    const statics = fixtureStatics(fixture.workflow);
-    for (const budget of budgets.length > 0 ? budgets : (fixture.budgets ?? [1, 2, 4])) {
-      results.push(await diff(fixture, budget, statics));
-    }
-  }
-  const report = renderDiffReport(results, title);
-  if (out === undefined) io.stdout(report);
-  else io.writeFile(out, report);
-  const failed = results.filter((r) => r.verdict === 'fail');
-  const divergent = results.filter((r) => r.verdict === 'divergent');
-  const novel = novelMechanismsOf(results);
-  io.stderr(
-    `${results.length - failed.length - divergent.length} pass, ${divergent.length} divergent, ` +
-    `${failed.length} fail${failed.length > 0 ? `: ${failed.map((r) => `${r.fixture}@k=${r.requestedBudget}`).join(', ')}` : ''}` +
-    `${novel.length > 0 ? `; ${novel.length} ordering mechanism(s) with no row in docs/divergences.md: ${novel.join(', ')}` : ''}\n`,
-  );
-  return failed.length === 0 && novel.length === 0 ? 0 : 1;
+  const results = await diffAll(selected, args.budgets, io.diff ?? diffFixture);
+  const report = renderDiffReport(results, args.title);
+  if (args.out === undefined) io.stdout(report);
+  else io.writeFile(args.out, report);
+  const verdict = verdictOf(results);
+  io.stderr(verdict.summary);
+  return verdict.exitCode;
 }
 
 /** A path (relative to the cwd or absolute) loads as a file URL; anything else as a package. */

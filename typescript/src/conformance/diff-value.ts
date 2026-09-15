@@ -2,8 +2,15 @@
  * Values, compared: the first difference between two JSON-shaped values, rendered for a
  * report, and whether two lists hold the same values in another order. The data gate
  * (`gate-data.ts`) is built on these. They know nothing about n8n or the net — only about
- * values — which is why this module imports nothing.
+ * values — which is why this module and `values/` import nothing else: `values/render.ts`
+ * says what a value is and how it renders, `values/permutation.ts` holds the permutation
+ * check.
  */
+import { MISSING, ownValue } from './values/missing.js';
+import { classOf, isExotic, isPlainObject, render } from './values/render.js';
+
+export { MISSING } from './values/missing.js';
+export { isPermutation } from './values/permutation.js';
 
 /** One difference between the two `IRunData`s, addressed by a JSON-pointer-ish path. */
 export interface DataDifference {
@@ -12,55 +19,67 @@ export interface DataDifference {
   readonly libpetri: string;
 }
 
-/**
- * An absent key, as opposed to a present one holding `undefined`: the two compare equal
- * ({@link firstDifference}) but render differently (`<missing>` against `undefined`).
- */
-export const MISSING = Symbol('missing');
-
-/** `[object Date]` → `Date`; the class of a value the plain-object walk cannot descend into. */
-function classOf(value: unknown): string {
-  return Object.prototype.toString.call(value).slice(8, -1);
+/** `a` and `b` as the difference at `path`, each rendered for the report. */
+function mismatch(a: unknown, b: unknown, path: string): DataDifference {
+  return { path, n8n: render(a), libpetri: render(b) };
 }
 
-function render(value: unknown): string {
-  if (value === MISSING) return '<missing>';
-  if (value === undefined) return 'undefined';
-  if (typeof value === 'number' && Number.isNaN(value)) return 'NaN';
-  if (isExotic(value)) {
-    if (value instanceof Date) return value.toISOString();
-    if (value instanceof Error) return `${value.name}: ${value.message}`;
-    // A Buffer stringifies as `{"type":"Buffer","data":[…]}`; a Map or a Set as `{}`, which
-    // says nothing, so those are rendered by class and size instead.
-    if (!ArrayBuffer.isView(value)) {
-      const size = (value as { size?: number }).size;
-      return `[${classOf(value)}${typeof size === 'number' ? ` size ${size}` : ''}]`;
-    }
-  }
-  try {
-    const text = JSON.stringify(value);
-    return text === undefined ? String(value) : text.length > 200 ? `${text.slice(0, 197)}…` : text;
-  } catch {
-    return String(value);
-  }
+/** Equal without a walk: the same value, or `NaN` on both sides. */
+function identical(left: unknown, right: unknown): boolean {
+  return left === right || (Number.isNaN(left) && Number.isNaN(right));
 }
 
 /**
- * A `{}` literal (or a null-prototype object), the only shape the walk below descends into
- * key by key. `Object.keys` of anything else — a `Date`, a `Map`, a `Set`, an `Error`, a
- * class instance — is empty, so treating them as plain objects made *every pair of them
- * compare equal*: `new Date(1)` vs `new Date(2)` was `null` (no difference), and n8n node
- * output routinely carries dates (`$now`, the Date & Time node, a Code node).
+ * An `Error` pair as the `{ name, message }` the gate compares everywhere else, and a
+ * `Buffer` (or any other view) pair as its bytes, which the walk renders faithfully; `null`
+ * for anything else.
  */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value) as unknown;
-  return proto === Object.prototype || proto === null;
+function walkableForms(left: unknown, right: unknown): readonly [unknown, unknown] | null {
+  if (left instanceof Error && right instanceof Error) {
+    return [{ name: left.name, message: left.message }, { name: right.name, message: right.message }];
+  }
+  if (ArrayBuffer.isView(left) && ArrayBuffer.isView(right)) {
+    return [[...(left as Uint8Array)], [...(right as Uint8Array)]];
+  }
+  return null;
 }
 
-/** An object the key walk cannot handle: not a plain object and not an array. */
-function isExotic(value: unknown): boolean {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && !isPlainObject(value);
+/**
+ * Two values at least one of which the key walk cannot handle. A `Date` is its instant; an
+ * `Error` and a view go through the walk in their {@link walkableForms}. Anything else — a
+ * `Map`, a `Set`, a class instance — has no comparable structure here and is different
+ * unless it is literally the same object.
+ */
+function exoticDifference(a: unknown, b: unknown, left: unknown, right: unknown, path: string): DataDifference | null {
+  if (classOf(left) !== classOf(right)) return mismatch(a, b, path);
+  if (left instanceof Date && right instanceof Date) {
+    return left.getTime() === right.getTime() ? null : mismatch(a, b, path);
+  }
+  const forms = walkableForms(left, right);
+  return forms === null ? mismatch(a, b, path) : firstDifference(forms[0], forms[1], path);
+}
+
+/** Two values at least one of which is an array: element by element when both are. */
+function arrayDifference(a: unknown, b: unknown, left: unknown, right: unknown, path: string): DataDifference | null {
+  if (!Array.isArray(left) || !Array.isArray(right)) return mismatch(a, b, path);
+  if (left.length !== right.length) {
+    return { path: `${path}.length`, n8n: String(left.length), libpetri: String(right.length) };
+  }
+  for (let i = 0; i < left.length; i++) {
+    const d = firstDifference(left[i], right[i], `${path}[${i}]`);
+    if (d !== null) return d;
+  }
+  return null;
+}
+
+/** Two plain objects, key by key in sorted order; an absent key is {@link MISSING}. */
+function keyDifference(left: Record<string, unknown>, right: Record<string, unknown>, path: string): DataDifference | null {
+  const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort();
+  for (const key of keys) {
+    const d = firstDifference(ownValue(left, key), ownValue(right, key), `${path}.${key}`);
+    if (d !== null) return d;
+  }
+  return null;
 }
 
 /**
@@ -70,83 +89,11 @@ function isExotic(value: unknown): boolean {
 export function firstDifference(a: unknown, b: unknown, path: string): DataDifference | null {
   const left = a === MISSING ? undefined : a;
   const right = b === MISSING ? undefined : b;
-  if (left === right) return null;
-  if (typeof left === 'number' && typeof right === 'number' && Number.isNaN(left) && Number.isNaN(right)) return null;
-  if (left === undefined || right === undefined || left === null || right === null) {
-    return { path, n8n: render(a), libpetri: render(b) };
-  }
-  if (isExotic(left) || isExotic(right)) {
-    const different = { path, n8n: render(a), libpetri: render(b) };
-    if (classOf(left) !== classOf(right)) return different;
-    // A `Date` is its instant; an `Error` is the `{ name, message }` the gate compares
-    // everywhere else; a `Buffer` (or any other view) is its bytes, which `JSON.stringify`
-    // renders faithfully, so it goes through the key walk below. Anything else — a `Map`, a
-    // `Set`, a class instance — has no comparable structure here and is different unless it
-    // is literally the same object.
-    if (left instanceof Date && right instanceof Date) {
-      return left.getTime() === right.getTime() ? null : different;
-    }
-    if (left instanceof Error && right instanceof Error) {
-      return firstDifference({ name: left.name, message: left.message }, { name: right.name, message: right.message }, path);
-    }
-    if (ArrayBuffer.isView(left) && ArrayBuffer.isView(right)) {
-      return firstDifference([...(left as Uint8Array)], [...(right as Uint8Array)], path);
-    }
-    return different;
-  }
-  if (Array.isArray(left) || Array.isArray(right)) {
-    if (!Array.isArray(left) || !Array.isArray(right)) return { path, n8n: render(a), libpetri: render(b) };
-    if (left.length !== right.length) {
-      return { path: `${path}.length`, n8n: String(left.length), libpetri: String(right.length) };
-    }
-    for (let i = 0; i < left.length; i++) {
-      const d = firstDifference(left[i], right[i], `${path}[${i}]`);
-      if (d !== null) return d;
-    }
-    return null;
-  }
-  if (isPlainObject(left) && isPlainObject(right)) {
-    const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort();
-    for (const key of keys) {
-      const d = firstDifference(
-        Object.hasOwn(left, key) ? left[key] : MISSING,
-        Object.hasOwn(right, key) ? right[key] : MISSING,
-        `${path}.${key}`,
-      );
-      if (d !== null) return d;
-    }
-    return null;
-  }
+  if (identical(left, right)) return null;
+  if (left === undefined || right === undefined || left === null || right === null) return mismatch(a, b, path);
+  if (isExotic(left) || isExotic(right)) return exoticDifference(a, b, left, right, path);
+  if (Array.isArray(left) || Array.isArray(right)) return arrayDifference(a, b, left, right, path);
+  if (isPlainObject(left) && isPlainObject(right)) return keyDifference(left, right, path);
   // Two primitives (or a primitive against a container) that are not `===`.
-  return { path, n8n: render(a), libpetri: render(b) };
-}
-
-/**
- * The identity of a value for the permutation check: the value serialised, with the one
- * guard {@link render} has — a payload `JSON.stringify` rejects (a `BigInt`, a cycle) is
- * `null`, and a list holding one is never called a permutation, because the alternative was
- * the gate throwing on it.
- */
-function permutationKey(value: unknown): string | null {
-  try {
-    return JSON.stringify(value, (_key, v: unknown) => (typeof v === 'bigint' ? `${v}n` : v));
-  } catch {
-    return null;
-  }
-}
-
-/** Whether two lists hold the same values in another order, by {@link permutationKey}. */
-export function isPermutation(left: readonly unknown[], right: readonly unknown[]): boolean {
-  const keysOf = (list: readonly unknown[]): string[] | null => {
-    const keys: string[] = [];
-    for (const value of list) {
-      const key = permutationKey(value);
-      if (key === null) return null;
-      keys.push(key);
-    }
-    return keys.sort();
-  };
-  const a = keysOf(left);
-  const b = keysOf(right);
-  return a !== null && b !== null && a.length === b.length && a.every((key, i) => key === b[i]);
+  return mismatch(a, b, path);
 }
