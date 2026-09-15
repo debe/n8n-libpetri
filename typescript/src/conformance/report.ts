@@ -5,9 +5,10 @@
  * are listed so the reviewer sees exactly which cases the headline counts.
  */
 import { LOOP_DRIVING_PATTERNS } from './classify.js';
-import type { ConformanceMatrix, MatrixRow, Tally } from './matrix.js';
+import { EMPTY_TALLY, type ConformanceMatrix, type MatrixRow, type Tally } from './matrix.js';
 
-const cell = (s: string): string => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+/** Text as a Markdown table cell: a `|` would end the cell and a newline would end the row. */
+export const cell = (s: string): string => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 const ratio = (t: Tally): string => `${t.passed}/${t.total}`;
 
 function outcomeNote(t: Tally): string {
@@ -34,7 +35,7 @@ function table(rows: readonly MatrixRow[], m: ConformanceMatrix, withPattern: bo
 /** Render the matrix as Markdown. */
 export function renderMatrix(m: ConformanceMatrix): string {
   const perPattern = LOOP_DRIVING_PATTERNS.map((p) => {
-    const t = m.byPattern.get(p.id) ?? { total: 0, passed: 0, failed: 0, skipped: 0, missing: 0 };
+    const t = m.byPattern.get(p.id) ?? EMPTY_TALLY;
     return `${p.id} ${ratio(t)}`;
   }).join(', ');
   const total = m.rows.length;

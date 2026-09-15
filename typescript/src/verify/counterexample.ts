@@ -31,8 +31,8 @@ export function decodeStep(flatName: string, map: NetMapView): CounterexampleSte
     source,
     node: info?.node ?? null,
     role: info?.role ?? null,
-    ...(info?.port === undefined ? {} : { port: info.port }),
-    ...(info?.variant === undefined ? {} : { variant: info.variant }),
+    ...(info !== undefined && 'port' in info ? { port: info.port } : {}),
+    ...(info?.role === 'arm' ? { variant: info.variant } : {}),
   };
 }
 

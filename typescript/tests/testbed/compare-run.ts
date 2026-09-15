@@ -5,9 +5,10 @@
  * So the three sections are kept apart rather than folded into one verdict —
  *
  *  1. *Data*: every node's `ITaskData` compared field by field, minus the fields that are
- *     clocks or positions. The field list mirrors `comparableTask` in
+ *     clocks or positions. The field list *is* `comparableTask` from
  *     `src/conformance/differ.ts` — `startTime`, `executionTime` and `executionIndex` are left
- *     out there for exactly this reason, and are left out here for the same one.
+ *     out there for exactly this reason, and one list means one place to keep the rule that a
+ *     comparison strips what the runtime decides, not only what the clock decides.
  *  2. *Happens-before*: every realised dependency edge (`dependencyEdges`, reused verbatim)
  *     must be respected inside each leg. The observation here is the clock n8n stamps on each
  *     task, not a `runNode` trace — a live server has no trace — so an edge is respected when
@@ -22,8 +23,10 @@
  *   npx tsx tests/testbed/compare-run.ts <reference.json> <candidate.json> [more.json ...]
  */
 import { readFileSync } from 'node:fs';
-import type { IRunData, ITaskData } from 'n8n-workflow';
-import { activationKey, dependencyEdges, executionOrder, firstDifference } from '../../src/conformance/differ.js';
+import type { IRunData } from 'n8n-workflow';
+import {
+  activationKey, comparableTask, dependencyEdges, executionOrder, firstDifference,
+} from '../../src/conformance/differ.js';
 
 interface Capture {
   readonly path: string;
@@ -51,20 +54,9 @@ function load(path: string): Capture {
   };
 }
 
-/** The comparable fields of one task: everything but the clocks and the position. */
-function comparable(task: ITaskData): Record<string, unknown> {
-  const error = task.error as { name?: string; message?: string } | undefined;
-  return {
-    data: task.data,
-    source: task.source,
-    executionStatus: task.executionStatus,
-    metadata: task.metadata,
-    error: error === undefined ? undefined : { name: error.name, message: error.message },
-  };
-}
-
+/** Every task by its comparable fields: everything but the clocks and the position. */
 const comparableRunData = (runData: IRunData): Record<string, unknown> =>
-  Object.fromEntries(Object.entries(runData).map(([node, tasks]) => [node, tasks.map(comparable)]));
+  Object.fromEntries(Object.entries(runData).map(([node, tasks]) => [node, tasks.map(comparableTask)]));
 
 /** `(node, runIndex) -> [start, finish]` from n8n's own per-task clock. */
 function windows(runData: IRunData): Map<string, { start: number; finish: number }> {

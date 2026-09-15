@@ -12,6 +12,10 @@ import type { OkPayload, RetryPayload, RunPayload, StoppedPayload, WaitingPayloa
 import { chooseBranch, conn, diamond, fanOut, fanOut4, ifBothOutputs, linear, node, twoTriggers, workflow } from '../fixtures/workflows.js';
 import { fakeWorkflow, items } from '../scheduler/support.js';
 import { edge, edgeData, emptyState, entryFor, entryPayload, gadget, live, named, put, slotsOf, src, stateOf } from './support.js';
+import {
+  freeOf, hasdataOf, inEmptyOf, inOf, inputOf, orInputOf, readyDataOf, readyEmptyOf, readyOf, retryOf, routedOf,
+  splitOutputsOf,
+} from '../compiler/support.js';
 
 const names = (s: { nodeExecutionStack: Array<{ node: { name: string } }> }) => s.nodeExecutionStack.map((e) => e.node.name);
 
@@ -20,9 +24,9 @@ describe('stack entries', () => {
     const c = compile(linear);
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
-    const w: WaitingPayload = { executionData: entryFor(wf.nodes.A!, [items(1)]) };
+    const w: WaitingPayload = { kind: 'waiting', executionData: entryFor(wf.nodes.A!, [items(1)]) };
     put(m, gadget(c, 'A').waiting, [w]);
-    put(m, gadget(c, 'C').in!, [edge(items(2), src('B'))]); // deeper, but the waiting node comes first
+    put(m, inOf(gadget(c, 'C')), [edge(items(2), src('B'))]); // deeper, but the waiting node comes first
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(names(x)).toEqual(['A', 'C']);
     expect(x.nodeExecutionStack[0]).toBe(w.executionData);
@@ -34,8 +38,8 @@ describe('stack entries', () => {
     const m = c.sharedMarking();
     const a = items({ a: 1 });
     const verbatim = entryFor(wf.nodes.B!, [items(9)]);
-    put(m, gadget(c, 'A').in!, [edge(a, src('Trigger', 0, 3))]);
-    put(m, gadget(c, 'B').in!, [entryPayload(verbatim)]);
+    put(m, inOf(gadget(c, 'A')), [edge(a, src('Trigger', 0, 3))]);
+    put(m, inOf(gadget(c, 'B')), [entryPayload(verbatim)]);
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(names(x)).toEqual(['B', 'A']);
     expect(x.nodeExecutionStack[0]).toBe(verbatim);
@@ -48,10 +52,10 @@ describe('stack entries', () => {
     const c = compile(fanOut); // canvas order A, Trigger, B, C; A, B, C all depth 1
     const wf = fakeWorkflow(fanOut);
     const m = c.sharedMarking();
-    put(m, gadget(c, 'C').in!, [edge(items(1), src('Trigger'))], 5);
-    put(m, gadget(c, 'A').in!, [edge(items(2), src('Trigger'))], 6);
-    put(m, gadget(c, 'B').in!, [edge(items(3), src('Trigger')), edge(items(4), src('Trigger'))], 7);
-    put(m, gadget(c, 'Trigger').in!, [edge(items(0), null)], 1);
+    put(m, inOf(gadget(c, 'C')), [edge(items(1), src('Trigger'))], 5);
+    put(m, inOf(gadget(c, 'A')), [edge(items(2), src('Trigger'))], 6);
+    put(m, inOf(gadget(c, 'B')), [edge(items(3), src('Trigger')), edge(items(4), src('Trigger'))], 7);
+    put(m, inOf(gadget(c, 'Trigger')), [edge(items(0), null)], 1);
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(names(x)).toEqual(['A', 'B', 'B', 'C', 'Trigger']);
     expect(x.nodeExecutionStack.slice(1, 3).map((e) => e.data.main![0])).toEqual([items(3), items(4)]);
@@ -61,15 +65,15 @@ describe('stack entries', () => {
     const c = compile({ ...linear, nodes: linear.nodes.map((n) => (n.name === 'B' ? { ...n, retryOnFail: true } : n)) });
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
-    const stopped: StoppedPayload = { executionData: entryFor(wf.nodes.A!, [items(1)]), ran: false };
-    const done: StoppedPayload = { executionData: entryFor(wf.nodes.C!, [items(2)]), ran: true };
-    const retry: RetryPayload = { executionData: entryFor(wf.nodes.B!, [items(3)]), attempt: 1, taskStartedData: {} as never, reason: { kind: 'error', error: new Error('x') } };
+    const stopped: StoppedPayload = { kind: 'stopped', executionData: entryFor(wf.nodes.A!, [items(1)]), ran: false };
+    const done: StoppedPayload = { kind: 'stopped', executionData: entryFor(wf.nodes.C!, [items(2)]), ran: true };
+    const retry: RetryPayload = { kind: 'retry', executionData: entryFor(wf.nodes.B!, [items(3)]), attempt: 1, taskStartedData: {} as never, reason: { kind: 'error', error: new Error('x') } };
     put(m, gadget(c, 'A').stopped, [stopped]);
     put(m, gadget(c, 'C').stopped, [done]);
-    put(m, gadget(c, 'B').retry!, [retry]);
+    put(m, retryOf(gadget(c, 'B')).retry, [retry]);
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([retry.executionData, stopped.executionData]);
-    const running: RunPayload = { executionData: entryFor(wf.nodes.C!, [items(4)]), attempt: 0 };
+    const running: RunPayload = { kind: 'run', executionData: entryFor(wf.nodes.C!, [items(4)]), attempt: 0 };
     put(m, gadget(c, 'C').running, [running]);
     const y = encodeMarking(c, live(m), emptyState(), { mode: 'cancelled', node: (n) => wf.nodes[n] });
     expect(y.nodeExecutionStack).toEqual([running.executionData, retry.executionData, stopped.executionData]);
@@ -83,11 +87,11 @@ describe('join slots', () => {
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
     const a = items({ a: 1 });
-    m.delete(g.inputs[0]!.free!);
-    m.delete(g.inputs[1]!.free!);
-    put(m, g.inputs[0]!.ready!, [edge(a, src('A'))]);
-    put(m, g.inputs[1]!.ready!, [null]);
-    put(m, g.hasdata!, [null]);
+    m.delete(freeOf(inputOf(g, 0)));
+    m.delete(freeOf(inputOf(g, 1)));
+    put(m, readyOf(inputOf(g, 0)), [edge(a, src('A'))]);
+    put(m, readyOf(inputOf(g, 1)), [null]);
+    put(m, hasdataOf(g), [null]);
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.Merge, data: { main: [a, []] }, source: { main: [src('A'), null] } }]);
     expect(x.nodeExecutionStack[0]!.data.main![0]).toBe(a);
@@ -101,10 +105,10 @@ describe('join slots', () => {
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
-    m.delete(g.inputs[0]!.free!);
-    m.delete(g.inputs[1]!.free!);
-    put(m, g.inputs[0]!.ready!, [null]);
-    put(m, g.inputs[1]!.ready!, [null]);
+    m.delete(freeOf(inputOf(g, 0)));
+    m.delete(freeOf(inputOf(g, 1)));
+    put(m, readyOf(inputOf(g, 0)), [null]);
+    put(m, readyOf(inputOf(g, 1)), [null]);
     const x = encodeMarking(c, live(m), emptyState(), { mode: 'cancelled', node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([]);
     expect(x.waitingExecution).toEqual({ Merge: { 0: { main: [[], []] } } });
@@ -120,9 +124,9 @@ describe('join slots', () => {
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
     const b = items({ b: 1 });
-    m.delete(g.inputs[1]!.free!);
-    put(m, g.inputs[1]!.ready!, [edge(b, src('B', 0, 2))]);
-    put(m, g.hasdata!, [null]);
+    m.delete(freeOf(inputOf(g, 1)));
+    put(m, readyOf(inputOf(g, 1)), [edge(b, src('B', 0, 2))]);
+    put(m, hasdataOf(g), [null]);
     const x = encodeMarking(c, live(m), emptyState());
     expect(x.nodeExecutionStack).toEqual([]);
     expect(x.waitingExecution).toEqual({ Merge: { 0: { main: [null, b] } } });
@@ -136,11 +140,11 @@ describe('join slots', () => {
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
     const [a1, a2, a3, b1] = [items(1), items(2), items(3), items({ b: 1 })];
-    m.delete(g.inputs[0]!.free!);
-    m.delete(g.inputs[1]!.free!);
-    put(m, g.inputs[0]!.ready!, [edge(a1, src('A'))]);
-    put(m, g.inputs[1]!.ready!, [edge(b1, src('B'))]);
-    put(m, g.hasdata!, [null, null]);
+    m.delete(freeOf(inputOf(g, 0)));
+    m.delete(freeOf(inputOf(g, 1)));
+    put(m, readyOf(inputOf(g, 0)), [edge(a1, src('A'))]);
+    put(m, readyOf(inputOf(g, 1)), [edge(b1, src('B'))]);
+    put(m, hasdataOf(g), [null, null]);
     put(m, edgeData(c, 'A', 0, 'Merge', 0), [edge(a2, src('A', 0, 1)), edge(a3, src('A', 0, 2))]);
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.Merge, data: { main: [a1, b1] }, source: { main: [src('A'), src('B')] } }]);
@@ -154,11 +158,11 @@ describe('join slots', () => {
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
     const e = entryFor(wf.nodes.Merge!, [items(1)]);
-    m.delete(g.inputs[0]!.free!);
-    m.delete(g.inputs[1]!.free!);
-    put(m, g.inputs[0]!.ready!, [entryPayload(e)]);
-    put(m, g.inputs[1]!.ready!, [null]);
-    put(m, g.hasdata!, [null]);
+    m.delete(freeOf(inputOf(g, 0)));
+    m.delete(freeOf(inputOf(g, 1)));
+    put(m, readyOf(inputOf(g, 0)), [entryPayload(e)]);
+    put(m, readyOf(inputOf(g, 1)), [null]);
+    put(m, hasdataOf(g), [null]);
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([e]);
     expect(x.nodeExecutionStack[0]).toBe(e);
@@ -171,10 +175,10 @@ describe('join slots', () => {
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
     const t = items({ t: 1 });
-    m.delete(g.inputs[0]!.free!);
-    m.delete(g.inputs[1]!.free!);
-    put(m, g.inputs[0]!.readyData!, [edge(t, src('IF', 0))]);
-    put(m, g.inputs[1]!.readyEmpty!, [null]);
+    m.delete(freeOf(inputOf(g, 0)));
+    m.delete(freeOf(inputOf(g, 1)));
+    put(m, readyDataOf(inputOf(g, 0)), [edge(t, src('IF', 0))]);
+    put(m, readyEmptyOf(inputOf(g, 1)), [null]);
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.Merge, data: { main: [t, []] }, source: { main: [src('IF', 0), null] } }]);
   });
@@ -184,8 +188,8 @@ describe('join slots', () => {
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
-    put(m, g.inputs[0]!.ready!, [entryPayload(entryFor(wf.nodes.Merge!, [items(1)]))]);
-    put(m, g.inputs[1]!.ready!, [entryPayload(entryFor(wf.nodes.Merge!, [items(2)]))]);
+    put(m, readyOf(inputOf(g, 0)), [entryPayload(entryFor(wf.nodes.Merge!, [items(1)]))]);
+    put(m, readyOf(inputOf(g, 1)), [entryPayload(entryFor(wf.nodes.Merge!, [items(2)]))]);
     expect(() => encodeMarking(c, live(m), emptyState())).toThrow(/node 'Merge': slot 0 pairs two different stack entries/);
   });
 });
@@ -197,8 +201,8 @@ describe('OR rounds', () => {
     const m = c.sharedMarking();
     const g = gadget(c, 'C');
     const t = items({ t: 1 });
-    put(m, g.inputs[0]!.hasdata!, [edge(t, src('IF', 0))]);
-    put(m, g.inputs[0]!.ready!, [null, null]); // IF delivered data on 0 and empty on 1: two deliveries, one of them the pending arrival
+    put(m, orInputOf(g).hasdata, [edge(t, src('IF', 0))]);
+    put(m, readyOf(inputOf(g, 0)), [null, null]); // IF delivered data on 0 and empty on 1: two deliveries, one of them the pending arrival
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.C, data: { main: [t] }, source: { main: [src('IF', 0)] } }]);
     expect(x.waitingExecution).toEqual({ C: { 0: { main: [[]] } } });
@@ -213,7 +217,7 @@ describe('OR rounds', () => {
     const g = gadget(c, 'C');
     expect(g.inputs[0]!.unreachableEdges).toBe(1);
     const m = c.sharedMarking(); // ready_0 = 1 (the seed)
-    put(m, g.inputs[0]!.ready!, [null]); // one real empty delivered
+    put(m, readyOf(inputOf(g, 0)), [null]); // one real empty delivered
     const x = encodeMarking(c, live(m), emptyState());
     expect(x.waitingExecution).toEqual({ C: { 0: { main: [[]] } } });
     expect(encodeMarking(c, live(c.sharedMarking()), emptyState()).waitingExecution).toEqual({});
@@ -232,9 +236,9 @@ describe('OR rounds', () => {
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
     const a = items({ a: 1 });
-    m.delete(g.inputs[0]!.free!);
-    put(m, g.inputs[0]!.ready!, [edge(a, src('TrigA'))]);
-    put(m, g.hasdata!, [null]);
+    m.delete(freeOf(inputOf(g, 0)));
+    put(m, readyOf(inputOf(g, 0)), [edge(a, src('TrigA'))]);
+    put(m, hasdataOf(g), [null]);
     const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.Merge, data: { main: [a, []] }, source: { main: [src('TrigA'), null] } }]);
   });
@@ -248,10 +252,10 @@ describe('discards and untouched fields', () => {
     const g = gadget(c, 'C');
     put(m, g.done, [null]);
     put(m, g.skipped!, [null]);
-    put(m, g.inputs[0]!.ran!, [null]);
-    put(m, gadget(c, 'Merge').hasdata!, [null]);
+    put(m, orInputOf(g).ran, [null]);
+    put(m, hasdataOf(gadget(c, 'Merge')), [null]);
     put(m, c.netMap.shared.pause, [null]);
-    const stopped: StoppedPayload = { executionData: entryFor(wf.nodes.End!, [items(1)]), ran: true };
+    const stopped: StoppedPayload = { kind: 'stopped', executionData: entryFor(wf.nodes.End!, [items(1)]), ran: true };
     put(m, gadget(c, 'End').stopped, [stopped]);
     const s = emptyState();
     const context = { a: { x: 1 } };
@@ -266,11 +270,28 @@ describe('discards and untouched fields', () => {
   });
 });
 
+describe('token shapes', () => {
+  it('a unit token on X/waiting is a diagnostic naming the node and the place, not a TypeError; the token is skipped', () => {
+    const c = compile(linear);
+    const wf = fakeWorkflow(linear);
+    const m = c.sharedMarking();
+    const a = gadget(c, 'A');
+    put(m, a.waiting, [null]);
+    put(m, inOf(gadget(c, 'C')), [edge(items(2), src('B'))]); // the rest of the marking still encodes
+    const diagnostics: string[] = [];
+    const x = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n], onDiagnostic: (d) => diagnostics.push(d) });
+    expect(names(x)).toEqual(['C']);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("node 'A'");
+    expect(diagnostics[0]).toContain(`'${a.waiting.name}'`);
+  });
+});
+
 describe('undrained places', () => {
   it.each([
-    ['X/running', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, gadget(c, 'A').running, [{ executionData: {} as never, attempt: 0 } satisfies RunPayload]), 'id:A/running'],
-    ['X/routed', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, gadget(c, 'A').routed!, [null]), 'id:A/routed'],
-    ['X/in_empty', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, gadget(c, 'A').inEmpty!, [null]), 'id:A/in_empty'],
+    ['X/running', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, gadget(c, 'A').running, [{ kind: 'run', executionData: {} as never, attempt: 0 } satisfies RunPayload]), 'id:A/running'],
+    ['X/routed', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, routedOf(gadget(c, 'A')), [null]), 'id:A/routed'],
+    ['X/in_empty', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, inEmptyOf(gadget(c, 'A')), [null]), 'id:A/in_empty'],
   ])('%s in pause mode is a CodecError naming the place', (_what, arrange, place) => {
     const c = compile(linear);
     const m = c.sharedMarking();
@@ -296,8 +317,8 @@ describe('undrained places', () => {
     const c = compile({ ...linear, nodes: linear.nodes.map((n) => (n.name === 'B' ? { ...n, retryOnFail: true } : n)) });
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
-    const retry: RetryPayload = { executionData: entryFor(wf.nodes.B!, [items(3)]), attempt: 1, taskStartedData: {} as never, reason: { kind: 'error', error: new Error('x') } };
-    put(m, gadget(c, 'B').retry!, [retry]);
+    const retry: RetryPayload = { kind: 'retry', executionData: entryFor(wf.nodes.B!, [items(3)]), attempt: 1, taskStartedData: {} as never, reason: { kind: 'error', error: new Error('x') } };
+    put(m, retryOf(gadget(c, 'B')).retry, [retry]);
     expect(encodeMarking(c, live(m), emptyState()).nodeExecutionStack).toEqual([retry.executionData]);
     expect(encodeMarking(c, live(m), emptyState(), { mode: 'cancelled' }).nodeExecutionStack).toEqual([retry.executionData]);
     expect(() => encodeMarking(c, live(m), emptyState(), { mode: 'stranded' })).toThrow('id:B/retry');
@@ -311,11 +332,11 @@ describe('undrained places', () => {
     const wf = fakeWorkflow(fanOut4);
     const m = c.sharedMarking();
     const t = items({ t: 1 });
-    const ok: OkPayload = { nodeSuccessData: [t, [], [], []], runIndex: 4 };
+    const ok: OkPayload = { kind: 'ok', nodeSuccessData: [t, [], [], []], runIndex: 4 };
     const q = gadget(c, 'Q');
-    expect(q.splitRouting).toBe(true);
-    expect(q.routed).toBeNull();
-    for (const o of q.outputs) put(m, o.ok!, [ok]);
+    expect(q.routing.kind).toBe('split');
+    expect(c.netMap.place('id:Q/routed')).toBeUndefined();
+    for (const o of splitOutputsOf(q)) put(m, o.ok, [ok]);
     const x = encodeMarking(c, live(m), emptyState(), { mode: 'cancelled', node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.S0, data: { main: [t] }, source: { main: [src('Q', 0, 4)] } }]);
   });
@@ -328,10 +349,10 @@ describe('undrained places', () => {
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const t = items({ t: 1 });
-    expect(gadget(c, 'IF').splitRouting).toBe(false);
-    expect(gadget(c, 'IF').outputs.every((o) => o.ok === null)).toBe(true);
-    put(m, gadget(c, 'IF').routed!, [null]);
-    put(m, gadget(c, 'A').in!, [edge(t, src('IF', 0, 4))]);
+    expect(gadget(c, 'IF').routing.kind).toBe('collapsed');
+    expect(gadget(c, 'IF').outputs.every((o) => o.routing === 'collapsed')).toBe(true);
+    put(m, routedOf(gadget(c, 'IF')), [null]);
+    put(m, inOf(gadget(c, 'A')), [edge(t, src('IF', 0, 4))]);
     const x = encodeMarking(c, live(m), emptyState(), { mode: 'cancelled', node: (n) => wf.nodes[n] });
     expect(x.nodeExecutionStack).toEqual([{ node: wf.nodes.A, data: { main: [t] }, source: { main: [src('IF', 0, 4)] } }]);
   });
@@ -345,10 +366,10 @@ describe('stranded mode (divergence #2)', () => {
     const g = gadget(c, 'Merge');
     const a = items({ a: 1 });
     const e = items({ e: 1 });
-    m.delete(g.inputs[0]!.free!);
-    put(m, g.inputs[0]!.ready!, [edge(a, src('A'))]);
-    put(m, g.hasdata!, [null]);
-    put(m, gadget(c, 'End').in!, [edge(e, src('Merge'))]);
+    m.delete(freeOf(inputOf(g, 0)));
+    put(m, readyOf(inputOf(g, 0)), [edge(a, src('A'))]);
+    put(m, hasdataOf(g), [null]);
+    put(m, inOf(gadget(c, 'End')), [edge(e, src('Merge'))]);
     const diags: string[] = [];
     const s = stateOf([entryFor(wf.nodes.A!, [items(0)])]); // whatever was on the stack goes
     const x = encodeMarking(c, live(m), s, { mode: 'stranded', onDiagnostic: (d) => diags.push(d), node: (n) => wf.nodes[n] });
@@ -366,11 +387,11 @@ describe('stranded mode (divergence #2)', () => {
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
-    m.delete(g.inputs[0]!.free!);
-    m.delete(g.inputs[1]!.free!);
-    put(m, g.inputs[0]!.ready!, [edge(items(1), src('A'))]);
-    put(m, g.inputs[1]!.ready!, [null]);
-    put(m, g.hasdata!, [null]);
+    m.delete(freeOf(inputOf(g, 0)));
+    m.delete(freeOf(inputOf(g, 1)));
+    put(m, readyOf(inputOf(g, 0)), [edge(items(1), src('A'))]);
+    put(m, readyOf(inputOf(g, 1)), [null]);
+    put(m, hasdataOf(g), [null]);
     const stranded = encodeMarking(c, live(m), emptyState(), { mode: 'stranded', node: (n) => wf.nodes[n] });
     expect(stranded.nodeExecutionStack).toEqual([]);
     expect(slotsOf(stranded.waitingExecution, 'Merge')).toEqual([{ main: [items(1), []] }]);
@@ -384,7 +405,7 @@ describe('the live INode of an entry', () => {
     const c = compile(linear);
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
-    put(m, gadget(c, 'B').in!, [edge(items(1), src('A'))]);
+    put(m, inOf(gadget(c, 'B')), [edge(items(1), src('A'))]);
     const viaOption = encodeMarking(c, live(m), emptyState(), { node: (n) => wf.nodes[n] });
     expect(viaOption.nodeExecutionStack[0]!.node).toBe(wf.nodes.B);
     const onStack: INode = { ...wf.nodes.B!, disabled: true };

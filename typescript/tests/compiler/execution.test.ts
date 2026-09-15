@@ -10,7 +10,7 @@
  */
 import { compile, forwardAllActions, placeholderActions, type CompiledWorkflow } from '../../src/compiler/index.js';
 import { ALL, diamond, fanOut, linear } from '../fixtures/workflows.js';
-import { failed, runCompiled, started, tokenCounts, type Executor } from './support.js';
+import { failed, freeOf, runCompiled, started, tokenCounts, type Executor } from './support.js';
 
 const ITEMS = { items: [{ json: { n: 1 } }] };
 
@@ -56,7 +56,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('forward-all actions on %s', 
       'id:Merge/arm_e0_data', 'id:Merge/arm_e5_data', 'id:Merge/start', 'id:Merge/run', 'id:Merge/done',
     ]);
     const merge = c.netMap.node('Merge');
-    expect(tokenCounts(marking, merge.inputs.map((i) => i.free!))).toEqual([1, 1]);
+    expect(tokenCounts(marking, merge.inputs.map(freeOf))).toEqual([1, 1]);
     expect(tokenCounts(marking, transientPlaces(c)).every((n) => n === 0)).toBe(true);
     expect(marking.tokenCount(merge.skipped!)).toBe(0);
   });

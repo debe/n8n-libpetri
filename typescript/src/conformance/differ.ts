@@ -41,11 +41,12 @@
 import type { IRunData, IRunExecutionData, ISourceData, ITaskData, Workflow } from 'n8n-workflow';
 import type { BudgetRestriction, WorkflowDescription } from '../compiler/index.js';
 import type { SchedulerHooks, SchedulerHost, WorkflowScheduler } from '../n8n/host.js';
-import { PetriScheduler } from '../scheduler/index.js';
+import { PetriScheduler, type SchedulerOutcome } from '../scheduler/index.js';
 import {
   fakeHooks, fakeNodeHelpers, fakeWorkflow, newRunExecutionData,
   type FakeHostOptions, type FakeWorkflowOptions, type NodeScript, type RunDataOptions,
 } from './harness.js';
+import { cell } from './report.js';
 import { ReferenceHost, StackReferenceScheduler } from './stack-reference.js';
 
 // ==================== fixtures ====================
@@ -62,8 +63,38 @@ export interface DifferFixture {
   readonly budgets?: readonly number[];
 }
 
+/** A fixture the differ cannot run as written. */
+export class DifferFixtureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DifferFixtureError';
+  }
+}
+
+/**
+ * The node the run starts at: `startNodes[0]`, or the one-element alias `startNode`. A
+ * fixture that names neither used to reach `workflow.nodes[undefined]` and fail inside the
+ * engine with a `TypeError` about `name`; it is refused at the door instead.
+ */
+export function startNodeOf(fixture: DifferFixture): string {
+  const name = fixture.workflow.startNodes?.[0] ?? fixture.workflow.startNode;
+  if (name === undefined) {
+    throw new DifferFixtureError(`differ: fixture '${fixture.name}' names no start node (startNodes or startNode)`);
+  }
+  return name;
+}
+
 /** The engine label used everywhere in the report. */
 export type EngineName = 'n8n' | 'libpetri';
+
+/**
+ * `halted`, `paused` or `cancelled`: the net stopped short of quiescence, so an activation
+ * in flight at that moment finished under the net where n8n's `break` left it unrun — the
+ * divergence #17 window every stop-aware rule in this module tests for.
+ */
+export function isStoppedOutcome(outcome: SchedulerOutcome | null | undefined): boolean {
+  return outcome === 'halted' || outcome === 'paused' || outcome === 'cancelled';
+}
 
 // ==================== traces ====================
 
@@ -93,6 +124,11 @@ export interface Activation {
 
 export function activationKey(node: string, runIndex: number): string {
   return `${node}#${runIndex}`;
+}
+
+/** The node of an {@link activationKey}; a node name may itself contain `#`. */
+export function activationNodeOf(key: string): string {
+  return key.slice(0, key.lastIndexOf('#'));
 }
 
 /** Fold a trace into one activation per `(node, runIndex)`. */
@@ -169,12 +205,14 @@ export interface EngineRun {
   /** The contract values read off the scheduler after `run()` (part of the data gate). */
   readonly contract: SchedulerContract;
   /** `PetriScheduler.outcome` — how the net's run ended; `null` for the n8n leg. */
-  readonly outcome: string | null;
+  readonly outcome: SchedulerOutcome | null;
   readonly host: TracingHost;
   readonly runExecutionData: IRunExecutionData;
   readonly runData: IRunData;
   readonly trace: readonly TraceEvent[];
   readonly activations: Map<string, Activation>;
+  /** `dependencyEdges(runData)`, read once: every comparison below walks it. */
+  readonly edges: readonly DependencyEdge[];
   /** Wall-clock milliseconds of `run()`. */
   readonly elapsedMs: number;
   /** The rejection of `run()`, if it rejected (n8n's loop rejects the same way). */
@@ -207,8 +245,12 @@ function perLegPayloads<T extends RunDataOptions>(options: T): T {
 function buildHost(fixture: DifferFixture): { host: TracingHost; workflow: Workflow; data: IRunExecutionData } {
   const options = perLegPayloads(fixture.options ?? {});
   const workflow = fakeWorkflow(fixture.workflow, options);
-  const startName = fixture.workflow.startNodes?.[0] ?? fixture.workflow.startNode!;
-  const data = newRunExecutionData(workflow.nodes[startName]!, options);
+  const startName = startNodeOf(fixture);
+  const startNode = workflow.nodes[startName];
+  if (startNode === undefined) {
+    throw new DifferFixtureError(`differ: fixture '${fixture.name}' starts at '${startName}', which is not one of its nodes`);
+  }
+  const data = newRunExecutionData(startNode, options);
   const host = new TracingHost(workflow, data, fixture.scripts ?? {}, options);
   return { host, workflow, data };
 }
@@ -227,10 +269,10 @@ async function runLeg(
   const t0 = performance.now();
   await scheduler.run(host, workflow, data, hooks).catch((e: unknown) => { error = e; });
   const elapsedMs = performance.now() - t0;
+  const runData = data.resultData.runData;
   return {
-    engine, scheduler, contract: contractOf(scheduler), host, runExecutionData: data,
-    runData: data.resultData.runData,
-    trace: host.trace, activations: activationsOf(host.trace), elapsedMs, error,
+    engine, scheduler, contract: contractOf(scheduler), host, runExecutionData: data, runData,
+    trace: host.trace, activations: activationsOf(host.trace), edges: dependencyEdges(runData), elapsedMs, error,
   };
 }
 
@@ -370,7 +412,7 @@ export function firstDifference(a: unknown, b: unknown, path: string): DataDiffe
     }
     return null;
   }
-  if (typeof left !== typeof right) return { path, n8n: render(a), libpetri: render(b) };
+  // Two primitives (or a primitive against a container) that are not `===`.
   return { path, n8n: render(a), libpetri: render(b) };
 }
 
@@ -395,6 +437,36 @@ export function comparableTask(task: ITaskData): Record<string, unknown> {
     metadata: task.metadata,
     error: errorShape(task),
   };
+}
+
+/**
+ * The identity of a task for the permutation check: its comparable fields serialised, with
+ * the one guard {@link render} has — a payload `JSON.stringify` rejects (a `BigInt`, a
+ * cycle) is `null`, and a node with such a run is never called a permutation, because the
+ * alternative was the gate throwing on it.
+ */
+function permutationKey(task: ITaskData): string | null {
+  try {
+    return JSON.stringify(comparableTask(task), (_key, value: unknown) => (typeof value === 'bigint' ? `${value}n` : value));
+  } catch {
+    return null;
+  }
+}
+
+/** Whether two lists of runs hold the same tasks in another order. */
+function isPermutation(left: readonly ITaskData[], right: readonly ITaskData[]): boolean {
+  const keysOf = (list: readonly ITaskData[]): string[] | null => {
+    const keys: string[] = [];
+    for (const task of list) {
+      const key = permutationKey(task);
+      if (key === null) return null;
+      keys.push(key);
+    }
+    return keys.sort();
+  };
+  const a = keysOf(left);
+  const b = keysOf(right);
+  return a !== null && b !== null && a.length === b.length && a.every((key, i) => key === b[i]);
 }
 
 /** Why a data difference is not a defect — or that nothing in the register covers it. */
@@ -464,7 +536,7 @@ export function strandedNodesOf(diagnostics: readonly string[]): string[] {
 /** What the attribution rules need beyond the two runs themselves. */
 export interface DataContext {
   /** The static main-connection closure, for the divergence #2 rule. */
-  readonly descendants?: Map<string, Set<string>>;
+  readonly descendants?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 /** One raw difference plus the node it is about (`''` when it is about neither). */
@@ -551,10 +623,10 @@ function compareResumableState(reference: EngineRun, candidate: EngineRun): Node
 export function compareData(
   reference: EngineRun,
   candidate: EngineRun,
-  context: DataContext | Map<string, Set<string>> = {},
+  context: DataContext | ReadonlyMap<string, ReadonlySet<string>> = {},
 ): DataComparison {
-  const ctx: DataContext = context instanceof Map ? { descendants: context } : context;
-  const descendants = ctx.descendants ?? new Map<string, Set<string>>();
+  const ctx: DataContext = context instanceof Map ? { descendants: context } : context as DataContext;
+  const descendants = ctx.descendants ?? new Map<string, ReadonlySet<string>>();
   const raw: NodeDifference[] = [];
   const permuted: string[] = [];
   const stranded = strandedNodesOf(candidate.diagnostics);
@@ -593,11 +665,7 @@ export function compareData(
       const d = firstDifference(comparableTask(left[i]!), comparableTask(right[i]!), `runData.${node}[${i}]`);
       if (d !== null) raw.push({ node, d });
     }
-    if (raw.length > before && left.length > 1) {
-      const key = (t: ITaskData): string => JSON.stringify(comparableTask(t));
-      const sorted = (list: readonly ITaskData[]): string[] => list.map(key).sort();
-      if (JSON.stringify(sorted(left)) === JSON.stringify(sorted(right))) permuted.push(node);
-    }
+    if (raw.length > before && left.length > 1 && isPermutation(left, right)) permuted.push(node);
   }
   // `resultData.lastNodeExecuted` is not compared here: it records *which node ran last*,
   // a fact about the total order and nothing about any node's result, so it belongs to the
@@ -611,7 +679,7 @@ export function compareData(
   if (contractClose !== null) raw.push({ node: '', d: contractClose });
 
   const runsIn = (run: EngineRun, node: string): number => run.runData[node]?.length ?? 0;
-  const stopped = candidate.outcome === 'halted' || candidate.outcome === 'paused' || candidate.outcome === 'cancelled';
+  const stopped = isStoppedOutcome(candidate.outcome);
   const destination = reference.runExecutionData.startData?.destinationNode?.nodeName;
   const differences: AttributedDifference[] = raw.map(({ d, node }) => {
     const attributed = (row: number, why: string): AttributedDifference =>
@@ -723,17 +791,25 @@ export interface HappensBefore {
   /**
    * Edges whose producer or consumer activation left **no `runNode` observation**, so the
    * order could not be checked at all — the activation is in `runData` but not in the trace,
-   * which happens when the run was short-circuited (a pinned output). These used to be
-   * counted as checked and then silently skipped; they are violations now, because an edge
+   * which happens when the run was short-circuited (a pinned output) — or whose producer
+   * started and **never finished**, so there is no instant to order the consumer after.
+   * These used to be counted as checked and then silently skipped (the never-finished case
+   * was reported as an inversion at `Infinity`); they are violations now, because an edge
    * the harness cannot observe is an edge the harness cannot clear.
    */
   readonly absentEdges: number;
 }
 
-function ordered(activations: Map<string, Activation>, edge: DependencyEdge): 'ok' | 'inverted' | 'absent' {
+/**
+ * How one edge stands in one engine. `unfinished`: the producer has a start and no finish
+ * (its `runNode` never returned), which is a non-terminating activation and not an
+ * inversion — `finish = Infinity` is not an instant the consumer started before.
+ */
+function ordered(activations: Map<string, Activation>, edge: DependencyEdge): 'ok' | 'inverted' | 'absent' | 'unfinished' {
   const from = activations.get(edge.from);
   const to = activations.get(edge.to);
   if (from === undefined || to === undefined) return 'absent';
+  if (!Number.isFinite(from.finish)) return 'unfinished';
   return from.finish < to.start ? 'ok' : 'inverted';
 }
 
@@ -747,7 +823,7 @@ export function checkHappensBefore(reference: EngineRun, candidate: EngineRun): 
   let checked = 0;
   let absent = 0;
   for (const run of [reference, candidate]) {
-    for (const edge of dependencyEdges(run.runData)) {
+    for (const edge of run.edges) {
       checked++;
       const verdict = ordered(run.activations, edge);
       if (verdict === 'inverted') {
@@ -757,6 +833,13 @@ export function checkHappensBefore(reference: EngineRun, candidate: EngineRun): 
           engine: run.engine,
           edge,
           detail: `finish(${edge.from})=${from.finish} is not before start(${edge.to})=${to.start}`,
+        });
+      } else if (verdict === 'unfinished') {
+        absent++;
+        violations.push({
+          engine: run.engine,
+          edge,
+          detail: `${edge.from} never finished (its runNode has a start and no finish observation), so ${edge.from} → ${edge.to} could not be ordered`,
         });
       } else if (verdict === 'absent') {
         absent++;
@@ -769,10 +852,11 @@ export function checkHappensBefore(reference: EngineRun, candidate: EngineRun): 
       }
     }
   }
-  const candidateEdges = new Set(dependencyEdges(candidate.runData).map((e) => `${e.from}->${e.to}@${e.inputIndex}`));
+  const edgeId = (e: DependencyEdge): string => `${e.from}->${e.to}@${e.inputIndex}`;
+  const candidateEdges = new Set(candidate.edges.map(edgeId));
   let unmatched = 0;
-  for (const edge of dependencyEdges(reference.runData)) {
-    if (!candidateEdges.has(`${edge.from}->${edge.to}@${edge.inputIndex}`)) {
+  for (const edge of reference.edges) {
+    if (!candidateEdges.has(edgeId(edge))) {
       unmatched++;
       continue;
     }
@@ -847,27 +931,34 @@ export function executionOrder(runData: IRunData): string[] {
   return rows.map((r) => r.key);
 }
 
-/** Transitive reachability over the realised dependency edges. */
-function reachable(edges: readonly DependencyEdge[]): Map<string, Set<string>> {
-  const next = new Map<string, Set<string>>();
+/**
+ * Transitive reachability over the realised dependency edges: for every producer, every
+ * activation downstream of it (itself included when the edges cycle back). One iterative
+ * walk per producer — the earlier recursive version memoised a set *before* filling it, so
+ * a walk that re-entered an activation still on its stack read a partial closure and the
+ * concurrency rule then called two dependent activations independent; and its recursion was
+ * unbounded in the chain length.
+ */
+export function reachableOf(edges: readonly DependencyEdge[]): ReadonlyMap<string, ReadonlySet<string>> {
+  const next = new Map<string, string[]>();
   for (const e of edges) {
-    let set = next.get(e.from);
-    if (set === undefined) { set = new Set(); next.set(e.from, set); }
-    set.add(e.to);
+    const list = next.get(e.from);
+    if (list === undefined) next.set(e.from, [e.to]);
+    else list.push(e.to);
   }
-  const closure = new Map<string, Set<string>>();
-  const walk = (from: string): Set<string> => {
-    const done = closure.get(from);
-    if (done !== undefined) return done;
-    const out = new Set<string>();
-    closure.set(from, out);
-    for (const to of next.get(from) ?? []) {
-      out.add(to);
-      for (const deep of walk(to)) out.add(deep);
+  const closure = new Map<string, ReadonlySet<string>>();
+  for (const from of next.keys()) {
+    const seen = new Set<string>();
+    const stack = [...next.get(from)!];
+    while (stack.length > 0) {
+      const to = stack.pop()!;
+      if (seen.has(to)) continue;
+      seen.add(to);
+      const onward = next.get(to);
+      if (onward !== undefined) stack.push(...onward);
     }
-    return out;
-  };
-  for (const key of next.keys()) walk(key);
+    closure.set(from, seen);
+  }
   return closure;
 }
 
@@ -881,7 +972,8 @@ export interface AttributionContext {
   readonly starvedNodes?: readonly string[];
   /** Activations whose recorded `source` has more than one input: multi-input joins. */
   readonly joinActivations: ReadonlySet<string>;
-  readonly reachable: Map<string, Set<string>>;
+  /** {@link reachableOf} over both engines' realised edges. */
+  readonly reachable: ReadonlyMap<string, ReadonlySet<string>>;
   /**
    * Activations only one engine ran, and which one. They did not *move* — there is no rank
    * to compare — so the concurrency rule must not claim them: "no dependency either way with
@@ -890,7 +982,7 @@ export interface AttributionContext {
    */
   readonly oneSided?: ReadonlyMap<string, EngineName>;
   /** `PetriScheduler.outcome` of the net's run: a stopped run is the divergence #17 window. */
-  readonly candidateOutcome?: string | null;
+  readonly candidateOutcome?: SchedulerOutcome | null;
   /** `startData.destinationNode.nodeName`, when the run had one: divergence #13. */
   readonly destinationNode?: string | undefined;
   /** Nodes with more than one producer edge into one input: the divergence #20 gadget. */
@@ -902,13 +994,18 @@ export interface AttributionContext {
  * "OR-inputs"), whose `arm` transition is what divergence #20 is about.
  */
 export function orInputNodesOf(workflow: WorkflowDescription): Set<string> {
-  const producers = new Map<string, number>();
+  // Node → input index → producer count: nested, so no composite key can collide with an
+  // activation key (a node name may contain `#`).
+  const producers = new Map<string, Map<number, number>>();
   for (const c of workflow.connections) {
-    const key = `${c.to}#${c.inputIndex}`;
-    producers.set(key, (producers.get(key) ?? 0) + 1);
+    let inputs = producers.get(c.to);
+    if (inputs === undefined) { inputs = new Map(); producers.set(c.to, inputs); }
+    inputs.set(c.inputIndex, (inputs.get(c.inputIndex) ?? 0) + 1);
   }
   const out = new Set<string>();
-  for (const [key, count] of producers) if (count > 1) out.add(key.slice(0, key.lastIndexOf('#')));
+  for (const [node, inputs] of producers) {
+    for (const count of inputs.values()) if (count > 1) out.add(node);
+  }
   return out;
 }
 
@@ -921,7 +1018,7 @@ export function attribute(
   movedAgainst: readonly string[],
   ctx: AttributionContext,
 ): Attribution {
-  const node = activation.slice(0, activation.lastIndexOf('#'));
+  const node = activationNodeOf(activation);
   const ranIn = ctx.oneSided?.get(activation);
   if (ranIn !== undefined) {
     // Not a move: the activation exists in one engine only. The three registered rows that
@@ -944,8 +1041,7 @@ export function attribute(
         why: `'${activation}' ran in n8n only: after destination node '${ctx.destinationNode}' n8n keeps popping the stack, while the net deposits _pause and quiesces`,
       };
     }
-    const stopped = ctx.candidateOutcome === 'halted' || ctx.candidateOutcome === 'paused' || ctx.candidateOutcome === 'cancelled';
-    if (ranIn === 'libpetri' && stopped) {
+    if (ranIn === 'libpetri' && isStoppedOutcome(ctx.candidateOutcome)) {
       return {
         kind: 'divergence', row: 17, mechanism: 'halt-window', novel: false,
         why: `'${activation}' ran under the net only and the execution ${ctx.candidateOutcome}: the net cannot un-start an action, and the window lasts until _halt reaches the marking, so a sibling in flight finishes and one can even start inside it`,
@@ -963,7 +1059,6 @@ export function attribute(
       why: `k=${ctx.effectiveBudget}: no dependency either way with ${movedAgainst.join(', ') || 'the activations it passed'}, so the net leaves the pair unordered and either order is correct`,
     };
   }
-  const nodeOfKey = (key: string): string => key.slice(0, key.lastIndexOf('#'));
   if (ctx.permutedNodes.includes(node)) {
     return {
       kind: 'divergence', row: 11, mechanism: 'or-input-lifo', novel: false,
@@ -978,21 +1073,21 @@ export function attribute(
     };
   }
   // Everything a permuted node's activations passed moved *because* they did: one event.
-  const permutedPassed = movedAgainst.filter((o) => ctx.permutedNodes.includes(nodeOfKey(o)));
+  const permutedPassed = movedAgainst.filter((o) => ctx.permutedNodes.includes(activationNodeOf(o)));
   if (permutedPassed.length > 0 && permutedPassed.length === movedAgainst.length) {
     return {
       kind: 'divergence', row: 11, mechanism: 'or-input-lifo', novel: false,
       why: `'${activation}' moved only against ${permutedPassed.join(', ')}, whose node delivers its arrivals in the other order (n8n most-recent-first, the net FIFO)`,
     };
   }
-  const orInvolved = [activation, ...movedAgainst].filter((k) => ctx.orInputNodes?.has(nodeOfKey(k)) ?? false);
+  const orInvolved = [activation, ...movedAgainst].filter((k) => ctx.orInputNodes?.has(activationNodeOf(k)) ?? false);
   if (orInvolved.length > 0) {
     return {
       kind: 'divergence', row: 20, mechanism: 'or-input-arm', novel: false,
       why: `${orInvolved.join(', ')} is an OR-input node: its arm transition spends one scheduling cycle turning the arrival into X/ready + X/hasdata, and a shallower sibling takes the budget unit in that cycle, so the net runs breadth-first where priority = depth alone would have been depth-first`,
     };
   }
-  if (ctx.strandedNodes.includes(node) || movedAgainst.some((o) => ctx.strandedNodes.includes(nodeOfKey(o)))) {
+  if (ctx.strandedNodes.includes(node) || movedAgainst.some((o) => ctx.strandedNodes.includes(activationNodeOf(o)))) {
     return {
       kind: 'divergence', row: 2, mechanism: 'stranded-join', novel: false,
       why: `'${node}' is a stranded join or downstream of one, so the two engines ran it a different number of times`,
@@ -1033,12 +1128,18 @@ export function compareOrdering(
     strandedNodes: data.strandedNodes,
     starvedNodes: data.starvedNodes,
     joinActivations: joins,
-    reachable: reachable([...dependencyEdges(reference.runData), ...dependencyEdges(candidate.runData)]),
+    reachable: reachableOf([...reference.edges, ...candidate.edges]),
     oneSided,
     candidateOutcome: candidate.outcome,
     destinationNode: reference.runExecutionData.startData?.destinationNode?.nodeName,
     orInputNodes,
   };
+  /** The activations both engines ran, with both ranks, in n8n's order: what a move is measured against. */
+  const both: Array<{ readonly key: string; readonly a: number; readonly b: number }> = [];
+  for (const [a, key] of left.entries()) {
+    const b = rightRank.get(key);
+    if (b !== undefined) both.push({ key, a, b });
+  }
   const differences: OrderDifference[] = [];
   for (const key of [...new Set([...left, ...right])]) {
     const a = leftRank.get(key);
@@ -1046,11 +1147,7 @@ export function compareOrdering(
     if (a === b) continue;
     const movedAgainst = a === undefined || b === undefined
       ? []
-      : left.filter((other) => {
-        const oa = leftRank.get(other)!;
-        const ob = rightRank.get(other);
-        return ob !== undefined && other !== key && (oa < a) !== (ob < b);
-      });
+      : both.filter((o) => o.key !== key && (o.a < a) !== (o.b < b)).map((o) => o.key);
     differences.push({
       activation: key,
       n8nRank: a ?? null,
@@ -1076,8 +1173,7 @@ export function compareOrdering(
     if (data.strandedNodes.includes(name)) return { row: 2, mechanism: 'stranded-join' };
     if (inCandidate && data.starvedNodes.includes(name)) return { row: 1, mechanism: 'starved-join' };
     if (inReference && ctx.destinationNode !== undefined) return { row: 13, mechanism: 'destination-stop' };
-    const stopped = ctx.candidateOutcome === 'halted' || ctx.candidateOutcome === 'paused' || ctx.candidateOutcome === 'cancelled';
-    if (inCandidate && stopped) return { row: 17, mechanism: 'halt-window' };
+    if (inCandidate && isStoppedOutcome(ctx.candidateOutcome)) return { row: 17, mechanism: 'halt-window' };
     return null;
   };
   const lastAttribution = (): Attribution | null => {
@@ -1140,8 +1236,6 @@ export interface DiffResult {
    * `docs/divergences.md` row. `fail` — something is unattributed, or happens-before broke.
    */
   readonly verdict: 'pass' | 'divergent' | 'fail';
-  /** Ordering mechanisms observed that no register row names yet (a finding, not a failure). */
-  readonly novelMechanisms: readonly string[];
   readonly elapsed: { readonly n8n: number; readonly libpetri: number };
   readonly errors: { readonly n8n: string | null; readonly libpetri: string | null };
   readonly diagnostics: readonly string[];
@@ -1150,13 +1244,32 @@ export interface DiffResult {
 const describeError = (e: unknown): string | null =>
   e === undefined ? null : e instanceof Error ? `${e.name}: ${e.message}` : String(e);
 
+/**
+ * What the attribution rules read off the workflow's *static* shape, independent of the
+ * budget: computed once per fixture and shared by every budget it runs at.
+ */
+export interface FixtureStatics {
+  /** {@link descendantsOf}: the divergence #2 closure. */
+  readonly descendants: ReadonlyMap<string, ReadonlySet<string>>;
+  /** {@link orInputNodesOf}: the divergence #20 gadget's nodes. */
+  readonly orInputNodes: ReadonlySet<string>;
+}
+
+export function fixtureStatics(workflow: WorkflowDescription): FixtureStatics {
+  return { descendants: descendantsOf(workflow), orInputNodes: orInputNodesOf(workflow) };
+}
+
 /** Run one fixture through both engines at `budget` and compare. */
-export async function diffFixture(fixture: DifferFixture, budget = 1): Promise<DiffResult> {
+export async function diffFixture(
+  fixture: DifferFixture,
+  budget = 1,
+  statics: FixtureStatics = fixtureStatics(fixture.workflow),
+): Promise<DiffResult> {
   const reference = await runReference(fixture);
   const candidate = await runPetri(fixture, budget);
-  const data = compareData(reference, candidate, descendantsOf(fixture.workflow));
+  const data = compareData(reference, candidate, { descendants: statics.descendants });
   const happensBefore = checkHappensBefore(reference, candidate);
-  const ordering = compareOrdering(reference, candidate, data, orInputNodesOf(fixture.workflow));
+  const ordering = compareOrdering(reference, candidate, data, statics.orInputNodes);
   const errors = { n8n: describeError(reference.error), libpetri: describeError(candidate.error) };
   const clean = happensBefore.respected && ordering.unattributed === 0 && errors.n8n === errors.libpetri;
   const verdict = !clean || data.unattributed > 0
@@ -1168,38 +1281,35 @@ export async function diffFixture(fixture: DifferFixture, budget = 1): Promise<D
     effectiveBudget: candidate.effectiveBudget,
     budgetRestriction: candidate.budgetRestriction,
     data, happensBefore, ordering, verdict,
-    novelMechanisms: ordering.novelMechanisms,
     elapsed: { n8n: reference.elapsedMs, libpetri: candidate.elapsedMs },
     errors,
     diagnostics: candidate.diagnostics,
   };
 }
 
-/** Run every fixture at every budget it declares (default 1, 2, 4). */
-export async function diffAll(
-  fixtures: readonly DifferFixture[],
-  budgets: readonly number[] = [1, 2, 4],
-): Promise<DiffResult[]> {
-  const results: DiffResult[] = [];
-  for (const fixture of fixtures) {
-    for (const budget of fixture.budgets ?? budgets) {
-      results.push(await diffFixture(fixture, budget));
-    }
-  }
-  return results;
-}
-
 // ==================== the report ====================
 
 const tick = (ok: boolean): string => (ok ? 'yes' : '**no**');
 
-/** The Markdown report: one summary table, then a section per failing or reordered fixture. */
+/** A table cell of inline code: escaped first, so a `|` inside the code does not end the cell. */
+const code = (s: string): string => `\`${cell(s)}\``;
+
+/** Ordering mechanisms no register row names, over a set of results, sorted and unique. */
+export function novelMechanismsOf(results: readonly DiffResult[]): string[] {
+  return [...new Set(results.flatMap((r) => r.ordering.novelMechanisms))].sort();
+}
+
+/**
+ * The Markdown report: one summary table, then a section per failing or reordered fixture.
+ * Every table cell goes through {@link cell}: a node name, a path, an error message or a
+ * rendered value may contain `|` or a newline, either of which breaks the table.
+ */
 export function renderDiffReport(results: readonly DiffResult[], title = 'Differential report'): string {
   const lines: string[] = [`# ${title}`, ''];
   const passed = results.filter((r) => r.verdict === 'pass').length;
   const divergent = results.filter((r) => r.verdict === 'divergent').length;
   const failed = results.filter((r) => r.verdict === 'fail').length;
-  const novel = [...new Set(results.flatMap((r) => r.novelMechanisms))].sort();
+  const novel = novelMechanismsOf(results);
   lines.push(
     `${passed} pass, ${divergent} divergent (every difference attributed to a \`docs/divergences.md\` row), ` +
     `${failed} fail, of ${results.length} runs.`,
@@ -1215,7 +1325,7 @@ export function renderDiffReport(results: readonly DiffResult[], title = 'Differ
     const skipped = r.happensBefore.unmatchedEdges;
     const hbCell = `${tick(r.happensBefore.respected)}${skipped > 0 ? ` (${skipped} skipped)` : ''}`;
     lines.push(
-      `| ${r.fixture} | ${r.requestedBudget} | ${r.effectiveBudget} | ${dataCell} | ` +
+      `| ${cell(r.fixture)} | ${r.requestedBudget} | ${r.effectiveBudget} | ${dataCell} | ` +
       `${hbCell} | ${r.ordering.equal ? 'equal' : `${r.ordering.differences.length} moved`} | ` +
       `${attributed}/${r.ordering.differences.length}${r.ordering.unattributed > 0 ? ' **(unattributed)**' : ''} | ` +
       `${r.verdict === 'fail' ? '**fail**' : r.verdict} |`,
@@ -1234,10 +1344,10 @@ export function renderDiffReport(results: readonly DiffResult[], title = 'Differ
       lines.push('### Data differences (the gate)', '', '| path | n8n | libpetri | attribution |', '|---|---|---|---|');
       for (const d of r.data.differences.slice(0, 20)) {
         const a = d.attribution;
-        const label = a.kind === 'divergence' ? `divergence #${a.row}: ${a.why}` : '**unattributed**';
-        lines.push(`| \`${d.path}\` | \`${d.n8n}\` | \`${d.libpetri}\` | ${label} |`);
+        const label = a.kind === 'divergence' ? `divergence #${a.row}: ${cell(a.why)}` : '**unattributed**';
+        lines.push(`| ${code(d.path)} | ${code(d.n8n)} | ${code(d.libpetri)} | ${label} |`);
       }
-      if (r.data.differences.length > 20) lines.push(`| … | ${r.data.differences.length - 20} more | |`);
+      if (r.data.differences.length > 20) lines.push(`| … | ${r.data.differences.length - 20} more | | |`);
       if (r.data.permutedNodes.length > 0) {
         lines.push('', `Permuted (same runs, other order): ${r.data.permutedNodes.join(', ')}.`);
       }
@@ -1266,9 +1376,9 @@ export function renderDiffReport(results: readonly DiffResult[], title = 'Differ
       for (const d of r.ordering.differences) {
         const a = d.attribution;
         const label = a.kind === 'divergence'
-          ? `divergence #${a.row} (${a.mechanism}${a.novel ? ', **not in the register**' : ''})`
+          ? `divergence #${a.row} (${cell(a.mechanism)}${a.novel ? ', **not in the register**' : ''})`
           : a.kind === 'concurrency' ? 'concurrency' : '**unattributed**';
-        lines.push(`| ${d.activation} | ${d.n8nRank ?? '—'} | ${d.libpetriRank ?? '—'} | ${label}: ${a.why} |`);
+        lines.push(`| ${cell(d.activation)} | ${d.n8nRank ?? '—'} | ${d.libpetriRank ?? '—'} | ${label}: ${cell(a.why)} |`);
       }
       lines.push('');
     }

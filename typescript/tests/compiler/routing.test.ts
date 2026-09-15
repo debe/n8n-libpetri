@@ -15,7 +15,10 @@
 import { enumerateBranches } from 'libpetri';
 import { compile, forwardAllActions, routingActions, SPLIT_ROUTING_ABOVE, type CompiledWorkflow } from '../../src/compiler/index.js';
 import { diamond, fanOut3, fanOut4, switch20 } from '../fixtures/workflows.js';
-import { failed, gadget, inputNames, outputNames, runCompiled, started, tokenCounts, transitionOf, type Executor } from './support.js';
+import {
+  failed, gadget, inputNames, outputNames, routedOf, runCompiled, splitOutputsOf, started, tokenCounts, transitionOf,
+  type Executor,
+} from './support.js';
 
 const ITEMS = { items: [{ json: { n: 1 } }] };
 
@@ -31,11 +34,11 @@ function branchTotal(c: CompiledWorkflow, node?: string): number {
 describe('routing inside X_run (at or below SPLIT_ROUTING_ABOVE)', () => {
   it('the threshold is 3: collapsed up to and including three outputs, split from four', () => {
     expect(SPLIT_ROUTING_ABOVE).toBe(3);
-    expect(gadget(compile(diamond), 'Trigger').splitRouting).toBe(false); // 1 output
-    expect(gadget(compile(diamond), 'IF').splitRouting).toBe(false);      // 2 outputs
-    expect(gadget(compile(diamond), 'End').splitRouting).toBe(false);     // terminal
-    expect(gadget(compile(fanOut3), 'Q').splitRouting).toBe(false);       // 3 outputs
-    expect(gadget(compile(fanOut4), 'Q').splitRouting).toBe(true);        // 4 outputs
+    expect(gadget(compile(diamond), 'Trigger').routing.kind).toBe('collapsed'); // 1 output
+    expect(gadget(compile(diamond), 'IF').routing.kind).toBe('collapsed');      // 2 outputs
+    expect(gadget(compile(diamond), 'End').routing.kind).toBe('collapsed');     // terminal
+    expect(gadget(compile(fanOut3), 'Q').routing.kind).toBe('collapsed');       // 3 outputs
+    expect(gadget(compile(fanOut4), 'Q').routing.kind).toBe('split');           // 4 outputs
   });
 
   it('three outputs is where it is a trade: one more flat branch, five fewer places, three fewer transitions', () => {
@@ -49,8 +52,8 @@ describe('routing inside X_run (at or below SPLIT_ROUTING_ABOVE)', () => {
     // away (20 against 13, then 68 against 17) and the split wins outright.
     const c = compile(fanOut3);
     const q = gadget(c, 'Q');
-    expect(q.splitRouting).toBe(false);
-    expect(q.routed!.name).toBe('id:Q/routed');
+    expect(q.routing.kind).toBe('collapsed');
+    expect(routedOf(q).name).toBe('id:Q/routed');
     expect(q.transitions.routes).toEqual([]);
     expect({ places: c.net.places.size, transitions: c.net.transitions.size }).toEqual({ places: 46, transitions: 19 });
     expect(branchTotal(c)).toBe(42);
@@ -60,8 +63,8 @@ describe('routing inside X_run (at or below SPLIT_ROUTING_ABOVE)', () => {
   it('one output: X_run routes it and marks X/routed; X_done refunds the budget; no X/ok, no X_route', () => {
     const c = compile(diamond);
     const g = gadget(c, 'Trigger');
-    expect(g.routed!.name).toBe('id:Trigger/routed');
-    expect(g.outputs.map((o) => [o.index, o.ok, o.routed])).toEqual([[0, null, null]]);
+    expect(routedOf(g).name).toBe('id:Trigger/routed');
+    expect(g.outputs.map((o) => [o.index, o.routing])).toEqual([[0, 'collapsed']]);
     expect(g.transitions.routes).toEqual([]);
     expect(g.transitions.done).toBe('id:Trigger/done');
     expect(c.netMap.placeFor('Trigger', 'ok', 0)).toBeUndefined();
@@ -87,10 +90,10 @@ describe('routing inside X_run (at or below SPLIT_ROUTING_ABOVE)', () => {
   it('two outputs: the success branch is the and of both xors — four success branches, still one X/routed', () => {
     const c = compile(diamond);
     const g = gadget(c, 'IF');
-    expect(g.routed!.name).toBe('id:IF/routed');
+    expect(routedOf(g).name).toBe('id:IF/routed');
     expect(g.transitions.routes).toEqual([]);
     expect(g.transitions.done).toBe('id:IF/done');
-    expect(g.outputs.map((o) => [o.ok, o.routed])).toEqual([[null, null], [null, null]]);
+    expect(g.outputs.map((o) => o.routing)).toEqual(['collapsed', 'collapsed']);
     const branches = enumerateBranches(transitionOf(c, 'IF', 'run').outputSpec!);
     // 2^2 success combinations + halt + waiting + stopped.
     expect(branches).toHaveLength(7);
@@ -107,7 +110,7 @@ describe('routing inside X_run (at or below SPLIT_ROUTING_ABOVE)', () => {
     expect(g.outputs).toEqual([]);
     expect(g.transitions.routes).toEqual([]);
     expect(g.transitions.done).toBe('id:End/done');
-    expect(g.routed!.name).toBe('id:End/routed');
+    expect(routedOf(g).name).toBe('id:End/routed');
     expect(enumerateBranches(transitionOf(c, 'End', 'run').outputSpec!).map((b) => [...b].map((p) => p.name).sort())).toEqual([
       ['id:End/idle', 'id:End/routed'],
       ['_budget', '_halt', 'id:End/idle'],
@@ -122,8 +125,8 @@ describe('per-output routing (above SPLIT_ROUTING_ABOVE)', () => {
   it('X_run succeeds into and(ok_o …); X_route_o: one(ok_o) → and(xor(data_o, empty_o), routed_o); X_done: one(routed_*) → and(_budget, done)', () => {
     const c = compile(fanOut4);
     const q = gadget(c, 'Q');
-    expect(q.routed).toBeNull();
-    expect(q.outputs.map((o) => [o.index, o.ok!.name, o.routed!.name])).toEqual([
+    expect(c.netMap.place('id:Q/routed')).toBeUndefined();
+    expect(splitOutputsOf(q).map((o) => [o.index, o.ok.name, o.routed.name])).toEqual([
       [0, 'id:Q/ok_0', 'id:Q/routed_0'], [1, 'id:Q/ok_1', 'id:Q/routed_1'], [2, 'id:Q/ok_2', 'id:Q/routed_2'], [3, 'id:Q/ok_3', 'id:Q/routed_3'],
     ]);
     const run = transitionOf(c, 'Q', 'run');
@@ -154,7 +157,7 @@ describe('per-output routing (above SPLIT_ROUTING_ABOVE)', () => {
   it('Switch(20): the branch count is linear in the output count (47 for the Switch, not 2^20)', () => {
     const c = compile(switch20);
     const sw = gadget(c, 'Switch');
-    expect(sw.splitRouting).toBe(true);
+    expect(sw.routing.kind).toBe('split');
     expect(sw.transitions.routes).toHaveLength(20);
     for (const r of sw.transitions.routes) expect(enumerateBranches(c.netMap.transitionObject(r).outputSpec!)).toHaveLength(2);
     // start 1 + run 4 (ok | halt | waiting | stopped: M2 added the two pause outcomes to
@@ -182,7 +185,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('per-output routing end to en
     expect(marking.tokenCount(q.done)).toBe(1);
     for (const g of c.netMap.nodes) expect(marking.tokenCount(g.done), g.node).toBe(1);
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(2);
-    expect(tokenCounts(marking, q.outputs.flatMap((o) => [o.ok!, o.routed!])).every((n) => n === 0)).toBe(true);
+    expect(tokenCounts(marking, splitOutputsOf(q).flatMap((o) => [o.ok, o.routed])).every((n) => n === 0)).toBe(true);
     expect(started(store, (n) => n.startsWith('id:Q/'))).toEqual([
       'id:Q/start', 'id:Q/run', 'id:Q/route_0', 'id:Q/route_1', 'id:Q/route_2', 'id:Q/route_3', 'id:Q/done',
     ]);
@@ -218,7 +221,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('collapsed routing end to end
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), executor);
     expect(failed(store)).toEqual([]);
     expect(started(store, (n) => n.startsWith('id:IF/'))).toEqual(['id:IF/start', 'id:IF/run', 'id:IF/done']);
-    for (const g of c.netMap.nodes) expect(marking.tokenCount(g.routed!), g.node).toBe(0);
+    for (const g of c.netMap.nodes) expect(marking.tokenCount(routedOf(g)), g.node).toBe(0);
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(1);
     // The consumers' arms and X_done fire in the same cycle, so both candidate starts land
     // in one ready set and priority decides (ADR 0004, divergence #20).

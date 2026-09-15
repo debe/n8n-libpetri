@@ -21,6 +21,7 @@ import {
   type AttributionContext, type DifferCliIo, type DifferFixture, type DiffResult, type EngineRun,
   type NodeScript, type TraceEvent,
 } from '../../src/conformance/index.js';
+import type { SchedulerOutcome } from '../../src/scheduler/index.js';
 import { conn, diamond, multiProducer, node, twoTriggers, userCycle, workflow } from '../fixtures/workflows.js';
 import { complicatedMulti, DIFFER_FIXTURES, START, webhookRespond } from './differ-fixtures.js';
 
@@ -33,7 +34,7 @@ function fakeRun(
   trace: readonly TraceEvent[] = [],
   extra: {
     effectiveBudget?: number; diagnostics?: string[]; lastNodeExecuted?: string;
-    outcome?: string; executionError?: { name?: string; message?: string };
+    outcome?: SchedulerOutcome; executionError?: { name?: string; message?: string };
     executionData?: Partial<NonNullable<IRunExecutionData['executionData']>>;
     destinationNode?: string;
   } = {},
@@ -46,7 +47,7 @@ function fakeRun(
     }),
   } as unknown as IRunExecutionData;
   return {
-    engine, runData, runExecutionData, trace, activations: activationsOf(trace),
+    engine, runData, runExecutionData, trace, activations: activationsOf(trace), edges: dependencyEdges(runData),
     effectiveBudget: extra.effectiveBudget ?? 1, budgetRestriction: null,
     diagnostics: extra.diagnostics ?? [], elapsedMs: 0, error: undefined,
     outcome: extra.outcome ?? null,
@@ -376,7 +377,7 @@ describe('renderDiffReport', () => {
         lastNodeExecuted: { n8n: undefined, libpetri: undefined, equal: true, attribution: null },
         differences: [{ activation: 'A#0', n8nRank: 0, libpetriRank: 1, attribution: { kind: 'divergence', row: 5, mechanism: 'unnamed', novel: true, why: 'w' } }],
       },
-      verdict: 'divergent', novelMechanisms: ['unnamed'],
+      verdict: 'divergent',
       elapsed: { n8n: 0, libpetri: 0 }, errors: { n8n: null, libpetri: null }, diagnostics: [],
     } as unknown as DiffResult;
     expect(renderDiffReport([result], 'T')).toContain('Ordering mechanisms with no row in `docs/divergences.md`');
@@ -557,7 +558,7 @@ describe('the fixture set through both engines', () => {
   it('reports exactly the ordering mechanisms the register does not name', () => {
     for (const r of results) {
       const expected = r.verdict === 'divergent' ? DIVERGENT[r.fixture]!.novel : [];
-      expect(`${r.fixture}@k=${r.requestedBudget}: ${r.novelMechanisms}`)
+      expect(`${r.fixture}@k=${r.requestedBudget}: ${r.ordering.novelMechanisms}`)
         .toBe(`${r.fixture}@k=${r.requestedBudget}: ${expected}`);
     }
   });
@@ -617,7 +618,7 @@ describe('runDifferCli', () => {
         n8n: [], libpetri: [], equal: false, differences: [], unattributed: 0, novelMechanisms: ['unnamed'],
         lastNodeExecuted: { n8n: undefined, libpetri: undefined, equal: true, attribution: null },
       },
-      verdict: 'divergent', novelMechanisms: ['unnamed'],
+      verdict: 'divergent',
       elapsed: { n8n: 0, libpetri: 0 }, errors: { n8n: null, libpetri: null }, diagnostics: [],
     } as unknown as DiffResult;
     const i = io();

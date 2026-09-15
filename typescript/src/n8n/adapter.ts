@@ -50,6 +50,35 @@ const isMain = (c: NodeConnectionType | INodeInputConfiguration | INodeOutputCon
   (typeof c === 'string' ? c : c.type) === 'main';
 
 /**
+ * Thrown when a description is asked about a node it does not hold. The compiler only ever
+ * asks about the nodes the description lists, so reaching this is a caller mixing two
+ * descriptions — a bug to surface, not a shape to invent.
+ */
+export class UnknownNodeError extends Error {
+  constructor(name: string) {
+    super(`node '${name}' is not part of this workflow description`);
+    this.name = 'UnknownNodeError';
+  }
+}
+
+// ==================== the two readers every carrier goes through ====================
+//
+// n8n hands the adapter typed objects whose *policy* fields are untyped passthroughs
+// (`workflow.settings.executionPolicy`, `node.executionPolicy`, `parameters.options.*`), and
+// the verify CLI hands the same readers raw JSON. Both are `unknown` at the edge; these two
+// functions are the only place that edge is narrowed, so no call site casts.
+
+/** `v` as a string-keyed record, or `undefined` when it is not a plain object. */
+export function recordOf(v: unknown): Record<string, unknown> | undefined {
+  return typeof v === 'object' && v !== null && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
+}
+
+/** `v[key]` when `v` is a plain object; `undefined` otherwise. */
+export function fieldOf(v: unknown, key: string): unknown {
+  return recordOf(v)?.[key];
+}
+
+/**
  * The reference patterns, applied to every string parameter value:
  * 1. `$('name')`, `$("name")`, `` $(`name`) `` — the modern node accessor;
  * 2. `$node["name"]`, `$node['name']` — the legacy accessor, bracket form;
@@ -126,17 +155,25 @@ export function isSchedulerNode(
   return !isSubNodeSource(name);
 }
 
-/** Nodes that are the source of an `ai_*` connection other than `ai_tool`. */
-export function subNodeSourcesOf(workflow: Workflow): Set<string> {
+/**
+ * Nodes that are the source of an `ai_*` connection other than `ai_tool`, read off a
+ * connections-by-source map in n8n's shape (`{ "<from>": { "<type>": [ [ … ] ] } }`) — the
+ * live `Workflow`'s or a JSON export's, which is why it takes the map and not the workflow.
+ */
+export function subNodeSourcesIn(bySource: Readonly<Record<string, unknown>>): Set<string> {
   const out = new Set<string>();
-  for (const [from, byType] of Object.entries(workflow.connectionsBySourceNode)) {
-    for (const key of Object.keys(byType ?? {})) {
+  for (const [from, byType] of Object.entries(bySource)) {
+    for (const [key, groups] of Object.entries(recordOf(byType) ?? {})) {
       if (key === 'main' || key === 'ai_tool') continue;
-      const groups = (byType as Record<string, unknown>)[key];
       if (Array.isArray(groups) && groups.some((g) => Array.isArray(g) && g.length > 0)) out.add(from);
     }
   }
   return out;
+}
+
+/** {@link subNodeSourcesIn} over `workflow.connectionsBySourceNode`. */
+export function subNodeSourcesOf(workflow: Workflow): Set<string> {
+  return subNodeSourcesIn(workflow.connectionsBySourceNode);
 }
 
 export function mainConnectionsOf(workflow: Workflow): MainConnection[] {
@@ -166,8 +203,9 @@ export function toolConnectionsOf(workflow: Workflow): ToolConnection[] {
   const out: ToolConnection[] = [];
   for (const [from, byType] of Object.entries(workflow.connectionsBySourceNode)) {
     if (!Object.hasOwn(workflow.nodes, from)) continue;
-    const byAiTool = (byType as Record<string, Array<IConnection[] | null> | undefined>)?.ai_tool ?? [];
-    for (const connections of byAiTool) {
+    const byAiTool = fieldOf(byType, 'ai_tool');
+    if (!Array.isArray(byAiTool)) continue;
+    for (const connections of byAiTool as Array<IConnection[] | null>) {
       for (const c of connections ?? []) {
         if (c.type !== 'ai_tool' || !Object.hasOwn(workflow.nodes, c.node)) continue;
         out.push({ agent: c.node, tool: from });
@@ -178,30 +216,21 @@ export function toolConnectionsOf(workflow: Workflow): ToolConnection[] {
 }
 
 /**
- * An agent's `options.maxIterations` when it is a literal number in the workflow JSON — the
- * bound n8n's own `checkMaxIterations` enforces (`V3/helpers/executeBatch.ts`, default 10).
+ * `parameters.options[key]` when it is a literal positive integer; `undefined` otherwise.
+ *
+ * The two keys read this way are an agent's `maxIterations` — the bound n8n's own
+ * `checkMaxIterations` enforces (`V3/helpers/executeBatch.ts`, default 10) — and
+ * `maxToolCalls`, which n8n's agent does not declare and which is forward-compatible plumbing
+ * for the scheduler's own bound (a workflow that sets it gets that budget, one that does not
+ * gets `maxAgentToolCalls`). It is the path the verify CLI's raw-JSON fixtures still use; a
+ * live workflow carries `maxToolCalls` in the policy instead, see {@link workflowPolicyOf}.
  *
  * Only a literal counts. n8n allows an expression on any parameter and resolves it per item at
  * execution time, so a compiled seed taken from one would be a guess; `undefined` then lets the
  * compiler fall back and mark the agent unbounded for verification rather than claim a bound.
  */
-export function maxRoundsOf(node: INode): number | undefined {
-  const options = (node.parameters as Record<string, unknown> | undefined)?.['options'];
-  if (typeof options !== 'object' || options === null) return undefined;
-  const raw = (options as Record<string, unknown>)['maxIterations'];
-  return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined;
-}
-
-/**
- * An agent's `options.maxToolCalls` when a workflow declares one as a literal. n8n's agent has
- * no such parameter, so this is forward-compatible plumbing for the scheduler's own bound: a
- * workflow that sets it gets that budget, one that does not gets `maxAgentToolCalls`.
- */
-export function maxToolCallsOf(node: INode, policy?: ExecutionPolicy): number | undefined {
-  if (policy?.maxToolCalls !== undefined) return policy.maxToolCalls;
-  const options = (node.parameters as Record<string, unknown> | undefined)?.['options'];
-  if (typeof options !== 'object' || options === null) return undefined;
-  const raw = (options as Record<string, unknown>)['maxToolCalls'];
+export function readPositiveIntOption(parameters: unknown, key: string): number | undefined {
+  const raw = fieldOf(fieldOf(parameters, 'options'), key);
   return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined;
 }
 
@@ -221,27 +250,45 @@ export function maxToolCallsOf(node: INode, policy?: ExecutionPolicy): number | 
  * fresh object, so an undeclared key inside `parameters.options` is dropped on the editor's
  * save path and again in the `Workflow` constructor. That is why `options.maxToolCalls` — the
  * knob the README's known limits tell users to declare — cannot be set in a live n8n at all,
- * and why {@link maxToolCallsOf} now reads the policy first and keeps the old path only for
- * the verify CLI's raw-JSON fixtures.
+ * and why the resolved `maxToolCalls` reads the policy first and keeps the `options` path
+ * ({@link readPositiveIntOption}) only for the verify CLI's raw-JSON fixtures.
+ *
+ * **One resolution, two callers.** The verify CLI reads the same carrier off a JSON export, and
+ * one net serves execution and verification: a CLI that resolved the policy differently would
+ * analyse a different net and report it with the same confidence. So the rule and the
+ * precedence live here once, over raw `settings` and a raw node — {@link parseWorkflowPolicy}
+ * and {@link resolveNodePolicy} — and the `Workflow` forms below only hand them the fields.
  */
 export function workflowPolicyOf(workflow: Workflow, diagnostics: string[]): ExecutionPolicy | undefined {
-  const settings = workflow.settings as Record<string, unknown> | undefined;
-  const parsed = parseExecutionPolicy(settings?.['executionPolicy'], 'workflow settings');
-  diagnostics.push(...parsed.diagnostics);
-  const policy = parsed.policy;
-  if (policy === undefined) return undefined;
+  return parseWorkflowPolicy(workflow.settings, diagnostics);
+}
 
-  // **The failure policy does not inherit from workflow scope.** The resource knobs do —
-  // `concurrency`, `rate`, `maxRuns`, `maxToolCalls`, `maxRounds` all mean something sensible as
-  // a workflow-wide default. `onFailure` and `timeoutMs` do not, for the reason this ADR gives
-  // for refusing `onFailure` beside `retryOnFail`: it would invent "a precedence a workflow
-  // author cannot see". A single `timeoutMs` here would otherwise arm a deadline on every node,
-  // and since a deadline needs a chain to say what an expired attempt does, the *whole workflow*
-  // would fail to compile over a key the author set as a default. A workflow-wide `onFailure`
-  // would likewise rewrite the failure behaviour of every node, and throw on the first one that
-  // declares `retryOnFail` or lacks the output a `route` step names.
-  //
-  // Declared per node, or per group where a node names one. Said once here rather than per node.
+/** `settings.executionPolicy` parsed and narrowed by {@link inheritableWorkflowPolicy}. */
+export function parseWorkflowPolicy(settings: unknown, diagnostics: string[]): ExecutionPolicy | undefined {
+  const parsed = parseExecutionPolicy(fieldOf(settings, 'executionPolicy'), 'workflow settings');
+  diagnostics.push(...parsed.diagnostics);
+  return inheritableWorkflowPolicy(parsed.policy, diagnostics);
+}
+
+/**
+ * The part of a workflow-level policy every node inherits.
+ *
+ * **The failure policy does not inherit from workflow scope.** The resource knobs do —
+ * `concurrency`, `rate`, `maxRuns`, `maxToolCalls`, `maxRounds` all mean something sensible as
+ * a workflow-wide default. `onFailure` and `timeoutMs` do not, for the reason this ADR gives
+ * for refusing `onFailure` beside `retryOnFail`: it would invent "a precedence a workflow
+ * author cannot see". A single `timeoutMs` here would otherwise arm a deadline on every node,
+ * and since a deadline needs a chain to say what an expired attempt does, the *whole workflow*
+ * would fail to compile over a key the author set as a default. A workflow-wide `onFailure`
+ * would likewise rewrite the failure behaviour of every node, and throw on the first one that
+ * declares `retryOnFail` or lacks the output a `route` step names.
+ *
+ * Declared per node, or per group where a node names one. Said once here rather than per node.
+ */
+export function inheritableWorkflowPolicy(
+  policy: ExecutionPolicy | undefined, diagnostics: string[],
+): ExecutionPolicy | undefined {
+  if (policy === undefined) return undefined;
   const { onFailure, timeoutMs, ...rest } = policy;
   if (onFailure === undefined && timeoutMs === undefined) return policy;
   diagnostics.push(
@@ -254,16 +301,11 @@ export function workflowPolicyOf(workflow: Workflow, diagnostics: string[]): Exe
 
 /** A group's policy from `settings.executionPolicy.groups`, by name. */
 function groupPolicyOf(
-  raw: unknown, group: string, diagnostics: string[],
+  settings: unknown, group: string, diagnostics: string[],
 ): ExecutionPolicy | undefined {
-  const settings = raw as Record<string, unknown> | undefined;
-  const declared = settings?.['executionPolicy'] as Record<string, unknown> | undefined;
-  const groups = declared?.['groups'];
-  if (typeof groups !== 'object' || groups === null) return undefined;
-  const entry = (groups as Record<string, unknown>)[group];
+  const entry = recordOf(fieldOf(fieldOf(fieldOf(settings, 'executionPolicy'), 'groups'), group));
   if (entry === undefined) return undefined;
-  const parsed = parseExecutionPolicy(
-    { v: POLICY_SCHEMA_VERSION, ...(entry as Record<string, unknown>) }, `group '${group}'`);
+  const parsed = parseExecutionPolicy({ v: POLICY_SCHEMA_VERSION, ...entry }, `group '${group}'`);
   diagnostics.push(...parsed.diagnostics);
   return parsed.policy;
 }
@@ -275,19 +317,30 @@ function groupPolicyOf(
  * The group is named by the *node's* policy, so a node opts into a shared limit rather than a
  * workflow assigning one to it. That keeps the node readable on its own, which is the same
  * reason the policy sits on the node rather than in a settings map keyed by node name.
+ *
+ * `declared` is the node's raw `executionPolicy` carrier and `settings` the workflow's raw
+ * settings, so the JSON path and the live path decide precedence in this one function.
  */
-export function nodePolicyOf(
-  node: INode, workflow: Workflow, workflowPolicy: ExecutionPolicy | undefined, diagnostics: string[],
+export function resolveNodePolicy(
+  declared: unknown,
+  nodeName: string,
+  settings: unknown,
+  workflowPolicy: ExecutionPolicy | undefined,
+  diagnostics: string[],
 ): ExecutionPolicy | undefined {
-  const parsed = parseExecutionPolicy(
-    (node as unknown as Record<string, unknown>)['executionPolicy'], `node '${node.name}'`);
+  const parsed = parseExecutionPolicy(declared, `node '${nodeName}'`);
   diagnostics.push(...parsed.diagnostics);
   const own = parsed.policy;
   const group = own?.concurrency?.group ?? own?.rate?.group;
-  const groupPolicy = group === undefined
-    ? undefined
-    : groupPolicyOf(workflow.settings, group, diagnostics);
+  const groupPolicy = group === undefined ? undefined : groupPolicyOf(settings, group, diagnostics);
   return mergePolicies(workflowPolicy, groupPolicy, own);
+}
+
+/** {@link resolveNodePolicy} for a live node: its `executionPolicy` against `workflow.settings`. */
+export function nodePolicyOf(
+  node: INode, workflow: Workflow, workflowPolicy: ExecutionPolicy | undefined, diagnostics: string[],
+): ExecutionPolicy | undefined {
+  return resolveNodePolicy(fieldOf(node, 'executionPolicy'), node.name, workflow.settings, workflowPolicy, diagnostics);
 }
 
 /**
@@ -344,14 +397,16 @@ export function startNodesOf(runExecutionData: IRunExecutionData): string[] {
 
 /**
  * The subnet prefix of a node: its `id` (a UUID in n8n), unless it is missing, contains the
- * MOD-010 separator `/` or repeats an earlier node's — then `n<index>` in `workflow.nodes` order.
+ * MOD-010 separator `/` or repeats an earlier node's — then `n<k>` for the first `k >= index`
+ * (the node's position in `workflow.nodes`) no node already owns. The fallback is checked
+ * against `used` like a real id, because a workflow may carry the literal id `n1` beside a
+ * node with none: n8n runs that workflow, and `analyse()` refuses a duplicate prefix.
  */
-function prefixOf(node: INode, index: number, used: Set<string>): string {
-  const id = typeof node.id === 'string' && node.id.length > 0 && !node.id.includes('/') && !used.has(node.id)
-    ? node.id
-    : `n${index}`;
-  used.add(id);
-  return id;
+export function nodePrefixOf(id: unknown, index: number, used: Set<string>): string {
+  let prefix = typeof id === 'string' && id.length > 0 && !id.includes('/') && !used.has(id) ? id : undefined;
+  for (let k = index; prefix === undefined; k++) if (!used.has(`n${k}`)) prefix = `n${k}`;
+  used.add(prefix);
+  return prefix;
 }
 
 export function describeWorkflow(
@@ -387,12 +442,11 @@ export function describeWorkflow(
     shapes.set(node.name, nodeShapeOf(workflow, node, options));
     references.set(node.name, scanExpressionReferences(node.parameters, names));
     const policy = nodePolicyOf(node, workflow, workflowPolicy, policyDiagnostics);
-    // Both read parameters and the policy; computing each once keeps the spread below to one
-    // evaluation per field rather than two.
-    const maxRounds = maxRoundsOf(node);
-    const maxToolCalls = maxToolCallsOf(node, policy);
+    // Computed once each so the spread below evaluates one read per field rather than two.
+    const maxRounds = readPositiveIntOption(node.parameters, 'maxIterations');
+    const maxToolCalls = policy?.maxToolCalls ?? readPositiveIntOption(node.parameters, 'maxToolCalls');
     return {
-      id: prefixOf(node, index, used),
+      id: nodePrefixOf(node.id, index, used),
       name: node.name,
       type: node.type,
       typeVersion: node.typeVersion,
@@ -416,7 +470,14 @@ export function describeWorkflow(
     connections: mainConnections,
     toolConnections,
     startNodes,
-    nodeTypes: (n) => shapes.get(n.name)!,
+    nodeTypes: (n) => recordedShapeOf(shapes, n.name),
     expressionReferences: (n) => references.get(n.name) ?? [],
   };
+}
+
+/** The shape recorded for `name`, or {@link UnknownNodeError}: no node gets an invented shape. */
+export function recordedShapeOf(shapes: ReadonlyMap<string, NodeTypeShape>, name: string): NodeTypeShape {
+  const shape = shapes.get(name);
+  if (shape === undefined) throw new UnknownNodeError(name);
+  return shape;
 }

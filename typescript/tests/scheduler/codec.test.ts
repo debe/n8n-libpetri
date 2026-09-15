@@ -13,6 +13,7 @@ import { compile } from '../../src/compiler/index.js';
 import { isEntryPayload, type EdgePayload } from '../../src/scheduler/index.js';
 import { diamond, linear, twoTriggers } from '../fixtures/workflows.js';
 import { fakeWorkflow, items, newRunExecutionData } from './support.js';
+import { inOf, inputOf, readyOf } from '../compiler/support.js';
 
 function named(m: Map<{ name: string }, unknown[]>): Record<string, number> {
   const out: Record<string, number> = {};
@@ -28,7 +29,7 @@ describe('decodeExecutionData — fresh run', () => {
     const entry = red.executionData!.nodeExecutionStack[0]!;
     const m = decodeExecutionData(c, red.executionData!);
     expect(named(m)).toEqual({ ...named(c.sharedMarking()), 'id:Trigger/in': 1 });
-    const token = m.get(c.netMap.node('Trigger').in!)![0]!;
+    const token = m.get(inOf(c.netMap.node('Trigger')))![0]!;
     expect(isEntryPayload(token.value)).toBe(true);
     expect((token.value as { executionData: IExecuteData }).executionData).toBe(entry); // by reference
   });
@@ -58,7 +59,7 @@ describe('decodeExecutionData — fresh run', () => {
     const red = newRunExecutionData(wf.nodes.TrigA!);
     const m = decodeExecutionData(c, red.executionData!);
     expect(named(m)['id:Merge/ready_1']).toBe(1); // TrigB is unreachable: input 1 seeded empty
-    expect(isUnit(m.get(c.netMap.node('Merge').inputs[1]!.ready!)![0]!)).toBe(true);
+    expect(isUnit(m.get(readyOf(inputOf(c.netMap.node('Merge'), 1)))![0]!)).toBe(true);
     expect(named(m)['id:Merge/free_1']).toBeUndefined();
   });
 

@@ -14,27 +14,29 @@ export { parseJunit, parseXml, decodeEntities, allCases, caseKeys, JunitParseErr
 export type { LoopDrivingPattern, CaseClassification } from './classify.js';
 export { LOOP_DRIVING_FILE, LOOP_DRIVING_PATTERNS, classifyCase, describeBlocks, titleOf } from './classify.js';
 export type { EngineStatus, Verdict, MatrixRow, Tally, ConformanceMatrix, MatrixOptions } from './matrix.js';
-export { buildMatrix } from './matrix.js';
-export { renderMatrix } from './report.js';
+export { buildMatrix, EMPTY_TALLY } from './matrix.js';
+export { renderMatrix, cell } from './report.js';
 export type { CliIo } from './cli.js';
 export { runCli, USAGE } from './cli.js';
 export type {
   FakeWorkflowOptions, FakeHostOptions, RunDataOptions, ScriptContext, NodeScript, HookFailures,
 } from './harness.js';
 export {
-  FakeHost, fakeHooks, fakeNodeHelpers, fakeWorkflow, newRunExecutionData, toINode, passThrough, items, sleep, ITEM,
+  FakeHost, fakeHooks, fakeNodeHelpers, fakeWorkflow, newRunExecutionData, passThrough, items, sleep,
 } from './harness.js';
-export { ReferenceHost, StackReferenceScheduler, referenceHost } from './stack-reference.js';
+export type { ReferenceExecutionState } from './stack-reference.js';
+export { ReferenceHost, StackReferenceScheduler } from './stack-reference.js';
 export type {
   DifferFixture, EngineName, TraceEvent, Activation, EngineRun, DataDifference, DataAttribution,
   AttributedDifference, DataComparison, DependencyEdge, HappensBeforeViolation, HappensBefore,
   Attribution, OrderDifference, OrderingReport, LastNodeExecuted, AttributionContext, DiffResult,
-  SchedulerContract, DataContext,
+  SchedulerContract, DataContext, FixtureStatics,
 } from './differ.js';
 export {
-  activationKey, activationsOf, runReference, runPetri, firstDifference, compareData, comparableTask, descendantsOf,
-  strandedNodesOf, orInputNodesOf, dependencyEdges, checkHappensBefore, executionOrder, attribute,
-  compareOrdering, diffFixture, diffAll, renderDiffReport,
+  DifferFixtureError, startNodeOf, isStoppedOutcome, activationKey, activationNodeOf, activationsOf, runReference,
+  runPetri, firstDifference, compareData, comparableTask, descendantsOf, strandedNodesOf, orInputNodesOf,
+  dependencyEdges, checkHappensBefore, executionOrder, reachableOf, attribute, compareOrdering, fixtureStatics,
+  diffFixture, novelMechanismsOf, renderDiffReport,
 } from './differ.js';
 export type { DifferCliIo } from './differ-cli.js';
-export { runDifferCli, fixturesOf, DIFFER_USAGE } from './differ-cli.js';
+export { runDifferCli, fixturesOf } from './differ-cli.js';

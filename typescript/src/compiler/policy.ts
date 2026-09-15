@@ -28,6 +28,8 @@
  * declaration.
  */
 
+import { assertNever } from '../internal/assert.js';
+
 /** The schema version this build understands. Versions the policy, never the engine. */
 export const POLICY_SCHEMA_VERSION = 1;
 
@@ -50,13 +52,19 @@ export type FailureAction = 'retry' | 'route' | 'stop' | 'continue';
  * attempt and a rule covering the trigger a step does not name, so it is left to a later
  * schema version rather than half-built (ADR 0009).
  */
-export interface FailureStep {
-  /** Delay before the step acts. `retry` only; ignored elsewhere. */
-  readonly waitMs?: number;
-  readonly action: FailureAction;
-  /** Output name or index. Required by `route`, rejected on every other action. */
-  readonly output?: string | number;
-}
+export type FailureStep =
+  | {
+    readonly action: 'route';
+    /** Output name or index. Required by `route`, rejected on every other action. */
+    readonly output: string | number;
+    readonly waitMs?: never;
+  }
+  | {
+    readonly action: 'retry';
+    /** Delay before the step acts. `retry` only; ignored elsewhere. */
+    readonly waitMs?: number;
+  }
+  | { readonly action: 'stop' | 'continue' };
 
 /** `retry` continues the chain; everything else ends the activation. */
 export function isTerminalAction(action: FailureAction): boolean {
@@ -107,7 +115,12 @@ export interface PolicyParse {
 
 // ==================== parsing (layer 1 -> layer 2) ====================
 
-const ACTIONS: ReadonlySet<string> = new Set<FailureAction>(['retry', 'route', 'stop', 'continue']);
+const FAILURE_ACTIONS: readonly FailureAction[] = ['retry', 'route', 'stop', 'continue'];
+
+/** Whether `v` names a {@link FailureAction}; the one place a raw string becomes one. */
+export function isFailureAction(v: unknown): v is FailureAction {
+  return FAILURE_ACTIONS.some((action) => action === v);
+}
 
 /** Keys a known `v` defines. Anything else is a diagnostic, never an error. */
 const KNOWN_KEYS: ReadonlySet<string> = new Set([
@@ -125,8 +138,12 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** A positive integer, or `undefined`. Anything else is a problem the caller records. */
-function positiveInt(v: unknown, what: string, problems: string[]): number | undefined {
+/**
+ * A positive integer, or `undefined`. Anything else is a problem the caller records. The one
+ * definition: `graph.ts` raises the same check at once, over this, where it has no list to
+ * accumulate into.
+ */
+export function positiveInt(v: unknown, what: string, problems: string[]): number | undefined {
   if (v === undefined) return undefined;
   if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
     problems.push(`${what} must be a positive integer, got ${JSON.stringify(v)}`);
@@ -136,7 +153,7 @@ function positiveInt(v: unknown, what: string, problems: string[]): number | und
 }
 
 /** A non-negative integer, or `undefined`. `waitMs: 0` is a legitimate "retry at once". */
-function nonNegativeInt(v: unknown, what: string, problems: string[]): number | undefined {
+export function nonNegativeInt(v: unknown, what: string, problems: string[]): number | undefined {
   if (v === undefined) return undefined;
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
     problems.push(`${what} must be a non-negative integer, got ${JSON.stringify(v)}`);
@@ -158,8 +175,8 @@ function parseStep(
   }
 
   const action = raw['action'];
-  if (typeof action !== 'string' || !ACTIONS.has(action)) {
-    problems.push(`${at}.action must be one of ${[...ACTIONS].join(', ')}, got ${JSON.stringify(action)}`);
+  if (!isFailureAction(action)) {
+    problems.push(`${at}.action must be one of ${FAILURE_ACTIONS.join(', ')}, got ${JSON.stringify(action)}`);
     return undefined;
   }
 
@@ -180,16 +197,19 @@ function parseStep(
       problems.push(`${at}.output must be a non-negative integer index, got ${JSON.stringify(output)}`);
       return undefined;
     }
-  } else if (output !== undefined) {
+    return { action, output };
+  }
+  if (output !== undefined) {
     problems.push(`${at}.output is only valid on action 'route', not '${action}'`);
     return undefined;
   }
 
-  return {
-    ...(waitMs === undefined || action !== 'retry' ? {} : { waitMs }),
-    action: action as FailureAction,
-    ...(action === 'route' ? { output: output as string | number } : {}),
-  };
+  switch (action) {
+    case 'retry': return waitMs === undefined ? { action } : { waitMs, action };
+    case 'stop':
+    case 'continue': return { action };
+    default: return assertNever(action, 'failure action');
+  }
 }
 
 function parseGroupRef(
@@ -253,8 +273,9 @@ export function parseExecutionPolicy(raw: unknown, where: string): PolicyParse {
       // *after* the first terminal are merely unreachable, which is a diagnostic: rejecting
       // them would refuse a workflow whose author simply listed one escalation too many.
       const terminal = steps.findIndex((step) => isTerminalAction(step.action));
+      const terminalStep = steps[terminal];
       if (steps.length === rawSteps.length) {
-        if (terminal < 0) {
+        if (terminalStep === undefined) {
           problems.push(
             `${where}.onFailure is all 'retry', so the last attempt's failure has nowhere to go; ` +
             "end the chain with 'route', 'stop' or 'continue'");
@@ -264,7 +285,7 @@ export function parseExecutionPolicy(raw: unknown, where: string): PolicyParse {
             const last = steps.length - 1;
             const which = first === last ? `step ${first}` : `steps ${first}..${last}`;
             diagnostics.push(
-              `${where}.onFailure: step ${terminal} ('${steps[terminal]!.action}') ends the ` +
+              `${where}.onFailure: step ${terminal} ('${terminalStep.action}') ends the ` +
               `activation, so ${which} cannot be reached; ignored`);
           }
           onFailure = steps.slice(0, terminal + 1);
@@ -338,7 +359,7 @@ export function mergePolicies(
   return merged;
 }
 
-// ==================== the behaviour registry (layer 2 -> 3) ====================
+// ==================== the behaviour vocabulary (layer 2 -> 3) ====================
 
 /**
  * How far a declared behaviour has been taken.
@@ -349,54 +370,13 @@ export function mergePolicies(
  */
 export type BehaviourStatus = 'registered' | 'planned';
 
+/** One declared behaviour's layer-3 note — the only place the two vocabularies are allowed to meet. */
 export interface BehaviourEntry {
-  readonly behaviour: string;
+  /** The layer-1 key, so an entry can only describe a behaviour the policy can declare. */
+  readonly behaviour: keyof ExecutionPolicy;
   readonly status: BehaviourStatus;
   /** What the verifier is asked, and so what a `proven` licenses. */
   readonly property: string | null;
   /** One line on the encoding, for the report and for whoever adds the next one. */
   readonly encoding: string;
-}
-
-/**
- * The registry. Keyed by the layer-1 behaviour, holding the layer-3 note — which is the only
- * place the two vocabularies are allowed to meet.
- */
-export const BEHAVIOURS: readonly BehaviourEntry[] = [
-  {
-    behaviour: 'onFailure',
-    status: 'registered',
-    property: 'placeBound(X/failed_i, 1) per attempt; proper completion over the finite chain',
-    encoding: 'an unrolled per-attempt chain: X/running_i to X/failed_i to the step arm',
-  },
-  {
-    behaviour: 'timeoutMs',
-    status: 'registered',
-    property: null,
-    encoding: 'libpetri output timeout (IO-013) on X_run_i, failing into X/failed_i',
-  },
-  {
-    behaviour: 'concurrency',
-    status: 'planned',
-    property: 'placeBound(g/slots, n) and the semiflow slots + sum(running) = n',
-    encoding: 'a scoped _budget: g/slots taken by X_start, refunded by X_done',
-  },
-  {
-    behaviour: 'maxRuns',
-    status: 'planned',
-    property: 'placeBound(X/runs, N)',
-    encoding: 'A/calls generalised: one unit per X_start, refunded by nothing',
-  },
-  {
-    behaviour: 'rate',
-    status: 'planned',
-    property: 'placeBound(bucket, burst) and the semiflow bucket + bucket_free = burst',
-    encoding: 'a complementary pair with a refill gated on a demand read arc (ADR 0009 section 4)',
-  },
-];
-
-/** Behaviours a policy declares that are parsed but not yet encoded. For the report. */
-export function plannedBehavioursOf(policy: ExecutionPolicy): readonly string[] {
-  const planned = new Set(BEHAVIOURS.filter((b) => b.status === 'planned').map((b) => b.behaviour));
-  return Object.keys(policy).filter((k) => planned.has(k));
 }

@@ -5,7 +5,7 @@
 import type { TransitionAction } from 'libpetri';
 import { compile, kSafety, analyse } from '../../src/compiler/index.js';
 import { ALL, conn, diamond, linear, loopOverItems, multiProducer, node, userCycle, workflow } from '../fixtures/workflows.js';
-import { failed, runCompiled, started } from './support.js';
+import { failed, retryOf, routedOf, runCompiled, started } from './support.js';
 
 describe('effectiveBudget', () => {
   it('keeps the requested budget on an acyclic workflow where every input index has one producer', () => {
@@ -99,7 +99,7 @@ describe('the budget semiflow across a halt (README "Retries, halt, cancellation
       if (info.role !== 'run') return null;
       const g = map.node(info.node!);
       if (g.node === 'A') {
-        const retry: TransitionAction = async (ctx) => { ctx.output(g.retry!, ctx.input(g.running)); ctx.output(g.idle, null); };
+        const retry: TransitionAction = async (ctx) => { ctx.output(retryOf(g).retry, ctx.input(g.running)); ctx.output(g.idle, null); };
         return retry;
       }
       if (g.node === 'B') {
@@ -116,7 +116,7 @@ describe('the budget semiflow across a halt (README "Retries, halt, cancellation
       const forward: TransitionAction = async (ctx) => {
         const v = ctx.input(g.running);
         for (const out of g.outputs) for (const e of out.edges) ctx.output(e.data, v);
-        ctx.output(g.routed!, null);
+        ctx.output(routedOf(g), null);
         ctx.output(g.idle, null);
       };
       return forward;
@@ -126,10 +126,10 @@ describe('the budget semiflow across a halt (README "Retries, halt, cancellation
     expect(started(store, (n) => n.endsWith('/retry_wait') || n.endsWith('/exhausted'))).toEqual([]);
     const a = c.netMap.node('A');
     const held = c.netMap.nodes.reduce((n, g) =>
-      n + marking.tokenCount(g.running) + (g.routed === null ? 0 : marking.tokenCount(g.routed))
-      + (g.retry === null ? 0 : marking.tokenCount(g.retry)), 0);
-    expect(marking.tokenCount(a.retry!)).toBe(1);
-    expect(marking.tokenCount(a.tries!)).toBe(2);
+      n + marking.tokenCount(g.running) + (g.routing.kind === 'collapsed' ? marking.tokenCount(g.routing.routed) : 0)
+      + (g.retry === null ? 0 : marking.tokenCount(g.retry.retry)), 0);
+    expect(marking.tokenCount(retryOf(a).retry)).toBe(1);
+    expect(marking.tokenCount(retryOf(a).tries)).toBe(2);
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(1);
     expect(marking.tokenCount(c.netMap.shared.budget) + held).toBe(2);
     // `_halt` is the terminal marker and nothing consumes it (`compiler/compile.ts`).

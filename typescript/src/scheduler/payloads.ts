@@ -47,6 +47,7 @@ export type InputPayload = EdgePayload | EntryPayload;
  * referenced node that was skipped.
  */
 export interface RunPayload {
+  readonly kind: 'run';
   readonly executionData: IExecuteData;
   readonly attempt: number;
   readonly taskStartedData?: ITaskStartedData;
@@ -87,6 +88,7 @@ export type RetryReason =
 
 /** The token on `X/retry`. `X_retry_wait` turns it back into a {@link RunPayload}; `X_exhausted` resolves it. */
 export interface RetryPayload {
+  readonly kind: 'retry';
   readonly executionData: IExecuteData;
   readonly attempt: number;
   readonly taskStartedData: ITaskStartedData;
@@ -109,12 +111,14 @@ export interface RetryPayload {
  * `nodeSuccessData === null` branch, a filtered-out node): every edge then receives `empty`.
  */
 export interface OkPayload {
+  readonly kind: 'ok';
   readonly nodeSuccessData: INodeExecutionData[][];
   readonly runIndex: number;
 }
 
 /** The token on `X/waiting`: n8n's `pushExecutionStack(executionData)` on `waitTill`. */
 export interface WaitingPayload {
+  readonly kind: 'waiting';
   readonly executionData: IExecuteData;
 }
 
@@ -125,6 +129,7 @@ export interface WaitingPayload {
  * entry is popped, so the entry stays on the stack; the codec writes it back there).
  */
 export interface StoppedPayload {
+  readonly kind: 'stopped';
   readonly executionData: IExecuteData;
   readonly ran: boolean;
 }
@@ -146,6 +151,13 @@ export interface RequestPayload {
   readonly pending: readonly IExecuteData[];
   readonly resume: IExecuteData;
   readonly roundId: string;
+  /**
+   * Set when the agent is itself a tool (`agentNested`): where its eventual answer goes — the
+   * agent that dispatched it and the round it answers into. The round this request opens is the
+   * tool's own, so the re-entry reads the address from here: data in the token, where the
+   * marking codec sees it, rather than beside the net where a pause would lose it (ADR 0008).
+   */
+  readonly answers?: ToolDispatch;
 }
 
 /**
@@ -160,10 +172,18 @@ export interface RoundPayload {
   readonly kind: 'round';
   readonly resume: IExecuteData;
   readonly roundId: string;
+  /** The {@link RequestPayload.answers} of the request that opened this round, unchanged. */
+  readonly answers?: ToolDispatch;
 }
 
 export function isRoundPayload(v: unknown): v is RoundPayload {
   return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'round';
+}
+
+/** Where a tool activation's answer goes: the agent that dispatched it, and that agent's round. */
+export interface ToolDispatch {
+  readonly agent: string;
+  readonly roundId: string;
 }
 
 /**
@@ -191,6 +211,26 @@ export function isRequestPayload(v: unknown): v is RequestPayload {
 
 export function isDispatchPayload(v: unknown): v is DispatchPayload {
   return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'dispatch';
+}
+
+export function isRunPayload(v: unknown): v is RunPayload {
+  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'run';
+}
+
+export function isRetryPayload(v: unknown): v is RetryPayload {
+  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'retry';
+}
+
+export function isOkPayload(v: unknown): v is OkPayload {
+  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'ok';
+}
+
+export function isWaitingPayload(v: unknown): v is WaitingPayload {
+  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'waiting';
+}
+
+export function isStoppedPayload(v: unknown): v is StoppedPayload {
+  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'stopped';
 }
 
 export function isEdgePayload(v: unknown): v is EdgePayload {

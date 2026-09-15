@@ -23,7 +23,7 @@ import type {
   ActionBinder, CompiledWorkflow, ExecutionPolicy, FailureStep, NodeGadget,
 } from '../../src/compiler/index.js';
 import { conn, node, workflow } from '../fixtures/workflows.js';
-import { runCompiled, started } from '../compiler/support.js';
+import { retryOf, routedOf, runCompiled, started } from '../compiler/support.js';
 import { sleep } from './support.js';
 
 const ITEMS = { items: [{ json: { n: 1 } }] };
@@ -50,7 +50,7 @@ function routeEmpty(ctx: { output: (p: never, v: unknown) => void }, g: NodeGadg
   for (const out of g.outputs) {
     for (const e of out.edges) ctx.output(e.empty as never, null);
   }
-  ctx.output(g.routed as never, null);
+  ctx.output(routedOf(g) as never, null);
 }
 
 /**
@@ -95,7 +95,7 @@ describe('the chain is per activation, where the counter is not', () => {
       node('Trigger', 'trigger', [0, 0]),
       node('A', 'set', [200, 0], { retryOnFail: true, maxTries: 3 }),
     ], [conn('Trigger', 0, 'A', 0)], 'Trigger'));
-    const tries = c.netMap.node('A').tries!;
+    const tries = retryOf(c.netMap.node('A')).tries;
     const producers = [...c.net.transitions].filter(
       (t) => t.outputSpec !== null && [...enumerateBranches(t.outputSpec)].some((b) => b.has(tries)));
     expect(producers).toEqual([]);

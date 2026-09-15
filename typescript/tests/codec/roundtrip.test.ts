@@ -9,9 +9,10 @@
 import { InMemoryEventStore } from 'libpetri';
 import type { IRunExecutionData, Workflow } from 'n8n-workflow';
 import { decodeExecutionData, encodeMarking } from '../../src/codec.js';
-import { compile, type CompiledWorkflow, type WorkflowDescription } from '../../src/compiler/index.js';
+import { compile, readyPlacesOf, type CompiledWorkflow, type WorkflowDescription } from '../../src/compiler/index.js';
 import { PetriScheduler } from '../../src/scheduler/index.js';
-import { agentSharedTool, agentTwoTools, ALL, conn, linear, node, twoTriggers, workflow } from '../fixtures/workflows.js';
+import { agentNested, agentSharedTool, agentTwoTools, ALL, conn, linear, node, twoTriggers, workflow } from '../fixtures/workflows.js';
+import { agentOf } from '../compiler/support.js';
 import {
   FakeHost, execute, fakeHooks, fakeNodeHelpers, fakeWorkflow, items, newRunExecutionData, ranNodes, sleep,
   type NodeScript,
@@ -84,7 +85,7 @@ describe('an agent round the execution stopped inside', () => {
     expect(n['id:Agent/drained']).toBeUndefined();
     expect(n['id:Agent/in']).toBeUndefined();
     // The tool-call budget comes fresh from `sharedMarking`: it resets across a resume.
-    expect(n['id:Agent/calls']).toBe(c.netMap.node('Agent').maxToolCalls);
+    expect(n['id:Agent/calls']).toBe(agentOf(c.netMap.node('Agent')).maxToolCalls);
     // `Search` has a reserved `runData` slot but never ran, so its `X/done` must not be marked:
     // `initializeNodeRunData` writes the slot at plan time, with no `data`.
     expect(n['id:Search/done']).toBeUndefined();
@@ -127,6 +128,33 @@ describe('a tool shared by two agents', () => {
     expect(n['id:A2/drained']).toBeUndefined();
     expect(n['id:A1/dispatched']).toBeUndefined();
     expect(n['id:A1/queue']).toBeUndefined();
+  });
+});
+
+describe('an agent that is itself a tool', () => {
+  it('rebuilds on its round token the agent its answer goes to', () => {
+    // `B` is `A`'s tool and an agent in its own right. Paused inside `B`'s round, the stack holds
+    // both re-entries; `B`'s round is its own, but its answer still goes to `A`, and the token is
+    // the only place that address can live across a resume (a scheduler-side map would be gone).
+    const c = compile(agentNested);
+    const wf = fakeWorkflow(agentNested);
+    const red = newRunExecutionData(wf.nodes.Trigger!, { startItems: items({ n: 1 }) });
+    const x = red.executionData!;
+    const reentry = (nodeName: string, tool: string, previousNode: string) => ({
+      node: wf.nodes[nodeName]!, data: { main: [items({})] }, source: { main: [{ previousNode }] },
+      metadata: {
+        nodeWasResumed: true,
+        subNodeExecutionData: { actions: [{ nodeName: tool, runIndex: 0, action: {} }], metadata: {} },
+      },
+    });
+    x.nodeExecutionStack = [reentry('B', 'Code', 'A'), reentry('A', 'B', 'Trigger')] as never;
+
+    const m = decodeExecutionData(c, x, { runData: {} });
+    const [inner] = m.get(agentOf(c.netMap.node('B')).dispatched) ?? [];
+    expect(inner?.value).toMatchObject({ kind: 'round', roundId: 'B#0', answers: { agent: 'A', roundId: 'A#0' } });
+    const [outer] = m.get(agentOf(c.netMap.node('A')).dispatched) ?? [];
+    expect(outer?.value).toMatchObject({ kind: 'round', roundId: 'A#0' });
+    expect((outer?.value as { answers?: unknown }).answers).toBeUndefined();
   });
 });
 
@@ -339,7 +367,7 @@ describe('random pause markings: decode(encode(m)) ≡ m under the semantic proj
     const after = namedLive(c, live(m2));
     for (const g of c.netMap.nodes) {
       expect(after[g.idle.name], `${why} ${g.idle.name}`).toBe(before[g.idle.name]);
-      if (g.tries !== null) expect(after[g.tries.name], why).toBe(before[g.tries.name]);
+      if (g.retry !== null) expect(after[g.retry.tries.name], why).toBe(before[g.retry.tries.name]);
     }
     expect(after._budget, why).toBe(c.effectiveBudget);
     expect(after._pause, why).toBeUndefined();
@@ -359,8 +387,8 @@ describe('random pause markings: decode(encode(m)) ≡ m under the semantic proj
         for (const g of c.netMap.nodes) {
           if (g.form === 'direct' || g.form === 'or') continue;
           for (const i of g.inputs) {
-            const ready = [i.ready, i.readyData, i.readyEmpty].reduce((n, p) => n + (p === null ? 0 : (counts[p.name] ?? 0)), 0);
-            expect(ready + (counts[i.free!.name] ?? 0), `${gadget(c, g.node).node} input ${i.index}`).toBeLessThanOrEqual(1);
+            const ready = readyPlacesOf(i).reduce((n, p) => n + (counts[p.name] ?? 0), 0);
+            expect(ready + (counts[i.free.name] ?? 0), `${gadget(c, g.node).node} input ${i.index}`).toBeLessThanOrEqual(1);
           }
         }
       }

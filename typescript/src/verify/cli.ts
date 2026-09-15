@@ -52,11 +52,14 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 
+import { messageOf } from '../internal/errors.js';
 import { renderReport, renderSubject } from './report.js';
+import { rethrowIfBug } from './state-class.js';
 import { PROPERTY_NAMES } from './types.js';
-import type { PropertyName, SmtFallbackMode, VerifyOptions } from './types.js';
+import type { PropertyName, SmtFallbackMode, VerificationReport, VerifyOptions } from './types.js';
 import { verify } from './verify.js';
-import { parseWorkflowJson, type NodeTypesFile } from './workflow-json.js';
+import { parseNodeTypesFile, parseWorkflowJson } from './workflow-json.js';
+import type { NodeTypesFile, WorkflowJsonResult } from './workflow-json.js';
 
 export interface CliIo {
   readonly readFile: (path: string) => string;
@@ -73,7 +76,8 @@ export const USAGE =
   `  properties: ${PROPERTY_NAMES.join(', ')}\n` +
   '  exit: 0 clean, 1 violation (or unknown/bounded under --strict), 2 usage, 3 no usable z3';
 
-interface ParsedArgs {
+/** What {@link parseArgs} read off the command line. */
+export interface ParsedArgs {
   readonly file: string;
   readonly options: VerifyOptions;
   readonly nodeTypesFile: string | null;
@@ -84,7 +88,13 @@ interface ParsedArgs {
   readonly strict: boolean;
 }
 
-class UsageError extends Error {}
+/** A bad flag or a missing value: exit 2, with the usage line. */
+export class UsageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UsageError';
+  }
+}
 
 /** Parses `argv` (without `node` and the script). Throws {@link UsageError} on a bad flag. */
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -199,26 +209,28 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
   try {
     parsed = parseArgs(argv);
   } catch (e) {
-    io.stderr(`${e instanceof UsageError ? e.message : String(e)}\n${USAGE}\n`);
+    io.stderr(`${messageOf(e)}\n${USAGE}\n`);
     return 2;
   }
 
+  // Checked, not cast: a file that parses but is not a NodeTypesFile is an input error, and
+  // was a silent "no shapes" — every port count guessed, as if the flag had not been given.
   let nodeTypes: NodeTypesFile = {};
   try {
-    if (parsed.nodeTypesFile !== null) nodeTypes = JSON.parse(io.readFile(parsed.nodeTypesFile)) as NodeTypesFile;
+    if (parsed.nodeTypesFile !== null) nodeTypes = parseNodeTypesFile(JSON.parse(io.readFile(parsed.nodeTypesFile)));
   } catch (e) {
-    io.stderr(`could not read --node-types ${parsed.nodeTypesFile}: ${e instanceof Error ? e.message : String(e)}\n`);
+    io.stderr(`could not read --node-types ${parsed.nodeTypesFile}: ${messageOf(e)}\n`);
     return 2;
   }
 
-  let workflow;
+  let workflow: WorkflowJsonResult;
   try {
     workflow = parseWorkflowJson(io.readFile(parsed.file), {
       nodeTypes,
       ...(parsed.startNode === undefined ? {} : { startNode: parsed.startNode }),
     });
   } catch (e) {
-    io.stderr(`${parsed.file}: ${e instanceof Error ? e.message : String(e)}\n`);
+    io.stderr(`${parsed.file}: ${messageOf(e)}\n`);
     return 2;
   }
   for (const w of workflow.warnings) io.stderr(`warning: ${w}\n`);
@@ -233,11 +245,17 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
       `(${(check.elapsedMs / 1000).toFixed(1)}s)\n`),
   };
 
-  let report;
+  // What `verify()` throws is an input error — the compiler refusing the workflow, a policy
+  // that names an output the node lacks — and is reported like one. A programming error
+  // (`TypeError`, `ReferenceError`) is neither, and reporting it as exit 2 dropped the stack
+  // the one person who can fix it needs; it propagates, and `main.ts` prints the stack of a
+  // rejected run.
+  let report: VerificationReport;
   try {
     report = await verify(workflow.description, options);
   } catch (e) {
-    io.stderr(`${parsed.file}: ${e instanceof Error ? e.message : String(e)}\n`);
+    rethrowIfBug(e);
+    io.stderr(`${parsed.file}: ${messageOf(e)}\n`);
     return 2;
   }
 

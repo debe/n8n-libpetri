@@ -16,6 +16,7 @@ import {
 } from '../fixtures/workflows.js';
 import { fakeWorkflow, items, newRunExecutionData } from '../scheduler/support.js';
 import { edgeData, entryFor, gadget, named, placeNamed, src, stateOf, taskData, values } from './support.js';
+import { asSlot, inOf, inputOf, orInputOf, readyDataOf, readyOf } from '../compiler/support.js';
 
 /** Start-node shapes beyond the fixture set (`tests/compiler/marking.test.ts`). */
 const startJoin = workflow('start-join', [
@@ -39,7 +40,7 @@ describe('fresh run: decode equals initialMarking for every fixture', () => {
       const m = decodeExecutionData(c, red.executionData!);
       expect(named(m)).toEqual(named(c.initialMarking(entry)));
       const g = gadget(c, start);
-      const place = g.form === 'direct' ? g.in! : g.form === 'or' ? g.inputs[0]!.hasdata! : (g.form === 'choose-branch' && g.inputs[0]!.required ? g.inputs[0]!.readyData! : g.inputs[0]!.ready!);
+      const place = g.form === 'direct' ? inOf(g) : g.form === 'or' ? orInputOf(g).hasdata : (g.form === 'choose-branch' && g.inputs[0]!.required ? readyDataOf(inputOf(g, 0)) : readyOf(inputOf(g, 0)));
       const [token] = values(m, place) as EntryPayload[];
       expect(isEntryPayload(token)).toBe(true);
       expect(token!.executionData).toBe(entry);
@@ -54,8 +55,8 @@ describe('stack entries', () => {
     const a2 = entryFor(wf.nodes.A!, [items(2)]);
     const c1 = entryFor(wf.nodes.C!, [items(3)]);
     const m = decodeExecutionData(c, stateOf([a1, c1, a2]));
-    expect((values(m, gadget(c, 'A').in!) as EntryPayload[]).map((v) => v.executionData)).toEqual([a1, a2]);
-    expect((values(m, gadget(c, 'C').in!) as EntryPayload[]).map((v) => v.executionData)).toEqual([c1]);
+    expect((values(m, inOf(gadget(c, 'A'))) as EntryPayload[]).map((v) => v.executionData)).toEqual([a1, a2]);
+    expect((values(m, inOf(gadget(c, 'C'))) as EntryPayload[]).map((v) => v.executionData)).toEqual([c1]);
     expect(named(m)['id:B/in']).toBeUndefined();
   });
 
@@ -74,8 +75,8 @@ describe('stack entries', () => {
     const e2 = entryFor(wf.nodes.Merge!, [items(2), items(3)]);
     const m = decodeExecutionData(c, stateOf([e1, e2]));
     const g = gadget(c, 'Merge');
-    expect((values(m, g.inputs[0]!.ready!)[0] as EntryPayload).executionData).toBe(e1);
-    expect(isUnit(m.get(g.inputs[1]!.ready!)![0]!)).toBe(true);
+    expect((values(m, readyOf(inputOf(g, 0)))[0] as EntryPayload).executionData).toBe(e1);
+    expect(isUnit(m.get(readyOf(inputOf(g, 1)))![0]!)).toBe(true);
     expect(named(m)['id:Merge/hasdata']).toBe(1);
     expect(named(m)['id:Merge/free_0']).toBeUndefined();
     expect(named(m)['id:Merge/free_1']).toBeUndefined();
@@ -96,7 +97,7 @@ describe('waitingExecution slots (join / choose-branch)', () => {
     const a = items({ a: 1 });
     const m = decodeExecutionData(c, stateOf([], { Merge: { 0: { main: [a, null] } } }, { Merge: { 0: { main: [src('A'), null] } } }));
     const g = gadget(c, 'Merge');
-    const [v] = values(m, g.inputs[0]!.ready!) as EdgePayload[];
+    const [v] = values(m, readyOf(inputOf(g, 0))) as EdgePayload[];
     expect(v!.kind).toBe('edge');
     expect(v!.items).toBe(a);
     expect(v!.source).toEqual(src('A'));
@@ -110,7 +111,7 @@ describe('waitingExecution slots (join / choose-branch)', () => {
     const c = compile(diamond);
     const m = decodeExecutionData(c, stateOf([], { Merge: { 0: { main: [null, []] } } }));
     const g = gadget(c, 'Merge');
-    expect(isUnit(m.get(g.inputs[1]!.ready!)![0]!)).toBe(true);
+    expect(isUnit(m.get(readyOf(inputOf(g, 1)))![0]!)).toBe(true);
     expect(named(m)['id:Merge/hasdata']).toBeUndefined();
     expect(named(m)['id:Merge/free_1']).toBeUndefined();
     expect(named(m)['id:Merge/free_0']).toBe(1);
@@ -119,7 +120,7 @@ describe('waitingExecution slots (join / choose-branch)', () => {
   it('a missing source array leaves the payload source null', () => {
     const c = compile(diamond);
     const m = decodeExecutionData(c, stateOf([], { Merge: { 0: { main: [items(1), null] } } }));
-    expect((values(m, gadget(c, 'Merge').inputs[0]!.ready!)[0] as EdgePayload).source).toBeNull();
+    expect((values(m, readyOf(inputOf(gadget(c, 'Merge'), 0)))[0] as EdgePayload).source).toBeNull();
   });
 
   it('a required choose-branch input takes ready_i_data for items and ready_i_empty for []', () => {
@@ -129,7 +130,7 @@ describe('waitingExecution slots (join / choose-branch)', () => {
     expect(named(m)['id:Merge/ready_1_empty']).toBe(1);
     expect(named(m)['id:Merge/free_0']).toBeUndefined();
     expect(named(m)['id:Merge/free_1']).toBeUndefined();
-    expect(gadget(c, 'Merge').hasdata).toBeNull();
+    expect(c.netMap.placeFor('Merge', 'hasdata')).toBeUndefined();
   });
 
   it('several slots on one input queue in ascending run index: the head on ready_i, the rest on the input\'s first edge place', () => {
@@ -139,7 +140,7 @@ describe('waitingExecution slots (join / choose-branch)', () => {
     const a3 = items(3);
     const m = decodeExecutionData(c, stateOf([], { Merge: { 7: { main: [a2, null] }, 3: { main: [a1, null] }, 12: { main: [a3, null] } } }));
     const g = gadget(c, 'Merge');
-    expect((values(m, g.inputs[0]!.ready!) as EdgePayload[]).map((v) => v.items)).toEqual([a1]);
+    expect((values(m, readyOf(inputOf(g, 0))) as EdgePayload[]).map((v) => v.items)).toEqual([a1]);
     expect((values(m, edgeData(c, 'A', 0, 'Merge', 0)) as EdgePayload[]).map((v) => v.items)).toEqual([a2, a3]);
     expect(named(m)['id:Merge/hasdata']).toBe(1); // only the head is armed
   });
@@ -151,8 +152,8 @@ describe('waitingExecution slots (join / choose-branch)', () => {
     const b = items({ b: 1 });
     const m = decodeExecutionData(c, stateOf([e], { Merge: { 0: { main: [null, b] } } }));
     const g = gadget(c, 'Merge');
-    expect((values(m, g.inputs[0]!.ready!)[0] as EntryPayload).executionData).toBe(e);
-    expect(isUnit(m.get(g.inputs[1]!.ready!)![0]!)).toBe(true);
+    expect((values(m, readyOf(inputOf(g, 0)))[0] as EntryPayload).executionData).toBe(e);
+    expect(isUnit(m.get(readyOf(inputOf(g, 1)))![0]!)).toBe(true);
     expect((values(m, edgeData(c, 'B', 0, 'Merge', 1))[0] as EdgePayload).items).toBe(b);
   });
 
@@ -176,9 +177,9 @@ describe('waitingExecution slots (join / choose-branch)', () => {
     const e = entryFor(wf.nodes.Merge!, [items(1), []], [src('TrigA'), null]);
     const m = decodeExecutionData(c, stateOf([e]));
     const g = gadget(c, 'Merge');
-    expect((values(m, g.inputs[0]!.ready!)[0] as EntryPayload).executionData).toBe(e);
-    expect(m.get(g.inputs[1]!.ready!)).toHaveLength(1); // the unit companion, not companion + seed
-    expect(isUnit(m.get(g.inputs[1]!.ready!)![0]!)).toBe(true);
+    expect((values(m, readyOf(inputOf(g, 0)))[0] as EntryPayload).executionData).toBe(e);
+    expect(m.get(readyOf(inputOf(g, 1)))).toHaveLength(1); // the unit companion, not companion + seed
+    expect(isUnit(m.get(readyOf(inputOf(g, 1)))![0]!)).toBe(true);
     expect(named(m)['id:Merge/hasdata']).toBe(1);
     expect(named(m)['id:Merge/free_0']).toBeUndefined();
     expect(named(m)['id:Merge/free_1']).toBeUndefined();
@@ -199,7 +200,7 @@ describe('waitingExecution slots (join / choose-branch)', () => {
     const b = items({ b: 1 });
     const m = decodeExecutionData(c, stateOf([e], { Merge: { 0: { main: [null, b] } } }));
     const g = gadget(c, 'Merge');
-    expect(isUnit(m.get(g.inputs[1]!.ready!)![0]!)).toBe(true);
+    expect(isUnit(m.get(readyOf(inputOf(g, 1)))![0]!)).toBe(true);
     expect((values(m, edgeData(c, 'TrigB', 0, 'Merge', 1)) as EdgePayload[]).map((v) => v.items)).toEqual([b]);
     const emptyPlace = g.inputs[1]!.edges[0]!.empty!;
     expect(named(m)[emptyPlace.name]).toBeUndefined();
@@ -207,7 +208,7 @@ describe('waitingExecution slots (join / choose-branch)', () => {
 
   it('an [] for a required choose-branch input fed only by a cycle edge has no place and is a CodecError', () => {
     const c = compile(startChoose);
-    expect(gadget(c, 'M').inputs[1]!.readyEmpty).toBeNull();
+    expect(asSlot(inputOf(gadget(c, 'M'), 1), 'ready-split').readyEmpty).toBeNull();
     expect(() => decodeExecutionData(c, stateOf([], { M: { 0: { main: [null, []] } } }))).toThrow(CodecError);
   });
 
@@ -254,7 +255,7 @@ describe('direct-form waiting slots (foreign: n8n never writes them, the strande
     const diags: string[] = [];
     const a = items(1);
     const m = decodeExecutionData(c, stateOf([], { A: { 0: { main: [a] } }, B: { 0: { main: [[]] } }, Trigger: { 0: { main: [[]] } } }), { onDiagnostic: (d) => diags.push(d) });
-    expect((values(m, gadget(c, 'A').in!)[0] as EdgePayload).items).toBe(a);
+    expect((values(m, inOf(gadget(c, 'A')))[0] as EdgePayload).items).toBe(a);
     expect(named(m)['id:B/in_empty']).toBe(1);
     expect(named(m)['id:Trigger/in']).toBeUndefined();
     expect(diags).toEqual([expect.stringContaining("node 'Trigger'")]);

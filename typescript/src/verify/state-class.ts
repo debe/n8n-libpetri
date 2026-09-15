@@ -338,10 +338,11 @@ export interface Witness {
 export interface Stranding extends Witness {
   /** The pending-work places only: what was left behind. */
   readonly stranded: readonly MarkedPlace[];
-  /** Which designed terminal the class is, and so which rest set classified it. */
+  /**
+   * Which designed terminal the class is, and so which rest set classified it. Anything but
+   * `'none'` is a paused or halted run that *also* holds work.
+   */
   readonly terminal: TerminalKind;
-  /** `terminal !== 'none'`: the class is a paused or halted run that *also* holds work. */
-  readonly paused: boolean;
 }
 
 /** A {@link Witness} in the shape the report already renders. */
@@ -376,10 +377,10 @@ export class CoMarkings {
     this.decode = decode;
   }
 
-  has(a: Place<unknown>, b: Place<unknown>): boolean {
-    return this.pairs.has(`${a.name} ${b.name}`) || this.pairs.has(`${b.name} ${a.name}`);
-  }
-
+  /**
+   * A class marking `a` and `b` together, decoded; `null` when none does. The pair is stored
+   * once, in the order the pass met the two places, so both orders are probed here.
+   */
   witness(a: Place<unknown>, b: Place<unknown>): Witness | null {
     const sc = this.pairs.get(`${a.name} ${b.name}`) ?? this.pairs.get(`${b.name} ${a.name}`);
     return sc === undefined ? null : this.decode(sc);
@@ -441,22 +442,8 @@ export class StateSpace {
   readonly error: string | null;
   /** Classes with nothing enabled, plus the time-dead ones inside the expanded prefix. */
   readonly quiescentClasses: number;
-  /** Quiescent classes whose every token is at rest for that class's rest set. */
-  readonly restingClasses: number;
   /** Quiescent classes that are designed terminals (paused / halted). */
   readonly terminalClasses: number;
-  /**
-   * Quiescent classes marking at least one place **outside {@link REST_ROLES}**, whatever
-   * they hold — strandings and designed terminals alike.
-   *
-   * It is not a defect count. It was the exact error condition of the SMT fallback while
-   * that query could declare only the plain rest set (VER-002: *quiescent ∧ some marked place
-   * is not a declared sink*), and `verify.ts` skipped the query wherever it was non-zero.
-   * Since the pause / halt widenings are declared as conditional sinks (libpetri VER-014) the
-   * query excuses the same terminals the graph does, and this is a statistic: how many
-   * quiescent classes the unwidened question would have called strandings.
-   */
-  readonly outsideSinkClasses: number;
   /** How many classes the BFS expanded: the prefix a bounded claim may be made over. */
   readonly expandedClasses: number;
   /**
@@ -497,15 +484,11 @@ export class StateSpace {
     this.loopSteps = loops.size;
 
     let quiescent = 0;
-    let resting = 0;
     let terminal = 0;
-    let outsideSinks = 0;
     if (graph === null) {
       this.expandedClasses = 0;
       this.quiescentClasses = 0;
-      this.restingClasses = 0;
       this.terminalClasses = 0;
-      this.outsideSinkClasses = 0;
       this.boundedCyclicRuns = null;
       return;
     }
@@ -534,22 +517,14 @@ export class StateSpace {
       quiescent++;
       const kind = terminalKindOf(marked.map((p) => this.roleOf(p)));
       if (kind !== 'none') terminal++;
-      // Outside REST_ROLES *whatever* the class holds — the unwidened VER-002 question's
-      // error condition, kept as a statistic ({@link outsideSinkClasses}).
-      if (marked.some((p) => !REST_ROLES.has(this.roleOf(p)))) outsideSinks++;
       const rest = restRolesFor(kind);
       const pending = marked.filter((p) => !rest.has(this.roleOf(p)));
-      if (pending.length === 0) {
-        resting++;
-        continue;
-      }
+      if (pending.length === 0) continue;
       if (this.strandingClasses.length < MAX_WITNESSES) this.strandingClasses.push(sc);
       for (const p of pending) if (!this.strandedBy.has(p.name)) this.strandedBy.set(p.name, sc);
     }
     this.quiescentClasses = quiescent;
-    this.restingClasses = resting;
     this.terminalClasses = terminal;
-    this.outsideSinkClasses = outsideSinks;
     this.boundedCyclicRuns = this.closedCyclicRuns(graph, loops);
   }
 
@@ -657,10 +632,11 @@ export class StateSpace {
     if (this.graph !== null) {
       for (const sc of this.graph.stateClasses()) {
         const marked = sc.marking.placesWithTokens().map((p) => p.name).filter((n) => wanted.has(n));
+        // One key per unordered pair: `witness` probes both orders.
         for (let i = 0; i < marked.length; i++) {
-          for (let j = 0; j < marked.length; j++) {
+          for (let j = i + 1; j < marked.length; j++) {
             const key = `${marked[i]} ${marked[j]}`;
-            if (i !== j && !pairs.has(key)) pairs.set(key, sc);
+            if (!pairs.has(key)) pairs.set(key, sc);
           }
         }
       }
@@ -672,11 +648,6 @@ export class StateSpace {
   strandedAt(place: Place<unknown>): Stranding | null {
     const sc = this.strandedBy.get(place.name);
     return sc === undefined ? null : this.decode(sc);
-  }
-
-  /** Whether any explored quiescent class leaves work on `place`. */
-  isStranded(place: Place<unknown>): boolean {
-    return this.strandedBy.has(place.name);
   }
 
   /** Every place some stranding leaves work on, in first-seen order. */
@@ -825,7 +796,6 @@ export class StateSpace {
       marking,
       path: steps,
       terminal: kind,
-      paused: kind !== 'none',
     };
   }
 }

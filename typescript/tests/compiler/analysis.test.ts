@@ -4,6 +4,7 @@
  */
 import { analyse, compile, isAllRequired, joinFormOf, requiredInputsOf, retryParamsOf } from '../../src/compiler/index.js';
 import { conn, diamond, linear, loopOverItems, node, twoTriggers, userCycle, workflow, SHAPES } from '../fixtures/workflows.js';
+import { inOf, readyDataOf, retryOf } from './support.js';
 
 describe('analyse: validation', () => {
   it('rejects an empty workflow, duplicate names or ids, ids containing "/", and an unknown start node', () => {
@@ -46,14 +47,14 @@ describe('analyse: validation', () => {
     expect(retryParamsOf({ maxTries: 1, waitBetweenTries: -1 })).toEqual({ maxTries: 2, waitBetweenTries: 0 });
     expect(retryParamsOf({ maxTries: 10, waitBetweenTries: 10000 })).toEqual({ maxTries: 5, waitBetweenTries: 5000 });
     expect(retryParamsOf({ maxTries: 4, waitBetweenTries: 250 })).toEqual({ maxTries: 4, waitBetweenTries: 250 });
-    const g = (extra: object) => compile(workflow('r', [node('T', 'trigger', [0, 0], { retryOnFail: true, ...extra })], [], 'T')).netMap.node('T');
+    const g = (extra: object) => retryOf(compile(workflow('r', [node('T', 'trigger', [0, 0], { retryOnFail: true, ...extra })], [], 'T')).netMap.node('T'));
     expect([g({}).maxTries, g({}).waitBetweenTries]).toEqual([3, 1000]);
     expect([g({ maxTries: 0 }).maxTries, g({ waitBetweenTries: -1 }).waitBetweenTries]).toEqual([3, 0]);
     expect(g({ maxTries: 10 }).maxTries).toBe(5);
     expect(compile(workflow('r', [node('T', 'trigger', [0, 0], { retryOnFail: true, maxTries: 10 })], [], 'T')).structuralHash)
       .toBe(compile(workflow('r', [node('T', 'trigger', [0, 0], { retryOnFail: true, maxTries: 5 })], [], 'T')).structuralHash);
-    const notRetrying = compile(workflow('r', [node('T', 'trigger', [0, 0], { maxTries: 10 })], [], 'T')).netMap.node('T');
-    expect([notRetrying.retryOnFail, notRetrying.maxTries, notRetrying.tries]).toEqual([false, null, null]);
+    const notRetrying = compile(workflow('r', [node('T', 'trigger', [0, 0], { maxTries: 10 })], [], 'T'));
+    expect([notRetrying.netMap.node('T').retry, notRetrying.netMap.placeFor('T', 'tries')]).toEqual([null, undefined]);
   });
 });
 
@@ -124,7 +125,7 @@ describe('analyse: graph facts', () => {
     const c = compile(wf);
     const m = c.netMap.node('M');
     expect(m.form).toBe('choose-branch');
-    expect(m.inputs.map((i) => [i.index, i.wired, i.required, i.readyData!.name])).toEqual([
+    expect(m.inputs.map((i) => [i.index, i.wired, i.required, readyDataOf(i).name])).toEqual([
       [0, false, true, 'id:M/ready_0_data'], [1, true, true, 'id:M/ready_1_data'],
     ]);
     // Nothing writes ready_0_data: X_start can never enable.
@@ -154,7 +155,7 @@ describe('analyse: graph facts', () => {
   it('a non-all-required node wired only on a higher input stays direct (divergence 9: same data, only the timing differs)', () => {
     const c = compile(workflow('half-merge', [node('T', 'trigger', [0, 0]), node('M', 'merge', [100, 0])], [conn('T', 0, 'M', 1)], 'T'));
     expect(c.netMap.node('M').form).toBe('direct');
-    expect(c.netMap.node('M').in!.name).toBe('id:M/in');
+    expect(inOf(c.netMap.node('M')).name).toBe('id:M/in');
     expect(c.diagnostics).toEqual([]);
   });
 });

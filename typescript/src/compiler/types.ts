@@ -14,8 +14,7 @@
  * what that adapter must produce; nothing here imports n8n.
  */
 import type { PetriNet, Place, PrecompiledNet, Token, Transition, TransitionAction } from 'libpetri';
-import type { WorkflowAnalysis } from './graph.js';
-import type { ExecutionPolicy, FailureAction } from './policy.js';
+import type { ExecutionPolicy } from './policy.js';
 
 /** n8n `INode.onError`. `undefined` on a node means `'stopWorkflow'`. */
 export type OnError = 'stopWorkflow' | 'continueRegularOutput' | 'continueErrorOutput';
@@ -288,29 +287,124 @@ export interface EdgeRef {
   readonly kind: EdgeKind;
 }
 
-export interface TransitionInfo {
+/** The fields every transition of the flat net carries. */
+export interface TransitionInfoCommon {
   /** Full transition name in the flat net (`nodeId/start`, `nodeId/run`, …). */
   readonly name: string;
-  readonly role: TransitionRole;
   /** Owning node name; every transition of the flat net belongs to one. */
-  readonly node: string | null;
-  /** Output index of a per-output `route`; input index of a `clear`. */
-  readonly port?: number;
-  /** The edge an `arm` transition serves. */
-  readonly edge?: EdgeRef;
-  /** `data` / `empty` for an `arm`. */
-  readonly variant?: Variant;
-  /** Per-input variants of an enumerated (chooseBranch) `skip` transition, listed inputs only. */
-  readonly combination?: readonly Variant[];
-  /** The referenced node a `start-unmet` twin reports as unmet. */
-  readonly reference?: string;
-  /**
-   * 1-based attempt an `onFailure` chain's transition serves (ADR 0009): the `run` of attempt
-   * *i*, the step that answers its failure, or the funnel that turns its expired deadline into
-   * that failure.
-   */
-  readonly attempt?: number;
+  readonly node: string;
 }
+
+export interface StartTransition extends TransitionInfoCommon {
+  readonly role: 'start';
+}
+
+export interface StartUnmetTransition extends TransitionInfoCommon {
+  readonly role: 'start-unmet';
+  /** The referenced node this twin reports as unmet. */
+  readonly reference: string;
+}
+
+export interface RunTransition extends TransitionInfoCommon {
+  readonly role: 'run';
+  /**
+   * 1-based attempt this run serves (ADR 0009). `1` on a policy-free node, whose only run is
+   * its first attempt; `X_run_i` of an `onFailure` chain carries its own *i*.
+   */
+  readonly attempt: number;
+}
+
+export interface RouteTransition extends TransitionInfoCommon {
+  readonly role: 'route';
+  /** Output index of this per-output `X_route_o`. */
+  readonly port: number;
+}
+
+export interface DoneTransition extends TransitionInfoCommon {
+  readonly role: 'done';
+}
+
+export interface SkipTransition extends TransitionInfoCommon {
+  readonly role: 'skip';
+  /**
+   * Per-input variants of an enumerated (chooseBranch) skip, listed inputs only; empty for
+   * the single skip of every other form.
+   */
+  readonly combination: readonly Variant[];
+}
+
+export interface ArmTransition extends TransitionInfoCommon {
+  readonly role: 'arm';
+  /** The edge this arm serves. */
+  readonly edge: EdgeRef;
+  /** `data` / `empty`. */
+  readonly variant: Variant;
+}
+
+export interface ClearTransition extends TransitionInfoCommon {
+  readonly role: 'clear';
+  /** Input index of the OR input this `X_clear_i` closes. */
+  readonly port: number;
+}
+
+export interface RetryTransition extends TransitionInfoCommon {
+  readonly role: 'retry';
+}
+
+export interface ExhaustedTransition extends TransitionInfoCommon {
+  readonly role: 'exhausted';
+}
+
+export interface SinkTransition extends TransitionInfoCommon {
+  readonly role: 'sink';
+}
+
+export interface AttemptTransition extends TransitionInfoCommon {
+  readonly role: 'attempt';
+  /** 1-based attempt whose failure this step answers (ADR 0009). */
+  readonly attempt: number;
+}
+
+export interface DeadlineTransition extends TransitionInfoCommon {
+  readonly role: 'deadline';
+  /** 1-based attempt whose expired deadline this funnel turns into its failure (ADR 0009). */
+  readonly attempt: number;
+}
+
+export interface DoneRequestTransition extends TransitionInfoCommon {
+  readonly role: 'done-request';
+}
+
+export interface DispatchTransition extends TransitionInfoCommon {
+  readonly role: 'dispatch';
+}
+
+export interface CollectTransition extends TransitionInfoCommon {
+  readonly role: 'collect';
+}
+
+export interface ResumeTransition extends TransitionInfoCommon {
+  readonly role: 'resume';
+}
+
+export interface RoundsOutTransition extends TransitionInfoCommon {
+  readonly role: 'rounds-out';
+}
+
+export interface CallsOutTransition extends TransitionInfoCommon {
+  readonly role: 'calls-out';
+}
+
+/** One transition of the flat net, discriminated on {@link TransitionRole}. */
+export type TransitionInfo =
+  | StartTransition | StartUnmetTransition | RunTransition | RouteTransition | DoneTransition | SkipTransition
+  | ArmTransition | ClearTransition | RetryTransition | ExhaustedTransition | SinkTransition
+  | AttemptTransition | DeadlineTransition
+  | DoneRequestTransition | DispatchTransition | CollectTransition | ResumeTransition | RoundsOutTransition
+  | CallsOutTransition;
+
+/** The member of {@link TransitionInfo} carrying `role`. */
+export type TransitionInfoOf<R extends TransitionRole> = Extract<TransitionInfo, { role: R }>;
 
 export interface PlaceInfo {
   readonly name: string;
@@ -349,7 +443,8 @@ export interface EdgeSlot {
   readonly empty: Place<unknown> | null;
 }
 
-export interface InputGadget {
+/** The fields every modelled input carries, whichever slot shape its form gives it. */
+export interface InputGadgetCommon {
   readonly index: number;
   /** Producer edges, canonical order. Empty for a dead (unwired, required) input. */
   readonly edges: readonly EdgeSlot[];
@@ -357,23 +452,6 @@ export interface InputGadget {
   readonly wired: boolean;
   /** Must carry data for `X_start` (all-required node, or listed in `requiredInputs`). */
   readonly required: boolean;
-  /** `X/free_i` (join and choose-branch forms); `null` for the OR form, which has no slots. */
-  readonly free: Place<unknown> | null;
-  /**
-   * `X/ready_i`: the single ready place of a generic join input, a choose-branch input that
-   * is not required, or the OR form's round counter; `null` for a required choose-branch input.
-   */
-  readonly ready: Place<unknown> | null;
-  /** `X/ready_i_data` (required choose-branch input); `null` otherwise. */
-  readonly readyData: Place<unknown> | null;
-  /** `X/ready_i_empty` (required choose-branch input that can receive an empty); `null` otherwise. */
-  readonly readyEmpty: Place<unknown> | null;
-  /** `X/hasdata_i` (OR form): one token per data arrival, carrying the payload. */
-  readonly hasdata: Place<unknown> | null;
-  /** `X/ran_i` (OR form): one token per run of the current round. */
-  readonly ran: Place<unknown> | null;
-  /** OR form: the number of empty-capable producer edges, one delivery each per round. */
-  readonly round: number | null;
   /** An `empty` token can arrive on this input (some producer edge is a tree edge). */
   readonly emptyCapable: boolean;
   /** True when every producer of this input is unreachable from the start node: seeded empty. */
@@ -382,18 +460,94 @@ export interface InputGadget {
   readonly unreachableEdges: number;
 }
 
-export interface OutputGadget {
+/**
+ * The OR form's round places (README "OR-inputs"). No slot: arrivals aggregate a round rather
+ * than filling a `free_i` / `ready_i` pair.
+ */
+export interface OrSlot {
+  readonly slot: 'or';
+  /** `X/ready_i`: the round counter, one token per delivery of the current round. */
+  readonly ready: Place<unknown>;
+  /** `X/hasdata_i`: one token per data arrival, carrying the payload. */
+  readonly hasdata: Place<unknown>;
+  /** `X/ran_i`: one token per run of the current round. */
+  readonly ran: Place<unknown>;
+  /** The number of empty-capable producer edges, one delivery each per round. */
+  readonly round: number;
+}
+
+/** A join slot with one ready place for both variants: a generic join input, or a non-required choose-branch input. */
+export interface ReadySlot {
+  readonly slot: 'ready';
+  /** `X/free_i`: the slot is empty. */
+  readonly free: Place<unknown>;
+  /** `X/ready_i`: the single ready place, for `data` and `empty` alike. */
+  readonly ready: Place<unknown>;
+}
+
+/** A required choose-branch input's slot, whose two variants are enumerated on distinct places. */
+export interface SplitReadySlot {
+  readonly slot: 'ready-split';
+  /** `X/free_i`: the slot is empty. */
+  readonly free: Place<unknown>;
+  /** `X/ready_i_data`. */
+  readonly readyData: Place<unknown>;
+  /** `X/ready_i_empty`; `null` when no producer edge can deliver an empty. */
+  readonly readyEmpty: Place<unknown> | null;
+}
+
+/** The places of one input, by the shape its form gives it. */
+export type InputSlot = OrSlot | ReadySlot | SplitReadySlot;
+
+export interface OrInput extends InputGadgetCommon, OrSlot {}
+export interface ReadyInput extends InputGadgetCommon, ReadySlot {}
+export interface SplitReadyInput extends InputGadgetCommon, SplitReadySlot {}
+
+/** One modelled input, discriminated on `slot`. */
+export type InputGadget = OrInput | ReadyInput | SplitReadyInput;
+
+export interface OutputGadgetCommon {
   readonly index: number;
   readonly name: string | null;
   readonly isErrorOutput: boolean;
   readonly edges: readonly EdgeSlot[];
   /** `X/nil_o` for a producer inside a cycle; `null` for an acyclic producer. */
   readonly nil: Place<unknown> | null;
-  /** `X/ok_o` under per-output routing; `null` when `X_run` routes this output in its own spec. */
-  readonly ok: Place<unknown> | null;
-  /** `X/routed_o` under per-output routing; `null` when `X_run` routes (see `NodeGadget.routed`). */
-  readonly routed: Place<unknown> | null;
 }
+
+/** An output `X_run` routes in its own `Out` spec (see {@link NodeGadget.routing}). */
+export interface CollapsedOutput extends OutputGadgetCommon {
+  readonly routing: 'collapsed';
+}
+
+/** An output routed by its own `X_route_o` (per-output routing above {@link SPLIT_ROUTING_ABOVE}). */
+export interface SplitOutput extends OutputGadgetCommon {
+  readonly routing: 'split';
+  /** `X/ok_o`: written by `X_run`, drained by `X_route_o`. */
+  readonly ok: Place<unknown>;
+  /** `X/routed_o`: written by `X_route_o`, consumed by `X_done`. */
+  readonly routed: Place<unknown>;
+}
+
+/** One connected output, discriminated on `routing`; every output of a node shares its node's shape. */
+export type OutputGadget = CollapsedOutput | SplitOutput;
+
+/**
+ * How the node delivers its success outcome (ADR 0004):
+ * - `collapsed`: `X_run` routes every output in its own `Out` spec and marks the single
+ *   `X/routed`, which `X_done` consumes one scheduling cycle later to refund `_budget`;
+ * - `split`: the node has more than {@link SPLIT_ROUTING_ABOVE} connected outputs and routes
+ *   each through `X/ok_o` → `X_route_o` → `X/routed_o` → `X_done`. `outputs` are the same
+ *   objects as {@link NodeGadget.outputs}, typed for their places.
+ */
+export type RoutingGadget =
+  | {
+    readonly kind: 'collapsed';
+    /** `X/routed`: the marker `X_run` writes in the same firing as the edge tokens. */
+    readonly routed: Place<unknown>;
+    readonly outputs: readonly CollapsedOutput[];
+  }
+  | { readonly kind: 'split'; readonly outputs: readonly SplitOutput[] };
 
 export interface NodeGadgetTransitions {
   readonly start: string;
@@ -456,7 +610,7 @@ export interface NodeGadgetTransitions {
  * that activates twice gets its leftover allowance. Every token here is created and consumed
  * inside one activation, so the allowance is per activation by construction.
  */
-export interface AttemptGadget {
+export interface AttemptGadgetCommon {
   /** 1-based. `index === 1` is the ordinary run. */
   readonly index: number;
   /** `X/running` for attempt 1, `X/running_i` after it. */
@@ -470,23 +624,102 @@ export interface AttemptGadget {
    * `failed`, which is what makes "a timeout is another way an attempt fails" true in the net.
    */
   readonly timedOut: Place<unknown> | null;
-  /** What the step answering this attempt's failure does. */
-  readonly action: FailureAction;
-  /** `retry` only: the delay before the next attempt. */
-  readonly waitMs: number | null;
-  /** `route` only: the connected output the failure takes. */
-  readonly outputIndex: number | null;
 }
 
-/** Everything the scheduler needs to drive one node's gadget. */
-export interface NodeGadget {
+/** A `retry` step: wait, then run the next attempt. */
+export interface RetryAttempt extends AttemptGadgetCommon {
+  readonly action: 'retry';
+  /** The delay before the next attempt. */
+  readonly waitMs: number;
+  /** The next attempt's `running` place — the chain is unrolled, so "next" is a place, not a decrement. */
+  readonly next: Place<unknown>;
+}
+
+/** A `route` step: the failure takes a connected output. */
+export interface RouteAttempt extends AttemptGadgetCommon {
+  readonly action: 'route';
+  /** The connected output the failure takes. */
+  readonly outputIndex: number;
+}
+
+/** A `stop` or `continue` step: the terminal arm `onError` would have fixed. */
+export interface TerminalAttempt extends AttemptGadgetCommon {
+  readonly action: 'stop' | 'continue';
+}
+
+/** One attempt of an `onFailure` chain, discriminated on what its step does (see {@link AttemptGadgetCommon}). */
+export type AttemptGadget = RetryAttempt | RouteAttempt | TerminalAttempt;
+
+/** n8n's own `retryOnFail` gadget: `X/retry`, `X/tries` and the clamped parameters that seed and time them. */
+export interface RetryGadget {
+  /** `X/retry`: the attempt failed and a try may be left. */
+  readonly retry: Place<unknown>;
+  /** `X/tries`: seeded with `maxTries − 1`, consumed one per `X_retry_wait`, refunded by nothing. */
+  readonly tries: Place<unknown>;
+  /** n8n's clamped `maxTries` (`[2, 5]`). */
+  readonly maxTries: number;
+  /** n8n's clamped `waitBetweenTries` (`[0, 5000]` ms). */
+  readonly waitBetweenTries: number;
+}
+
+/**
+ * The agent side of a node with at least one `ai_tool` producer. This is
+ * `references/patterns.md` §5 ("fan-out and join with pending markers"): `routedRequest` phases
+ * the budget refund as `routed` does, `queue` carries the undispatched actions, `pending`
+ * counts them structurally so no action decides "am I the last one", `outstanding` is the
+ * pattern's `JOB_PENDING`, `dispatched` its `ROUTING_DONE`, and `rounds` bounds the loop.
+ *
+ * There is no accumulator for collected responses on purpose: `A_collect` consumes
+ * `outstanding` when it fires and would deposit on completion, so `A_resume` could drain
+ * n − 1 markers inside that window and leak one into the next round
+ * (`tests/spikes/agent-round.test.ts` measured it). `A_collect` produces nothing instead.
+ */
+export interface AgentGadget {
+  /** `A/routed_req`: the request outcome's marker, refunded by `A_done_req` one cycle later. */
+  readonly routedRequest: Place<unknown>;
+  /** `A/queue`: one token carrying the actions not yet dispatched, plus the agent's resume entry. */
+  readonly queue: Place<unknown>;
+  /**
+   * `A/calls`: the tool-call budget, seeded with `maxToolCalls` and consumed one unit per
+   * `A_dispatch`. Refunded by nothing, so it is monotonically decreasing — which is what keeps
+   * the reachability graph finite, and what lets it explore every round size up to the budget:
+   * the count is the number of dispatch firings, not a token deposit.
+   */
+  readonly calls: Place<unknown>;
+  /**
+   * `A/drained`: the round has nothing left to dispatch. Written by `A_done_req` for an empty
+   * request and by `A_dispatch` when it takes the last action off the queue; consumed by
+   * `A_resume`. The queue token and this marker are exclusive.
+   */
+  readonly drained: Place<unknown>;
+  /** `A/outstanding`: one unit token per dispatched, uncollected action. */
+  readonly outstanding: Place<unknown>;
+  /** `A/response`: one token per tool that finished, deposited by the tool's own `T_done`. */
+  readonly response: Place<unknown>;
+  /** `A/dispatched`: the round is open and fully dispatched; carries the agent's resume entry. */
+  readonly dispatched: Place<unknown>;
+  /** `A/rounds`: the round budget, seeded with `maxRounds` units and consumed one per `A_resume`. */
+  readonly rounds: Place<unknown>;
+  /** Tool nodes this agent may dispatch, in `A_dispatch`'s `xor` branch order. At least one: that is what makes it an agent. */
+  readonly tools: readonly [string, ...string[]];
+  /** `maxRounds` as compiled: the seed of `A/rounds`. */
+  readonly maxRounds: number;
+  /** True when `maxRounds` came from a configured fallback rather than the workflow JSON. */
+  readonly roundsAssumed: boolean;
+  /** `maxToolCalls` as compiled: the seed of `A/calls`. */
+  readonly maxToolCalls: number;
+  /** True when `maxToolCalls` is the scheduler's default rather than a value the workflow declared. */
+  readonly toolCallsAssumed: boolean;
+}
+
+/** The fields every node's gadget carries, whichever form its input side takes. */
+export interface NodeGadgetCommon {
   readonly node: string;
   readonly id: string;
   readonly type: string;
   readonly typeVersion: number;
   readonly disabled: boolean;
   readonly loopNode: boolean;
-  readonly form: JoinForm;
   /** Longest path from the start node in the SCC condensation; `X_start` priority. */
   readonly depth: number;
   readonly cyclic: boolean;
@@ -497,44 +730,25 @@ export interface NodeGadget {
   /** One of the start nodes (primary or not). */
   readonly isStartNode: boolean;
   readonly onError: OnError;
-  readonly retryOnFail: boolean;
-  /** n8n's clamped `maxTries` (`[2, 5]`) when `retryOnFail`; `null` otherwise. */
-  readonly maxTries: number | null;
-  /** n8n's clamped `waitBetweenTries` (`[0, 5000]` ms) when `retryOnFail`; `null` otherwise. */
-  readonly waitBetweenTries: number | null;
-  /** Direct form: the single in-data place (an edge place, or a synthetic `in`). */
-  readonly in: Place<unknown> | null;
-  /** Direct form, tree edge: the in-empty place. */
-  readonly inEmpty: Place<unknown> | null;
+  /**
+   * n8n's `retryOnFail` gadget; `null` when the node declares none. Mutually exclusive with
+   * {@link NodeGadgetCommon.attempts}: `analyse()` rejects a node carrying both.
+   */
+  readonly retry: RetryGadget | null;
   readonly running: Place<unknown>;
   readonly idle: Place<unknown>;
-  /**
-   * `X/routed`: the marker `X_run` writes in the same firing as the edge tokens and
-   * `X_done` consumes one scheduling cycle later to refund `_budget` (ADR 0004). `null`
-   * when the node routes per output — use `outputs[*].routed`.
-   */
-  readonly routed: Place<unknown> | null;
-  /**
-   * True when the node routes per connected output through `X/ok_o` → `X_route_o` →
-   * `X/routed_o` → `X_done`, i.e. when it has more than {@link SPLIT_ROUTING_ABOVE}
-   * connected outputs. False when `X_run` routes every output in its own `Out` spec and
-   * marks the single `X/routed`.
-   */
-  readonly splitRouting: boolean;
+  /** How the success outcome is delivered and where its in-flight marker sits (ADR 0004). */
+  readonly routing: RoutingGadget;
   readonly done: Place<unknown>;
   /** Present iff the node has a skip transition or is referenced (the reference twin reads it). */
   readonly skipped: Place<unknown> | null;
-  /** Generic join only: the slot-wide "at least one non-empty" counter. */
-  readonly hasdata: Place<unknown> | null;
-  readonly retry: Place<unknown> | null;
-  readonly tries: Place<unknown> | null;
   /**
    * The `onFailure` chain, one entry per attempt, ascending (ADR 0009). Empty when the node
-   * declares no policy, in which case `retry` / `tries` carry n8n's own `retryOnFail` — the two
-   * are mutually exclusive and `analyse()` rejects a node carrying both.
+   * declares no policy, in which case {@link NodeGadgetCommon.retry} carries n8n's own
+   * `retryOnFail` — the two are mutually exclusive and `analyse()` rejects a node carrying both.
    *
-   * `attempts[0].running` **is** {@link NodeGadget.running}: the first attempt is the ordinary
-   * run, so `X_start` is unchanged and a policy-free node compiles byte-identically.
+   * `attempts[0].running` **is** {@link NodeGadgetCommon.running}: the first attempt is the
+   * ordinary run, so `X_start` is unchanged and a policy-free node compiles byte-identically.
    */
   readonly attempts: readonly AttemptGadget[];
   /** `executionPolicy.timeoutMs`: the per-attempt deadline (IO-013). `null` when undeclared. */
@@ -543,62 +757,8 @@ export interface NodeGadget {
   readonly waiting: Place<unknown>;
   /** `X/stopped`: the destination-node stop, or a cancellation before the run (PlaceRole `stopped`). */
   readonly stopped: Place<unknown>;
-  /**
-   * `T/in_tool` (`tool` form): the dispatch place an agent's `A_dispatch` writes, carrying the
-   * `IExecuteData` n8n's own `addNodeToBeExecuted` built for this action. `null` on every other
-   * form.
-   */
-  readonly inTool: Place<unknown> | null;
-  /**
-   * The agent side, all `null` unless the node has at least one `ai_tool` producer. This is
-   * `references/patterns.md` §5 ("fan-out and join with pending markers"): `routedReq` phases
-   * the budget refund as `routed` does, `queue` carries the undispatched actions, `pending`
-   * counts them structurally so no action decides "am I the last one", `outstanding` is the
-   * pattern's `JOB_PENDING`, `dispatched` its `ROUTING_DONE`, and `rounds` bounds the loop.
-   *
-   * There is no accumulator for collected responses on purpose: `A_collect` consumes
-   * `outstanding` when it fires and would deposit on completion, so `A_resume` could drain
-   * n − 1 markers inside that window and leak one into the next round
-   * (`tests/spikes/agent-round.test.ts` measured it). `A_collect` produces nothing instead.
-   */
-  readonly routedRequest: Place<unknown> | null;
-  /** `A/queue`: one token carrying the actions not yet dispatched, plus the agent's resume entry. */
-  readonly queue: Place<unknown> | null;
-  /**
-   * `A/calls`: the tool-call budget, seeded with `maxToolCalls` and consumed one unit per
-   * `A_dispatch`. Refunded by nothing, so it is monotonically decreasing — which is what keeps
-   * the reachability graph finite, and what lets it explore every round size up to the budget:
-   * the count is the number of dispatch firings, not a token deposit.
-   */
-  readonly calls: Place<unknown> | null;
-  /**
-   * `A/drained`: the round has nothing left to dispatch. Written by `A_done_req` for an empty
-   * request and by `A_dispatch` when it takes the last action off the queue; consumed by
-   * `A_resume`. The queue token and this marker are exclusive.
-   */
-  readonly drained: Place<unknown> | null;
-  /** `A/outstanding`: one unit token per dispatched, uncollected action. */
-  readonly outstanding: Place<unknown> | null;
-  /** `A/response`: one token per tool that finished, deposited by the tool's own `T_done`. */
-  readonly response: Place<unknown> | null;
-  /** `A/dispatched`: the round is open and fully dispatched; carries the agent's resume entry. */
-  readonly dispatched: Place<unknown> | null;
-  /** `A/rounds`: the round budget, seeded with `maxRounds` units and consumed one per `A_resume`. */
-  readonly rounds: Place<unknown> | null;
-  /** Tool nodes this agent may dispatch, in `A_dispatch`'s `xor` branch order. */
-  readonly tools: readonly string[];
-  /** Agents that may dispatch this tool (`tool` form); empty otherwise. */
-  readonly agents: readonly string[];
-  /** `maxRounds` as compiled: the seed of `A/rounds`. `null` when the node is not an agent. */
-  readonly maxRounds: number | null;
-  /** True when `maxRounds` came from a configured fallback rather than the workflow JSON. */
-  readonly roundsAssumed: boolean;
-  /** `maxToolCalls` as compiled: the seed of `A/calls`. `null` when the node is not an agent. */
-  readonly maxToolCalls: number | null;
-  /** True when `maxToolCalls` is the scheduler's default rather than a value the workflow declared. */
-  readonly toolCallsAssumed: boolean;
-  /** Inputs the gadget models, ascending index: connected ones plus dead required ones. Empty for the direct form. */
-  readonly inputs: readonly InputGadget[];
+  /** The agent side; `null` unless the node has at least one `ai_tool` producer. */
+  readonly agent: AgentGadget | null;
   /** Connected outputs, ascending index. Unconnected outputs get no places. */
   readonly outputs: readonly OutputGadget[];
   /** Referenced nodes that carry a read arc on their `done` (and a `start-unmet` twin on their `skipped`). */
@@ -607,6 +767,65 @@ export interface NodeGadget {
   readonly unguardedReferences: readonly string[];
   readonly transitions: NodeGadgetTransitions;
 }
+
+/** The `direct` form: at most one producer edge (README "Per-node gadget"). */
+export interface DirectGadget extends NodeGadgetCommon {
+  readonly form: 'direct';
+  /** The single in-data place (an edge place, or a synthetic `in`). */
+  readonly in: Place<unknown>;
+  /** Tree edge: the in-empty place; `null` for a cycle edge or a synthetic `in`. */
+  readonly inEmpty: Place<unknown> | null;
+  /** The direct form has no join inputs. */
+  readonly inputs: readonly [];
+}
+
+/** The `or` form: one input index with several empty-capable producer edges (README "OR-inputs"). */
+export interface OrGadget extends NodeGadgetCommon {
+  readonly form: 'or';
+  /** The one aggregated input. */
+  readonly inputs: readonly [OrInput];
+}
+
+/** The `join` form: several inputs, or an input with several producers of which at most one can carry an empty (README "Join gadget"). */
+export interface JoinGadget extends NodeGadgetCommon {
+  readonly form: 'join';
+  /** `X/hasdata`: the slot-wide "at least one non-empty" counter. */
+  readonly hasdata: Place<unknown>;
+  /** Inputs the gadget models, ascending index: connected ones plus dead required ones. */
+  readonly inputs: readonly ReadyInput[];
+}
+
+/** The `choose-branch` form: a join whose `requiredInputs` lists inputs that must carry data. */
+export interface ChooseBranchGadget extends NodeGadgetCommon {
+  readonly form: 'choose-branch';
+  /** Inputs the gadget models, ascending index; a required input's slot is enumerated (`ready-split`). */
+  readonly inputs: readonly (ReadyInput | SplitReadyInput)[];
+}
+
+/**
+ * The `tool` form: the node is dispatched by an agent over `ai_tool`, never by a `main`
+ * producer. Its input side is a single `T/in_tool` an agent's `A_dispatch` writes, and its
+ * success branch deposits the agent's `A/response` instead of edge tokens. Everything between
+ * those two ends — start, run, retry, halt, wait, stop, done — is the ordinary gadget.
+ */
+export interface ToolGadget extends NodeGadgetCommon {
+  readonly form: 'tool';
+  /**
+   * `T/in_tool`: the dispatch place an agent's `A_dispatch` writes, carrying the `IExecuteData`
+   * n8n's own `addNodeToBeExecuted` built for this action.
+   */
+  readonly inTool: Place<unknown>;
+  /** Agents that may dispatch this tool. At least one: that is what makes it a tool. */
+  readonly agents: readonly [string, ...string[]];
+  /** A tool has no main input side. */
+  readonly inputs: readonly [];
+}
+
+/** Everything the scheduler needs to drive one node's gadget, discriminated on `form`. */
+export type NodeGadget = DirectGadget | OrGadget | JoinGadget | ChooseBranchGadget | ToolGadget;
+
+/** A gadget whose input side is made of join slots: the two forms {@link readySlot} serves. */
+export type SlottedGadget = JoinGadget | ChooseBranchGadget;
 
 export interface SharedPlaces {
   readonly budget: Place<unknown>;
@@ -647,13 +866,20 @@ export interface NetMapView {
   readonly transitions: readonly TransitionInfo[];
   /** Every place of the flat net. */
   readonly places: readonly PlaceInfo[];
+  /** The gadget of `name`; throws for a node the workflow does not have. */
   node(name: string): NodeGadget;
+  /** Whether `name` is a node of the workflow. */
+  hasNode(name: string): boolean;
+  /** The gadget of `name`, `undefined` for a node the workflow does not have. */
+  tryNode(name: string): NodeGadget | undefined;
   transition(name: string): TransitionInfo | undefined;
   transitionsOf(node: string): readonly TransitionInfo[];
-  transitionFor(node: string, role: TransitionRole, port?: number): TransitionInfo | undefined;
+  /** The first transition of `role` on `node` in declaration order; with `port`, the one carrying it (`route`, `clear`). */
+  transitionFor<R extends TransitionRole>(node: string, role: R, port?: number): TransitionInfoOf<R> | undefined;
   transitionObject(name: string): Transition;
   place(name: string): PlaceInfo | undefined;
   placesOf(node: string): readonly PlaceInfo[];
+  /** The first place of `role` on `node` in declaration order; with `port`, the first carrying it. */
   placeFor(node: string, role: PlaceRole, port?: number): PlaceInfo | undefined;
 }
 
@@ -672,6 +898,167 @@ export interface JoinReadyPlaces {
   readonly node: string;
   readonly inputIndex: number;
   readonly places: readonly Place<unknown>[];
+}
+
+// ==================== analysis vocabulary ====================
+
+/**
+ * How one `$('Y')` reference from `X` compiles (README "Expression references"):
+ * - `read`: `Y` is reachable from the start node on a path avoiding `X` — `X_start` reads
+ *   `Y/done`, the `X_start_unmet` twin reads `Y/skipped`;
+ * - `seeded`: `Y` is unreachable from the start node — the same arcs, and `Y/skipped` is
+ *   seeded in the initial marking so the reference fails exactly as in n8n;
+ * - `unguarded`: `Y` is reachable only through `X` (self, downstream or loop-back) — no
+ *   arc; the expression fails inside the action as in n8n.
+ */
+export type ReferenceKind = 'read' | 'seeded' | 'unguarded';
+
+export interface ResolvedReference {
+  readonly node: string;
+  readonly kind: ReferenceKind;
+}
+
+/** n8n's retry parameters, clamped as `WorkflowExecute.getRetryParams` reads them (see `retryParamsOf`). */
+export interface RetryParams {
+  readonly maxTries: number;
+  readonly waitBetweenTries: number;
+}
+
+/** The fields every resolved step carries. */
+export interface ResolvedStepCommon {
+  /** 1-based: the attempt whose failure this step answers. */
+  readonly attempt: number;
+}
+
+/** A resolved `retry` step. */
+export interface ResolvedRetryStep extends ResolvedStepCommon {
+  readonly action: 'retry';
+  /** The declared delay, `0` when the step named none. */
+  readonly waitMs: number;
+  /** The attempt this step escalates to: `attempt + 1`, which the chain guarantees exists. */
+  readonly nextAttempt: number;
+}
+
+/** A resolved `route` step, its output name resolved to an index. */
+export interface ResolvedRouteStep extends ResolvedStepCommon {
+  readonly action: 'route';
+  /** Always a connected output of the node. */
+  readonly outputIndex: number;
+}
+
+/** A resolved `stop` / `continue` step. */
+export interface ResolvedTerminalStep extends ResolvedStepCommon {
+  readonly action: 'stop' | 'continue';
+}
+
+/** One attempt's step, discriminated on `action`, with its `route` output resolved to an index. */
+export type ResolvedStep = ResolvedRetryStep | ResolvedRouteStep | ResolvedTerminalStep;
+
+/**
+ * A node's resolved failure policy: one step per attempt, the last of them terminal.
+ *
+ * `steps.length` is the number of attempts, so `steps[0]` answers the first run's failure.
+ * `timeoutMs` arms libpetri's output timeout (IO-013) on every attempt, and an expired budget
+ * lands on the same failure place a thrown error does.
+ */
+export interface FailureChain {
+  readonly steps: readonly ResolvedStep[];
+  readonly timeoutMs: number | null;
+}
+
+export interface AnalysedNode {
+  readonly node: NodeDescription;
+  readonly shape: NodeTypeShape;
+  /** Position in canvas order ((y, x) ascending): the declaration order of the gadget. */
+  readonly index: number;
+  /** `shape.outputCount`, plus one for the error output under `continueErrorOutput`. */
+  readonly outputCount: number;
+  readonly errorOutputIndex: number | null;
+  readonly onError: OnError;
+  /** The clamped parameters (`retryParamsOf`) of a `retryOnFail` node; `null` when it declares none. */
+  readonly retry: RetryParams | null;
+  /** Classified expression references (existing nodes), resolver order, no duplicates. */
+  readonly references: readonly ResolvedReference[];
+  /** `requiredInputs` names every input: every connected input must carry data. */
+  readonly allRequired: boolean;
+  /**
+   * Inputs that must carry data for the node to run: every index below `inputCount` when
+   * `allRequired`, the listed indexes for a shorter non-empty array, `null` for the
+   * generic join (`undefined`, `[]`, or a number below `inputCount`).
+   */
+  readonly requiredInputs: readonly number[] | null;
+  /**
+   * Required inputs with no producer below the highest wired index. n8n pads the lower
+   * inputs (`mapConnectionsByDestination`) and never runs such a node; the join gadget
+   * models them as inputs that never receive a token.
+   */
+  readonly deadInputs: readonly number[];
+  /**
+   * The node is dispatched by an agent over `ai_tool` and has no `main` producer, so it
+   * compiles in the `tool` form. A node wired both ways keeps its `main` form and its tool
+   * connections are diagnosed and dropped — the agent then has no branch for it and a dispatch
+   * naming it fails loudly rather than half-working.
+   */
+  readonly isTool: boolean;
+  /** Tool nodes this node may dispatch, canvas order. Non-empty exactly when it is an agent. */
+  readonly tools: readonly string[];
+  /** Seed of `A/rounds` for an agent; `null` when the node is not an agent. */
+  readonly maxRounds: number | null;
+  /** `maxRounds` came from the compiler's fallback, not from the workflow: unbounded for verification. */
+  readonly roundsAssumed: boolean;
+  /** Seed of `A/calls` for an agent; `null` when the node is not an agent. */
+  readonly maxToolCalls: number | null;
+  /** `maxToolCalls` is the scheduler's default rather than a value the workflow declared. */
+  readonly toolCallsAssumed: boolean;
+  /**
+   * The node's resolved `onFailure` chain (ADR 0009), or `null` when it declares none and the
+   * node keeps n8n's `retryOnFail` gadget. Output names are already resolved to indexes here,
+   * so the gadget never re-reads the policy.
+   */
+  readonly failure: FailureChain | null;
+}
+
+export interface MultiProducerInput {
+  readonly node: string;
+  readonly inputIndex: number;
+  readonly producers: number;
+}
+
+export interface WorkflowAnalysis {
+  /** The primary start node (`startNodes[0]`): n8n's `nodeExecutionStack[0]`. */
+  readonly startNode: string;
+  /** Every start node: the primary first, then the others in canvas order, no duplicates. */
+  readonly startNodes: readonly string[];
+  /** Nodes in canvas order. */
+  readonly nodes: readonly AnalysedNode[];
+  readonly byName: ReadonlyMap<string, AnalysedNode>;
+  /** Deduplicated connections in canonical order, ids ascending. */
+  readonly edges: readonly EdgeRef[];
+  readonly incoming: ReadonlyMap<string, readonly EdgeRef[]>;
+  readonly outgoing: ReadonlyMap<string, readonly EdgeRef[]>;
+  /** Node name to SCC index (Tarjan emission order: reverse topological). */
+  readonly sccOf: ReadonlyMap<string, number>;
+  readonly sccs: readonly (readonly string[])[];
+  /** Nodes in a non-trivial SCC or carrying a self-loop: producers "in a cycle". */
+  readonly cyclic: ReadonlySet<string>;
+  /** Nodes reachable from the union of the start nodes. */
+  readonly reachable: ReadonlySet<string>;
+  /** Longest path (tree edges) from any start node's SCC; unreachable nodes get 0. */
+  readonly depth: ReadonlyMap<string, number>;
+  readonly maxDepth: number;
+  readonly hasCycle: boolean;
+  readonly multiProducerInputs: readonly MultiProducerInput[];
+  /** Nodes referenced with a read arc (`read` or `seeded`): their `skipped` place must exist. */
+  readonly referenced: ReadonlySet<string>;
+  /** Referenced nodes unreachable from every start node: `Y/skipped` is seeded. */
+  readonly seededSkipped: ReadonlySet<string>;
+  /** Deduplicated `ai_tool` connections in canonical order (agent canvas index, then tool). */
+  readonly toolConnections: readonly ToolConnection[];
+  /** Agents that may dispatch each tool node. Only tool-form nodes appear. */
+  readonly agentsOf: ReadonlyMap<string, readonly string[]>;
+  /** Any node compiles in the `tool` form: the workflow has agent tool dispatch. */
+  readonly hasAgents: boolean;
+  readonly diagnostics: readonly string[];
 }
 
 export interface CompiledWorkflow {

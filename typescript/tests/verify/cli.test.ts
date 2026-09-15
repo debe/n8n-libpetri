@@ -171,6 +171,18 @@ describe('verify CLI arguments', () => {
     expect(await runCli(['verify', 'wf.json'], badJson)).toBe(2);
     expect(badJson.err).toContain('not valid JSON');
   });
+
+  it('rejects a --node-types file of the wrong shape instead of reading it as "no shapes"', async () => {
+    // Valid JSON that is not a NodeTypesFile used to be cast and silently yield no shapes, so
+    // every port count was guessed and the run looked like one without the flag.
+    for (const text of ['[]', '"types"', '{"types": 5}', '{"nodes": {"If": {"inputCount": "1", "outputCount": 2}}}',
+      '{"types": {"x": {"inputCount": 1}}}']) {
+      const captured = io({ 'wf.json': DIAMOND_JSON, 'types.json': text });
+      expect(await runCli(['verify', 'wf.json', '--node-types', 'types.json'], captured), text).toBe(2);
+      expect(captured.err, text).toContain('--node-types');
+      expect(captured.out, text).toBe('');
+    }
+  });
 });
 
 describeZ3('verify CLI runs', () => {

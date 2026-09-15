@@ -9,10 +9,12 @@
 import { Marking, tokenAt, unitToken, type Place, type Token } from 'libpetri';
 import type { IExecuteData, INode, INodeExecutionData, IRunData, ISourceData, ITaskData, Workflow } from 'n8n-workflow';
 import { entryForEdge } from '../../src/codec.js';
-import { readySlot, type CompiledWorkflow, type InputGadget, type NodeGadget } from '../../src/compiler/index.js';
+import {
+  readyPlacesOf, readySlot, type CompiledWorkflow, type InputGadget, type NodeGadget,
+} from '../../src/compiler/index.js';
 import type { ExecutionDataState } from '../../src/n8n/host.js';
 import {
-  isEdgePayload, isEntryPayload,
+  isEdgePayload, isEntryPayload, isRetryPayload, isStoppedPayload, isWaitingPayload,
   type EdgePayload, type EntryPayload, type RetryPayload, type StoppedPayload, type WaitingPayload,
 } from '../../src/scheduler/index.js';
 import { items } from '../scheduler/support.js';
@@ -188,32 +190,31 @@ export function view(c: CompiledWorkflow, m: Marking, nodeOf: (name: string) => 
       if (isEdgePayload(v)) return { entry: entryForEdge(nodeOf(g.node), inputIndex, v) };
       return { unit: true };
     };
-    for (const t of m.peekTokens(g.waiting)) acts.push({ entry: (t.value as WaitingPayload).executionData });
+    for (const t of m.peekTokens(g.waiting)) if (isWaitingPayload(t.value)) acts.push({ entry: t.value.executionData });
     for (const t of m.peekTokens(g.stopped)) {
-      const v = t.value as StoppedPayload;
-      if (!v.ran) acts.push({ entry: v.executionData });
+      const v = t.value;
+      if (isStoppedPayload(v) && !v.ran) acts.push({ entry: v.executionData });
     }
-    if (g.retry !== null) for (const t of m.peekTokens(g.retry)) acts.push({ entry: (t.value as RetryPayload).executionData });
+    if (g.retry !== null) for (const t of m.peekTokens(g.retry.retry)) if (isRetryPayload(t.value)) acts.push({ entry: t.value.executionData });
     const controls: Record<string, unknown> = { idle: m.tokenCount(g.idle), done: m.tokenCount(g.done) };
-    if (g.tries !== null) controls.tries = m.tokenCount(g.tries);
+    if (g.retry !== null) controls.tries = m.tokenCount(g.retry.tries);
     if (g.form === 'direct') {
-      const idx = c.netMap.place(g.in!.name)?.edge?.inputIndex ?? 0;
-      for (const t of m.peekTokens(g.in!)) acts.push(entryOf(idx, t.value));
+      const idx = c.netMap.place(g.in.name)?.edge?.inputIndex ?? 0;
+      for (const t of m.peekTokens(g.in)) acts.push(entryOf(idx, t.value));
     } else if (g.form === 'or') {
-      const i = g.inputs[0]!;
-      for (const t of m.peekTokens(i.hasdata!)) acts.push(entryOf(i.index, t.value));
-      controls.ready = m.tokenCount(i.ready!);
-      controls.ran = m.tokenCount(i.ran!) > 0;
-    } else {
+      const [i] = g.inputs;
+      for (const t of m.peekTokens(i.hasdata)) acts.push(entryOf(i.index, t.value));
+      controls.ready = m.tokenCount(i.ready);
+      controls.ran = m.tokenCount(i.ran) > 0;
+    } else if (g.form !== 'tool') {
       const queues = g.inputs.map((i) => {
         const q: Array<{ value: unknown; seed: boolean }> = [];
-        for (const p of [i.ready, i.readyData, i.readyEmpty]) {
-          if (p === null) continue;
+        for (const p of readyPlacesOf(i)) {
           // The shared marking's seeded empty of an input fed only by unreachable producers:
           // a control token, not an arrival. The encoder drops a node whose whole join
           // content is seeds (it re-seeds on decode) and a decoded activation replaces it,
           // so the projection has to leave those rows out on both sides.
-          const seed = i.seedEmpty && (p === i.ready || p === i.readyEmpty);
+          const seed = i.seedEmpty && (i.slot === 'ready' ? p === i.ready : p === i.readyEmpty);
           for (const t of m.peekTokens(p)) q.push({ value: t.value, seed: seed && !isEdgePayload(t.value) && !isEntryPayload(t.value) });
         }
         for (const e of i.edges) {
@@ -226,7 +227,7 @@ export function view(c: CompiledWorkflow, m: Marking, nodeOf: (name: string) => 
       const inputCount = Math.max(1, ...g.inputs.map((i) => i.index + 1));
       for (let j = 0; j < depth; j++) {
         const cells = queues.map((q) => q[j]?.value);
-        const entry = cells.find((v) => isEntryPayload(v)) as EntryPayload | undefined;
+        const entry = cells.find((v): v is EntryPayload => isEntryPayload(v));
         if (entry !== undefined) {
           acts.push({ entry: entry.executionData });
           continue;
@@ -252,8 +253,8 @@ export function view(c: CompiledWorkflow, m: Marking, nodeOf: (name: string) => 
       // the activations are equal, and these two controls are comparable only for a node
       // whose pending work is partial slots alone.
       if (!acts.some((a) => typeof a === 'object' && a !== null && 'entry' in a)) {
-        for (const i of g.inputs) controls[`free_${i.index}`] = m.tokenCount(i.free!);
-        if (g.hasdata !== null) controls.hasdata = m.tokenCount(g.hasdata) > 0;
+        for (const i of g.inputs) controls[`free_${i.index}`] = m.tokenCount(i.free);
+        if (g.form === 'join') controls.hasdata = m.tokenCount(g.hasdata) > 0;
       }
     }
     out[g.node] = { activations: acts, controls };
@@ -379,7 +380,7 @@ export function randomExecutionData(rng: Rng, c: CompiledWorkflow, wf: Workflow)
         const sources: SlotSource = Array.from({ length: inputCount }, () => null);
         for (const i of g.inputs) {
           if (j >= lengths.get(i.index)!) continue;
-          const emptyHeadOk = g.form === 'choose-branch' && i.required ? i.readyEmpty !== null : true;
+          const emptyHeadOk = i.slot === 'ready-split' ? i.readyEmpty !== null : true;
           const headOnly = j === 0 && entries === 0 && lengths.get(i.index) === 1;
           // On a seeded input a `[]` head is the seed itself (not written back): data only there.
           if (headOnly && emptyHeadOk && !i.seedEmpty && rng.bool(0.3)) {
@@ -451,54 +452,54 @@ export function randomPauseMarking(rng: Rng, c: CompiledWorkflow, wf: Workflow):
   let paused = false;
   if (rng.bool(0.5)) {
     const g = rng.pick(nodes);
-    const v: WaitingPayload = { executionData: nodeActivation(g) };
+    const v: WaitingPayload = { kind: 'waiting', executionData: nodeActivation(g) };
     addTok(g.waiting, v);
     paused = true;
   }
   for (const g of nodes) {
     if (rng.bool(0.15)) {
-      const v: StoppedPayload = { executionData: nodeActivation(g), ran: false };
+      const v: StoppedPayload = { kind: 'stopped', executionData: nodeActivation(g), ran: false };
       addTok(g.stopped, v);
       paused = true;
     }
     if (g.retry !== null && rng.bool(0.3)) {
       const v: RetryPayload = {
-        executionData: nodeActivation(g), attempt: 1, taskStartedData: { startTime: 1, executionIndex: 0, source: [], hints: [] } as never,
+        kind: 'retry', executionData: nodeActivation(g), attempt: 1, taskStartedData: { startTime: 1, executionIndex: 0, source: [], hints: [] } as never,
         reason: { kind: 'error', error: new Error('retrying') },
       };
-      addTok(g.retry, v);
+      addTok(g.retry.retry, v);
     }
     if (g.form === 'direct') {
-      for (let n = rng.int(3); n > 0; n--) addTok(g.in!, arrival(g));
+      for (let n = rng.int(3); n > 0; n--) addTok(g.in, arrival(g));
     } else if (g.form === 'or') {
-      const i = g.inputs[0]!;
+      const [i] = g.inputs;
       let counted = (nodeLevel.get(g) ?? []).filter((e) => countsTowardRound(c, i, e.source?.main?.[0] ?? null)).length;
       for (let n = rng.int(3); n > 0; n--) {
         const v = arrival(g, i);
-        addTok(i.hasdata!, v);
-        const source = isEdgePayload(v) ? v.source : (v as EntryPayload).executionData.source?.main?.[0] ?? null;
+        addTok(i.hasdata, v);
+        const source = isEdgePayload(v) ? v.source : isEntryPayload(v) ? v.executionData.source?.main?.[0] ?? null : null;
         if (countsTowardRound(c, i, source)) counted++;
       }
-      for (let n = counted + rng.int(2); n > 0; n--) addTok(i.ready!, null);
+      for (let n = counted + rng.int(2); n > 0; n--) addTok(i.ready, null);
       // An acyclic OR node has one round: a recorded run with the round open means it ran in it.
-      if (count(i.ready) > 0 && runData[g.node] !== undefined) addTok(i.ran!, null);
-    } else {
+      if (count(i.ready) > 0 && runData[g.node] !== undefined) addTok(i.ran, null);
+    } else if (g.form !== 'tool') {
       const everyInputWired = g.inputs.every((i) => i.edges.length > 0);
       const headed = new Set<number>();
       if (rng.bool(0.2)) {
         // An entry-headed slot: the entry on the first input's data slot, unit companions elsewhere.
         g.inputs.forEach((i, k) => {
-          m.delete(i.free!);
-          for (const p of [i.ready, i.readyData, i.readyEmpty]) if (p !== null) m.delete(p);
+          m.delete(i.free);
+          for (const p of readyPlacesOf(i)) m.delete(p);
           addTok(readySlot(g, i, 'data'), k === 0 ? entryPayload(activation(g)) : null);
           headed.add(i.index);
         });
-        if (g.hasdata !== null) addTok(g.hasdata, null);
+        if (g.form === 'join') addTok(g.hasdata, null);
       } else {
         const heads = new Map<number, 'none' | 'data' | 'empty' | 'seeded'>();
         for (const i of g.inputs) {
-          const seeded = count(i.ready) + count(i.readyData) + count(i.readyEmpty) > 0;
-          const emptyHeadOk = g.form === 'choose-branch' && i.required ? i.readyEmpty !== null : true;
+          const seeded = readyPlacesOf(i).reduce((n, p) => n + count(p), 0) > 0;
+          const emptyHeadOk = i.slot === 'ready-split' ? i.readyEmpty !== null : true;
           heads.set(i.index, seeded ? 'seeded' : rng.pick(['none', 'data', 'data', emptyHeadOk ? 'empty' : 'none'] as const));
         }
         // A complete all-empty head row is a skip the net fires before it quiesces (only
@@ -513,10 +514,10 @@ export function randomPauseMarking(rng: Rng, c: CompiledWorkflow, wf: Workflow):
           if (head === 'none') continue;
           headed.add(i.index);
           if (head !== 'seeded') {
-            m.delete(i.free!);
+            m.delete(i.free);
             if (head === 'data') {
               addTok(readySlot(g, i, 'data'), edge(freshItems(rng), randomSource(rng, i.edges)));
-              if (g.hasdata !== null) addTok(g.hasdata, null);
+              if (g.form === 'join') addTok(g.hasdata, null);
             } else {
               addTok(readySlot(g, i, 'empty'), null);
             }

@@ -7,7 +7,7 @@
  */
 import { compile, routingActions, type RoutingPolicy } from '../../src/compiler/index.js';
 import { ifBothOutputs, multiProducer } from '../fixtures/workflows.js';
-import { failed, gadget, inhibitorNames, inputNames, outputNames, readNames, runCompiled, started, transitionOf, type Executor } from './support.js';
+import { failed, gadget, inhibitorNames, orInputOf, inputNames, outputNames, readNames, runCompiled, started, transitionOf, type Executor } from './support.js';
 
 const ITEMS = { items: [{ json: { n: 1 } }] };
 
@@ -33,7 +33,7 @@ describe('OR form structure (multiProducer: A and B both feed C.0)', () => {
 
   it('X_skip: exactly(n, ready_i) inhibitor(hasdata_i) inhibitor(ran_i) read(idle) → empties + skipped', () => {
     const skip = transitionOf(c, 'C', 'skip');
-    expect(skip.inputSpecs).toEqual([{ type: 'exactly', count: 2, place: gadget(c, 'C').inputs[0]!.ready }]);
+    expect(skip.inputSpecs).toEqual([{ type: 'exactly', count: 2, place: orInputOf(gadget(c, 'C')).ready }]);
     expect(inhibitorNames(skip)).toEqual(['_halt', 'id:C/hasdata_0', 'id:C/ran_0']);
     expect(readNames(skip)).toEqual(['id:C/idle']);
     expect(outputNames(skip)).toEqual(['id:C/skipped']); // C has no outgoing edges in this fixture
@@ -76,8 +76,8 @@ describe('OR form structure (multiProducer: A and B both feed C.0)', () => {
     const cl = compile(wf);
     const l = gadget(cl, 'L');
     expect(l.form).toBe('or');
-    expect(l.inputs[0]!.round).toBe(2);
-    expect(l.inputs[0]!.edges.map((e) => `${e.edge.from}:${e.edge.kind}`)).toEqual(['IF:tree', 'IF:tree', 'Body:cycle']);
+    expect(orInputOf(l).round).toBe(2);
+    expect(orInputOf(l).edges.map((e) => `${e.edge.from}:${e.edge.kind}`)).toEqual(['IF:tree', 'IF:tree', 'Body:cycle']);
     const bodyArm = cl.netMap.transitionsOf('L').find((t) => t.role === 'arm' && t.edge!.from === 'Body')!;
     expect(outputNames(cl.netMap.transitionObject(bodyArm.name))).toEqual(['id:L/hasdata_0']);
   });

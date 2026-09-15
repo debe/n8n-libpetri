@@ -10,7 +10,7 @@ import { compile } from '../../src/compiler/index.js';
 import {
   chooseBranch, conn, diamond, ifBothOutputs, linear, node, retry, twoTriggers, workflow,
 } from '../fixtures/workflows.js';
-import { gadget } from './support.js';
+import { asSlot, gadget, inOf, inputOf, orInputOf, readyDataOf, readyOf } from './support.js';
 
 function named(m: Map<{ name: string }, unknown[]>): Record<string, number> {
   const out: Record<string, number> = {};
@@ -31,7 +31,7 @@ describe('initialMarking', () => {
       'id:Trigger/idle': 1, 'id:A/idle': 1, 'id:B/idle': 1, 'id:C/idle': 1,
       'id:Trigger/in': 1,
     });
-    const trigger = m.get(gadget(c, 'Trigger').in!)!;
+    const trigger = m.get(inOf(gadget(c, 'Trigger')))!;
     expect(trigger[0]!.value).toBe(items); // by reference: the token holds the real items
     expect(isUnit(m.get(c.netMap.shared.budget)![0]!)).toBe(true);
   });
@@ -100,7 +100,7 @@ describe('initialMarking', () => {
       _budget: 1, 'id:T1/idle': 1, 'id:T2/idle': 1, 'id:Merge/idle': 1,
       'id:Merge/ready_0': 1, 'id:Merge/hasdata': 1, 'id:Merge/ready_1': 1,
     });
-    expect(m.get(merge.inputs[0]!.ready!)![0]!.value).toBe('items');
+    expect(m.get(readyOf(inputOf(merge, 0)))![0]!.value).toBe('items');
   });
 
   it('a choose-branch start node whose other input is fed only by a back edge gets no null key and can fire', () => {
@@ -111,7 +111,7 @@ describe('initialMarking', () => {
     const c = compile(wf);
     const m = gadget(c, 'M');
     expect(m.form).toBe('choose-branch');
-    expect(m.inputs.map((i) => [i.index, i.emptyCapable, i.readyEmpty?.name ?? null])).toEqual([
+    expect(m.inputs.map((i) => [i.index, i.emptyCapable, asSlot(i, 'ready-split').readyEmpty?.name ?? null])).toEqual([
       [0, true, 'id:M/ready_0_empty'], [1, false, null],
     ]);
     const marking = c.initialMarking('items');
@@ -119,7 +119,7 @@ describe('initialMarking', () => {
       _budget: 1, 'id:T/idle': 1, 'id:M/idle': 1, 'id:X/idle': 1,
       'id:M/ready_0_data': 1, 'id:M/ready_1_data': 1,
     });
-    expect(marking.get(m.inputs[0]!.readyData!)![0]!.value).toBe('items');
+    expect(marking.get(readyDataOf(inputOf(m, 0)))![0]!.value).toBe('items');
   });
 
   it('an OR-form start node gets the trigger payload on hasdata_i and a complete round of empties on ready_i', () => {
@@ -135,7 +135,7 @@ describe('initialMarking', () => {
       _budget: 1, 'id:T1/idle': 1, 'id:T2/idle': 1, 'id:C/idle': 1,
       'id:C/ready_0': 2, 'id:C/hasdata_0': 1,
     });
-    expect(m.get(g.inputs[0]!.hasdata!)![0]!.value).toBe('items');
+    expect(m.get(orInputOf(g).hasdata)![0]!.value).toBe('items');
   });
 
   it('an OR input seeds one empty per unreachable tree producer, none when every producer is reachable', () => {
@@ -144,7 +144,7 @@ describe('initialMarking', () => {
       node('T', 'trigger', [0, 0]), node('Other', 'trigger', [0, 200]), node('IF', 'if', [200, 0]), node('C', 'set', [400, 0]),
     ], [conn('T', 0, 'IF', 0), conn('IF', 0, 'C', 0), conn('IF', 1, 'C', 0), conn('Other', 0, 'C', 0)], 'T');
     const c = compile(wf);
-    expect(gadget(c, 'C').inputs[0]!.round).toBe(3);
+    expect(orInputOf(gadget(c, 'C')).round).toBe(3);
     expect(named(c.initialMarking(null))['id:C/ready_0']).toBe(1);
   });
 

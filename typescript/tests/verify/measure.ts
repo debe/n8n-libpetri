@@ -133,10 +133,11 @@ function samplesFor(compiled: CompiledWorkflow): Sample[] {
     // round has capacity n and is the only form where divergence #8 could show up.
     const group = compiled.joinReadyPlaces.find((j) => j.places.includes(joinPlace))!;
     const input = map.node(group.node).inputs.find((i) => i.index === group.inputIndex);
-    const capacity = input?.round ?? 1;
+    const round = input?.slot === 'or' ? input.round : null;
+    const capacity = round ?? 1;
     samples.push({
       family: 'proper-completion',
-      what: `placeBound(${joinPlace.name}, ${capacity}) [arrival bound, ${input?.round === null || input?.round === undefined ? 'join slot' : 'OR round'}]`,
+      what: `placeBound(${joinPlace.name}, ${capacity}) [arrival bound, ${round === null ? 'join slot' : 'OR round'}]`,
       familySize: joinPlaces.length,
       property: placeBound(joinPlace, capacity), sinks: [], conditionalSinks: [],
     });

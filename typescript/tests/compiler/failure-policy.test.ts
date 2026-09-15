@@ -98,8 +98,8 @@ describe('resolution against the node', () => {
   it('resolves a route by output name to its index', () => {
     const a = analyse(withPolicy({ onFailure: RETRY_THEN_ROUTE })).byName.get('A')!;
     expect(a.failure?.steps).toEqual([
-      { attempt: 1, action: 'retry', waitMs: 1000, outputIndex: null },
-      { attempt: 2, action: 'route', waitMs: null, outputIndex: 1 },
+      { attempt: 1, action: 'retry', waitMs: 1000, nextAttempt: 2 },
+      { attempt: 2, action: 'route', outputIndex: 1 },
     ]);
   });
 
@@ -108,6 +108,27 @@ describe('resolution against the node', () => {
     // its token — a policy that silently did nothing would be worse than one that refuses.
     expect(() => analyse(withPolicy({ onFailure: RETRY_THEN_ROUTE }, false)))
       .toThrow(/routes to output 1, which has no connection/);
+  });
+
+  it('reports every route-target fault at once, as a PolicyError', () => {
+    // `parseExecutionPolicy` accumulates its problems; resolution against the node must too,
+    // or an author fixes one target per compile. A hand-built chain (the parser would have
+    // truncated at the first terminal) with two bad targets: one name the type lacks, one
+    // output nobody wired.
+    const wf = withPolicy({
+      onFailure: [{ action: 'route', output: 'nope' }, { action: 'route', output: 1 }],
+    }, false);
+    let caught: unknown;
+    try {
+      analyse(wf);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(PolicyError);
+    const problems = (caught as PolicyError).problems;
+    expect(problems).toHaveLength(2);
+    expect(problems[0]).toMatch(/onFailure\[0\] routes to output 'nope', which this node type does not name/);
+    expect(problems[1]).toMatch(/onFailure\[1\] routes to output 1, which has no connection/);
   });
 
   it('refuses a route to a name the node type does not have', () => {

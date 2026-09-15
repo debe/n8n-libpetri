@@ -7,7 +7,10 @@ import {
   BitmapNetExecutor, InMemoryEventStore, PrecompiledNetExecutor, enumerateBranches,
   type Marking, type NetEvent, type Place, type Token, type Transition, type TransitionFailed,
 } from 'libpetri';
-import type { CompiledWorkflow, NodeGadget } from '../../src/compiler/index.js';
+import type {
+  AgentGadget, CompiledWorkflow, InputGadget, NodeGadget, OrInput, RetryGadget, SplitOutput, TransitionInfoOf,
+  TransitionRole,
+} from '../../src/compiler/index.js';
 
 export type Executor = 'precompiled' | 'bitmap';
 
@@ -89,6 +92,106 @@ export function gadget(c: CompiledWorkflow, node: string): NodeGadget {
   return c.netMap.node(node);
 }
 
+/** The transition `name`, which the test knows carries `role`. */
+export function transitionInfoOf<R extends TransitionRole>(c: CompiledWorkflow, name: string, role: R): TransitionInfoOf<R> {
+  const info = c.netMap.transition(name);
+  if (info === undefined) throw new Error(`no transition '${name}'`);
+  if (info.role !== role) throw new Error(`transition '${name}' has role '${info.role}', not '${role}'`);
+  return info as TransitionInfoOf<R>;
+}
+
+// ---- narrowing: a test that reads a form-specific place says which form it expects ----
+
+export function asForm<F extends NodeGadget['form']>(g: NodeGadget, form: F): Extract<NodeGadget, { form: F }> {
+  if (g.form !== form) throw new Error(`node '${g.node}' compiled in form '${g.form}', not '${form}'`);
+  return g as Extract<NodeGadget, { form: F }>;
+}
+
+/** The direct form's `X/in`. */
+export function inOf(g: NodeGadget): Place<unknown> {
+  return asForm(g, 'direct').in;
+}
+
+/** The direct form's `X/in_empty`, which the test knows exists (a tree edge feeds it). */
+export function inEmptyOf(g: NodeGadget): Place<unknown> {
+  const p = asForm(g, 'direct').inEmpty;
+  if (p === null) throw new Error(`node '${g.node}' has no in_empty place`);
+  return p;
+}
+
+/** The OR form's one input. */
+export function orInputOf(g: NodeGadget): OrInput {
+  return asForm(g, 'or').inputs[0];
+}
+
+/** `g.inputs[k]`, which the test knows exists. */
+export function inputOf(g: NodeGadget, k: number): InputGadget {
+  const i = g.inputs[k];
+  if (i === undefined) throw new Error(`node '${g.node}' has no input #${k}`);
+  return i;
+}
+
+export function asSlot<S extends InputGadget['slot']>(i: InputGadget, slot: S): Extract<InputGadget, { slot: S }> {
+  if (i.slot !== slot) throw new Error(`input ${i.index} has slot '${i.slot}', not '${slot}'`);
+  return i as Extract<InputGadget, { slot: S }>;
+}
+
+/** The single `ready` place of an OR or generic join input. */
+export function readyOf(i: InputGadget): Place<unknown> {
+  if (i.slot === 'ready-split') throw new Error(`input ${i.index} is enumerated: ready_data / ready_empty`);
+  return i.ready;
+}
+
+/** `X/free_i` of a join input; the OR form has no slot to free. */
+export function freeOf(i: InputGadget): Place<unknown> {
+  if (i.slot === 'or') throw new Error(`input ${i.index} is an OR input: no free_${i.index}`);
+  return i.free;
+}
+
+/** `X/ready_i_data` of an enumerated (required choose-branch) input. */
+export function readyDataOf(i: InputGadget): Place<unknown> {
+  return asSlot(i, 'ready-split').readyData;
+}
+
+/** `X/ready_i_empty` of an enumerated input, which the test knows exists. */
+export function readyEmptyOf(i: InputGadget): Place<unknown> {
+  const p = asSlot(i, 'ready-split').readyEmpty;
+  if (p === null) throw new Error(`input ${i.index} has no ready_${i.index}_empty place`);
+  return p;
+}
+
+/** `X/hasdata` of the join form. */
+export function hasdataOf(g: NodeGadget): Place<unknown> {
+  return asForm(g, 'join').hasdata;
+}
+
+/** `T/in_tool` of the tool form. */
+export function inToolOf(g: NodeGadget): Place<unknown> {
+  return asForm(g, 'tool').inTool;
+}
+
+/** `X/routed` of a node that routes inside `X_run`. */
+export function routedOf(g: NodeGadget): Place<unknown> {
+  if (g.routing.kind !== 'collapsed') throw new Error(`node '${g.node}' routes per output`);
+  return g.routing.routed;
+}
+
+/** The outputs of a node that routes per output, with their `ok_o` / `routed_o`. */
+export function splitOutputsOf(g: NodeGadget): readonly SplitOutput[] {
+  if (g.routing.kind !== 'split') throw new Error(`node '${g.node}' routes inside X_run`);
+  return g.routing.outputs;
+}
+
+export function agentOf(g: NodeGadget): AgentGadget {
+  if (g.agent === null) throw new Error(`node '${g.node}' is not an agent`);
+  return g.agent;
+}
+
+export function retryOf(g: NodeGadget): RetryGadget {
+  if (g.retry === null) throw new Error(`node '${g.node}' has no retry gadget`);
+  return g.retry;
+}
+
 /** The edge slot of `from.outputIndex -> to.inputIndex` as seen from the consumer's gadget. */
 export function edgeSlot(c: CompiledWorkflow, from: string, outputIndex: number, to: string, inputIndex: number) {
   const g = gadget(c, to);
@@ -133,10 +236,10 @@ export function tokenCounts(m: Marking, places: readonly Place<unknown>[]): numb
  */
 export function successBranches(c: CompiledWorkflow, node: string, port?: number): string[][] {
   const g = gadget(c, node);
-  const t = g.splitRouting ? transitionOf(c, node, 'route', port) : transitionOf(c, node, 'run');
+  const t = g.routing.kind === 'split' ? transitionOf(c, node, 'route', port) : transitionOf(c, node, 'run');
   const branches = enumerateBranches(t.outputSpec!).map((b) => [...b].map((p) => p.name).sort());
-  if (g.splitRouting) return branches;
-  return branches.filter((b) => b.includes(g.routed!.name));
+  if (g.routing.kind === 'split') return branches;
+  return branches.filter((b) => b.includes(routedOf(g).name));
 }
 
 /**
@@ -145,6 +248,9 @@ export function successBranches(c: CompiledWorkflow, node: string, port?: number
  */
 export function routingPlaces(c: CompiledWorkflow, node: string, port?: number): string[] {
   const g = gadget(c, node);
-  const skip = new Set([g.idle.name, g.routed?.name, ...g.outputs.map((o) => o.routed?.name)]);
+  const skip = new Set([
+    g.idle.name,
+    ...(g.routing.kind === 'collapsed' ? [g.routing.routed.name] : g.routing.outputs.map((o) => o.routed.name)),
+  ]);
   return [...new Set(successBranches(c, node, port).flat())].filter((n) => !skip.has(n)).sort();
 }

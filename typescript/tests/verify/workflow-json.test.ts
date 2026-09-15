@@ -10,6 +10,7 @@ import { analyse, compile } from '../../src/compiler/index.js';
 import {
   BUILT_IN_SHAPES, connectionsOf, describeWorkflowJson, looksLikeTrigger, parseWorkflowJson, pickStartNode,
 } from '../../src/verify/index.js';
+import { agentOf } from '../compiler/support.js';
 
 /** A minimal but realistic export: a webhook, an IF, two branches and a Merge. */
 const EXPORT = {
@@ -171,12 +172,12 @@ describe('workflow JSON adapter', () => {
     expect(warnings.some((w) => w.includes('error output'))).toBe(true);
   });
 
-  it('drops connections naming a node the workflow does not contain, with a warning', () => {
+  it('drops connections naming a node the workflow does not contain, with a diagnostic', () => {
     const names = new Set(['A']);
-    const { connections, warnings } = connectionsOf(
+    const { connections, diagnostics } = connectionsOf(
       { A: { main: [[{ node: 'Missing', type: 'main', index: 0 }]] }, Ghost: { main: [[]] } }, names);
     expect(connections).toEqual([]);
-    expect(warnings).toHaveLength(2);
+    expect(diagnostics).toHaveLength(2);
   });
 
   it('picks a trigger over another unfed node, and honours an explicit start node', () => {
@@ -232,6 +233,48 @@ describe('workflow JSON adapter', () => {
   });
 });
 
+describe('what is a shape guess and what is not', () => {
+  it('a dangling connection is a diagnostic on the description, never a guessed shape', () => {
+    // `warnings` is the CLI's "the compiled net may differ from the workflow" list, and the
+    // report renders it as "Guessed node shapes (n)". A dropped connection is not a guess.
+    const raw = {
+      ...EXPORT,
+      connections: {
+        ...EXPORT.connections,
+        Left: { main: [[{ node: 'Merge', type: 'main', index: 0 }, { node: 'Ghost', type: 'main', index: 0 }]] },
+      },
+    };
+    const { description, warnings } = describeWorkflowJson(raw, {
+      nodeTypes: { types: { 'n8n-nodes-base.set@3': { inputCount: 1, outputCount: 1 }, 'n8n-nodes-base.webhook': { inputCount: 0, outputCount: 1 } } },
+    });
+    expect(warnings).toEqual([]);
+    expect(description.diagnostics?.some((d) => d.includes("'Ghost'") && d.includes('dropped'))).toBe(true);
+  });
+
+  it('gives an id-less node a prefix no other node already owns, even a literal n<index>', () => {
+    const { description } = describeWorkflowJson({
+      nodes: [
+        { id: 'n1', name: 'A', type: 'x', position: [0, 0] },
+        { name: 'B', type: 'x', position: [0, 1] },
+      ],
+      connections: {},
+    });
+    expect(description.nodes.map((n) => n.id)).toEqual(['n1', 'n2']);
+    expect(() => compile(description)).not.toThrow();
+  });
+
+  it('--start must name a node the scheduler runs, not an annotation', () => {
+    const raw = {
+      nodes: [
+        { id: 't', name: 'Trig', type: 'custom.somethingTrigger', typeVersion: 1, position: [0, 0] },
+        { id: 'n', name: 'Note', type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [0, 100] },
+      ],
+      connections: {},
+    };
+    expect(() => describeWorkflowJson(raw, { startNode: 'Note' })).toThrow(/not a node/);
+  });
+});
+
 describe('agent tool dispatch in an exported workflow', () => {
   // The scheduler reads `ai_tool` off a live `Workflow`; the CLI reads the JSON export. If only
   // one of them sees the tool wiring, `verify` analyses a *different net* from the one the
@@ -270,7 +313,7 @@ describe('agent tool dispatch in an exported workflow', () => {
     const agent = c.netMap.node('AI Agent');
     expect(agent.transitions.dispatch).not.toBeNull();
     expect(agent.transitions.resume).not.toBeNull();
-    expect(c.initialMarking([{ json: {} }]).get(agent.rounds!)).toHaveLength(4);
+    expect(c.initialMarking([{ json: {} }]).get(agentOf(agent).rounds)).toHaveLength(4);
   });
 
   it('says so when maxIterations is an expression it cannot read', () => {

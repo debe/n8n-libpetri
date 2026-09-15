@@ -91,11 +91,12 @@ import {
   SubnetDef, Transition, place, one, all, exactly, and, xor, outPlace, delayed, timeout, forwardInput,
 } from 'libpetri';
 import type { Out, Place, PortDirection } from 'libpetri';
-import type { AnalysedNode, WorkflowAnalysis } from './graph.js';
+import { assertNever } from '../internal/assert.js';
 import { joinFormOf } from './graph.js';
 import type {
-  AttemptGadget, EdgeRef, EdgeSlot, InputGadget, NodeGadget, OutputGadget, PlaceInfo, PlaceRole,
-  SharedPlaces, TransitionInfo, TransitionRole, Variant,
+  AgentGadget, AnalysedNode, AttemptGadget, EdgeRef, EdgeSlot, InputGadgetCommon, JoinForm, NodeGadget,
+  NodeGadgetCommon, OrInput, OrSlot, OutputGadgetCommon, PlaceInfo, PlaceRole, ReadyInput, ReadySlot, RetryGadget,
+  RoutingGadget, SharedPlaces, SplitReadyInput, SplitReadySlot, TransitionInfo, Variant, WorkflowAnalysis,
 } from './types.js';
 
 /**
@@ -203,16 +204,44 @@ export interface GadgetBuild {
   materialise(lookup: (finalName: string) => Place<unknown>): NodeGadget;
 }
 
+/**
+ * The `ready` place a join input's arrival of `variant` lands on: `X/ready_i` for the
+ * generic join and for a non-required choose-branch input (one place for both variants),
+ * `X/ready_i_data` / `X/ready_i_empty` for a required choose-branch input. Throws a named
+ * compile error instead of yielding a `null` marking key when the enumerated form has no
+ * place for the variant (an input fed only by cycle edges has no `ready_i_empty`;
+ * `initialMarking` never asks for it, since an input seeded empty has only unreachable —
+ * hence tree-edge — producers).
+ *
+ * The one copy of the rule: the gadget applies it to its own local places before
+ * composition, the compiler, the codec and the scheduler to the canonical ones afterwards.
+ */
+export function readySlot(
+  g: { readonly node: string; readonly form: JoinForm },
+  i: Pick<InputGadgetCommon, 'index' | 'emptyCapable'> & (ReadySlot | SplitReadySlot),
+  variant: Variant,
+): Place<unknown> {
+  const p = i.slot === 'ready-split' ? (variant === 'data' ? i.readyData : i.readyEmpty) : i.ready;
+  if (p === null) {
+    throw new Error(
+      `compile: node '${g.node}' input ${i.index} has no ready_${i.index}_${variant} place to seed ` +
+      `(form '${g.form}', emptyCapable ${i.emptyCapable})`);
+  }
+  return p;
+}
+
 /** `and` with one child collapses to the child (IO-011 requires ≥ 1 child). */
 function andOf(children: readonly Out[]): Out {
-  if (children.length === 0) throw new Error('internal: andOf() with no children');
-  return children.length === 1 ? children[0]! : and(...children);
+  const [first, ...rest] = children;
+  if (first === undefined) throw new Error('internal: andOf() with no children');
+  return rest.length === 0 ? first : and(first, ...rest);
 }
 
 /** `xor` with one child collapses to the child (IO-012 requires ≥ 2 children). */
 function xorOf(children: readonly Out[]): Out {
-  if (children.length === 0) throw new Error('internal: xorOf() with no children');
-  return children.length === 1 ? children[0]! : xor(...children);
+  const [first, ...rest] = children;
+  if (first === undefined) throw new Error('internal: xorOf() with no children');
+  return rest.length === 0 ? first : xor(first, ...rest);
 }
 
 /** Every assignment over `choices[i]` per input, in lexicographic order with `data` first. */
@@ -225,6 +254,9 @@ function combinations(choices: readonly (readonly Variant[])[]): Variant[][] {
   }
   return acc;
 }
+
+/** A {@link TransitionInfo} member without the fields the gadget fills in itself (distributive over the union). */
+type TransitionBody = TransitionInfo extends infer T ? (T extends TransitionInfo ? Omit<T, 'name' | 'node'> : never) : never;
 
 interface PortDecl {
   readonly name: string;
@@ -240,29 +272,74 @@ interface LocalEdge {
   readonly emptyFinal: string | null;
 }
 
-interface LocalInput {
-  readonly index: number;
-  readonly edges: readonly LocalEdge[];
-  readonly wired: boolean;
-  readonly required: boolean;
-  readonly free: Place<unknown> | null;
-  readonly ready: Place<unknown> | null;
-  readonly readyData: Place<unknown> | null;
-  readonly readyEmpty: Place<unknown> | null;
-  readonly hasdata: Place<unknown> | null;
-  readonly ran: Place<unknown> | null;
-  readonly round: number | null;
-  readonly emptyCapable: boolean;
-  readonly seedEmpty: boolean;
-  readonly unreachableEdges: number;
-}
+/** The common input fields over local (subnet) edge places; the slot places are the local ones too. */
+type LocalInputCommon = Omit<InputGadgetCommon, 'edges'> & { readonly edges: readonly LocalEdge[] };
+type LocalOrInput = LocalInputCommon & OrSlot;
+type LocalReadyInput = LocalInputCommon & ReadySlot;
+type LocalSplitReadyInput = LocalInputCommon & SplitReadySlot;
+type LocalJoinInput = LocalReadyInput | LocalSplitReadyInput;
 
-interface LocalOutput {
+/** The input side, by form, over local places (the shape {@link NodeGadget} takes after composition). */
+type LocalInputSide =
+  | { readonly form: 'direct'; readonly in: Place<unknown>; readonly inEmpty: Place<unknown> | null; readonly inFinal: string; readonly inEmptyFinal: string | null }
+  | { readonly form: 'or'; readonly input: LocalOrInput }
+  | { readonly form: 'join'; readonly hasdata: Place<unknown>; readonly inputs: readonly LocalReadyInput[] }
+  | { readonly form: 'choose-branch'; readonly inputs: readonly LocalJoinInput[] }
+  | { readonly form: 'tool'; readonly inTool: Place<unknown> };
+
+interface LocalOutputCommon {
   readonly index: number;
   readonly edges: readonly LocalEdge[];
   readonly nil: Place<unknown> | null;
-  readonly ok: Place<unknown> | null;
-  readonly routed: Place<unknown> | null;
+}
+type LocalCollapsedOutput = LocalOutputCommon & { readonly routing: 'collapsed' };
+type LocalSplitOutput = LocalOutputCommon & { readonly routing: 'split'; readonly ok: Place<unknown>; readonly routed: Place<unknown> };
+type LocalOutput = LocalCollapsedOutput | LocalSplitOutput;
+type LocalRouting =
+  | { readonly kind: 'collapsed'; readonly routed: Place<unknown>; readonly outputs: readonly LocalCollapsedOutput[] }
+  | { readonly kind: 'split'; readonly outputs: readonly LocalSplitOutput[] };
+
+interface LocalAttemptCommon {
+  readonly index: number;
+  readonly running: Place<unknown>;
+  readonly failed: Place<unknown>;
+  readonly timedOut: Place<unknown> | null;
+}
+type LocalAttempt = LocalAttemptCommon & (
+  | { readonly action: 'retry'; readonly waitMs: number; readonly next: Place<unknown> }
+  | { readonly action: 'route'; readonly outputIndex: number }
+  | { readonly action: 'stop' | 'continue' }
+);
+
+interface LocalRetry {
+  readonly retry: Place<unknown>;
+  readonly tries: Place<unknown>;
+  readonly maxTries: number;
+  readonly waitBetweenTries: number;
+}
+
+interface LocalAgent {
+  readonly routedRequest: Place<unknown>;
+  readonly queue: Place<unknown>;
+  readonly calls: Place<unknown>;
+  readonly drained: Place<unknown>;
+  readonly outstanding: Place<unknown>;
+  readonly dispatched: Place<unknown>;
+  readonly rounds: Place<unknown>;
+  readonly response: Place<unknown>;
+  readonly tools: readonly [string, ...string[]];
+  readonly maxRounds: number;
+  readonly roundsAssumed: boolean;
+  readonly maxToolCalls: number;
+  readonly toolCallsAssumed: boolean;
+}
+
+/** `analysis.startNodes` as a set, built once per analysis: every gadget of one compile asks it. */
+const startNodeSets = new WeakMap<WorkflowAnalysis, ReadonlySet<string>>();
+function startNodeSetOf(analysis: WorkflowAnalysis): ReadonlySet<string> {
+  let set = startNodeSets.get(analysis);
+  if (set === undefined) startNodeSets.set(analysis, set = new Set(analysis.startNodes));
+  return set;
 }
 
 export function buildNodeGadget(
@@ -278,6 +355,7 @@ export function buildNodeGadget(
   const depth = analysis.depth.get(name) ?? 0;
   const cyclic = analysis.cyclic.has(name);
   const reachable = analysis.reachable.has(name);
+  const isStartNode = startNodeSetOf(analysis).has(name);
   const incoming = analysis.incoming.get(name) ?? [];
   const outgoing = analysis.outgoing.get(name) ?? [];
   const form = joinFormOf(a, incoming);
@@ -288,9 +366,10 @@ export function buildNodeGadget(
 
   // Agent tool dispatch (README "Agent tool dispatch"). `tools` is non-empty exactly on an
   // agent; `agents` exactly on a tool, whose form is `'tool'`.
-  const tools = a.tools;
-  const isAgent = tools.length > 0;
-  const agents = analysis.agentsOf.get(name) ?? [];
+  const [firstTool, ...moreTools] = a.tools;
+  const tools: readonly [string, ...string[]] | null = firstTool === undefined ? null : [firstTool, ...moreTools];
+  const [firstAgent, ...moreAgents] = analysis.agentsOf.get(name) ?? [];
+  const agents: readonly [string, ...string[]] | null = firstAgent === undefined ? null : [firstAgent, ...moreAgents];
 
   const portDecls: PortDecl[] = [];
   const ports = new Map<string, Place<unknown>>();
@@ -311,8 +390,8 @@ export function buildNodeGadget(
   const hostOwned = (finalName: string, role: PlaceRole, portIndex: number | null, extra?: Partial<PendingPlace>): void => {
     pending.push({ name: finalName, role, node: name, port: portIndex, ...extra });
   };
-  const tinfo = (local: string, role: TransitionRole, extra?: Partial<TransitionInfo>): void => {
-    transitions.push({ name: F(local), role, node: name, ...extra });
+  const tinfo = (local: string, info: TransitionBody): void => {
+    transitions.push({ name: F(local), node: name, ...info });
   };
 
   // ---- shared places as ports ----
@@ -333,107 +412,128 @@ export function buildNodeGadget(
   const stopped = internal('stopped', 'stopped', null);
 
   // ---- input side ----
-  let inLocal: Place<unknown> | null = null;
-  let inEmptyLocal: Place<unknown> | null = null;
-  let inFinal: string | null = null;
-  let inEmptyFinal: string | null = null;
-  const inputs: LocalInput[] = [];
-
-  // `T/in_tool`: the tool's only input, written by every agent that can dispatch it. The tool
-  // owns the place and exposes it; each agent binds an output port to it, the way a referencing
-  // node binds a read port to `Y/done`.
-  let inToolLocal: Place<unknown> | null = null;
-  if (form === 'tool') {
-    inToolLocal = internal('in_tool', 'in-tool', null);
-    portDecls.push({ name: 'in_tool', local: inToolLocal, direction: 'input' });
-  }
-
-  if (form === 'tool') {
-    // No main producer, so no edge places and no join slots: the input side is `in_tool`.
-  } else if (form === 'direct') {
-    const edge = incoming[0];
-    inLocal = place<unknown>('in');
-    if (edge !== undefined) {
-      const slot = edgeSlots.get(edge.id)!;
-      port('in', inLocal, slot.data, 'input');
-      inFinal = slot.data.name;
-      hostOwned(inFinal, 'in-data', edge.inputIndex, { edge });
+  /** The producer edges of input `i` as local places, their host places declared and mapped. */
+  const edgesOf = (i: number): { edges: LocalEdge[]; unreachableEdges: number; allUnreachable: boolean } => {
+    const edges: LocalEdge[] = [];
+    let unreachableEdges = 0;
+    let allUnreachable = true;
+    for (const e of incoming) {
+      if (e.inputIndex !== i) continue;
+      const producerReachable = analysis.reachable.has(e.from);
+      if (producerReachable) allUnreachable = false;
+      const slot = edgeSlots.get(e.id);
+      if (slot === undefined) throw new Error(`internal: node '${name}' has no host slot for edge ${e.id}`);
+      const data = place<unknown>(`in${i}_e${e.id}`);
+      port(`in${i}_e${e.id}`, data, slot.data, 'input');
+      hostOwned(slot.data.name, 'edge-data', i, { edge: e });
+      let empty: Place<unknown> | null = null;
       if (slot.empty !== null) {
-        inEmptyLocal = place<unknown>('in_empty');
-        port('in_empty', inEmptyLocal, slot.empty, 'input');
-        inEmptyFinal = slot.empty.name;
-        hostOwned(inEmptyFinal, 'in-empty', edge.inputIndex, { edge });
+        empty = place<unknown>(`in${i}_e${e.id}_empty`);
+        port(`in${i}_e${e.id}_empty`, empty, slot.empty, 'input');
+        hostOwned(slot.empty.name, 'edge-empty', i, { edge: e });
+        if (!producerReachable) unreachableEdges++;
       }
-    } else {
-      if (syntheticIn === null) throw new Error(`internal: node '${name}' has no producer and no synthetic in place`);
-      port('in', inLocal, syntheticIn, 'input');
-      inFinal = syntheticIn.name;
-      hostOwned(inFinal, 'in-data', 0);
+      edges.push({ edge: e, data, empty, dataFinal: slot.data.name, emptyFinal: slot.empty?.name ?? null });
     }
-  } else {
-    const indexes = [...new Set([...incoming.map((e) => e.inputIndex), ...a.deadInputs])].sort((x, y) => x - y);
-    for (const i of indexes) {
-      const edges: LocalEdge[] = [];
-      let unreachableEdges = 0;
-      let allUnreachable = true;
-      for (const e of incoming) {
-        if (e.inputIndex !== i) continue;
-        const producerReachable = analysis.reachable.has(e.from);
-        if (producerReachable) allUnreachable = false;
-        const slot = edgeSlots.get(e.id)!;
-        const data = place<unknown>(`in${i}_e${e.id}`);
-        port(`in${i}_e${e.id}`, data, slot.data, 'input');
-        hostOwned(slot.data.name, 'edge-data', i, { edge: e });
-        let empty: Place<unknown> | null = null;
+    return { edges, unreachableEdges, allUnreachable };
+  };
+  const inputCommon = (i: number): LocalInputCommon => {
+    const { edges, unreachableEdges, allUnreachable } = edgesOf(i);
+    const wired = edges.length > 0;
+    return {
+      index: i, edges, wired, required: required.has(i),
+      emptyCapable: edges.some((e) => e.empty !== null),
+      seedEmpty: reachable && wired && allUnreachable, unreachableEdges,
+    };
+  };
+  /** Modelled input indexes, ascending: connected ones plus dead required ones. */
+  const inputIndexes = (): number[] =>
+    [...new Set([...incoming.map((e) => e.inputIndex), ...a.deadInputs])].sort((x, y) => x - y);
+
+  let side: LocalInputSide;
+  switch (form) {
+    case 'tool': {
+      // `T/in_tool`: the tool's only input, written by every agent that can dispatch it. The tool
+      // owns the place and exposes it; each agent binds an output port to it, the way a referencing
+      // node binds a read port to `Y/done`. No main producer, so no edge places and no join slots.
+      const inTool = internal('in_tool', 'in-tool', null);
+      portDecls.push({ name: 'in_tool', local: inTool, direction: 'input' });
+      side = { form, inTool };
+      break;
+    }
+    case 'direct': {
+      const edge = incoming[0];
+      const inLocal = place<unknown>('in');
+      if (edge !== undefined) {
+        const slot = edgeSlots.get(edge.id);
+        if (slot === undefined) throw new Error(`internal: node '${name}' has no host slot for edge ${edge.id}`);
+        port('in', inLocal, slot.data, 'input');
+        hostOwned(slot.data.name, 'in-data', edge.inputIndex, { edge });
+        let inEmpty: Place<unknown> | null = null;
         if (slot.empty !== null) {
-          empty = place<unknown>(`in${i}_e${e.id}_empty`);
-          port(`in${i}_e${e.id}_empty`, empty, slot.empty, 'input');
-          hostOwned(slot.empty.name, 'edge-empty', i, { edge: e });
-          if (!producerReachable) unreachableEdges++;
+          inEmpty = place<unknown>('in_empty');
+          port('in_empty', inEmpty, slot.empty, 'input');
+          hostOwned(slot.empty.name, 'in-empty', edge.inputIndex, { edge });
         }
-        edges.push({ edge: e, data, empty, dataFinal: slot.data.name, emptyFinal: slot.empty?.name ?? null });
-      }
-      const wired = edges.length > 0;
-      const emptyCapable = edges.some((e) => e.empty !== null);
-      const isRequired = required.has(i);
-      let free: Place<unknown> | null = null;
-      let ready: Place<unknown> | null = null;
-      let readyData: Place<unknown> | null = null;
-      let readyEmpty: Place<unknown> | null = null;
-      let hasdataI: Place<unknown> | null = null;
-      let ran: Place<unknown> | null = null;
-      let round: number | null = null;
-      if (form === 'or') {
-        ready = internal(`ready_${i}`, 'ready', i);
-        hasdataI = internal(`hasdata_${i}`, 'hasdata', i);
-        ran = internal(`ran_${i}`, 'ran', i);
-        round = edges.filter((e) => e.empty !== null).length;
+        side = { form, in: inLocal, inEmpty, inFinal: slot.data.name, inEmptyFinal: slot.empty?.name ?? null };
       } else {
-        free = internal(`free_${i}`, 'free', i);
-        if (form === 'choose-branch' && isRequired) {
-          readyData = internal(`ready_${i}_data`, 'ready', i, { variant: 'data' });
-          if (emptyCapable) {
-            readyEmpty = internal(`ready_${i}_empty`, 'ready', i, { variant: 'empty' });
-          }
-        } else {
-          ready = internal(`ready_${i}`, 'ready', i);
-        }
+        if (syntheticIn === null) throw new Error(`internal: node '${name}' has no producer and no synthetic in place`);
+        port('in', inLocal, syntheticIn, 'input');
+        hostOwned(syntheticIn.name, 'in-data', 0);
+        side = { form, in: inLocal, inEmpty: null, inFinal: syntheticIn.name, inEmptyFinal: null };
       }
-      inputs.push({
-        index: i, edges, wired, required: isRequired, free, ready, readyData, readyEmpty,
-        hasdata: hasdataI, ran, round, emptyCapable,
-        seedEmpty: reachable && wired && allUnreachable, unreachableEdges,
-      });
+      break;
     }
+    case 'or': {
+      // `joinFormOf` chooses the OR form for exactly one input index with several tree edges.
+      const [i, ...more] = inputIndexes();
+      if (i === undefined || more.length > 0) throw new Error(`internal: OR-form node '${name}' models ${more.length + (i === undefined ? 0 : 1)} inputs`);
+      const common = inputCommon(i);
+      const input: LocalOrInput = {
+        ...common, slot: 'or',
+        ready: internal(`ready_${i}`, 'ready', i),
+        hasdata: internal(`hasdata_${i}`, 'hasdata', i),
+        ran: internal(`ran_${i}`, 'ran', i),
+        round: common.edges.filter((e) => e.empty !== null).length,
+      };
+      side = { form, input };
+      break;
+    }
+    case 'join': {
+      const inputs: LocalReadyInput[] = inputIndexes().map((i) => ({
+        ...inputCommon(i), slot: 'ready', free: internal(`free_${i}`, 'free', i), ready: internal(`ready_${i}`, 'ready', i),
+      }));
+      side = { form, hasdata: internal('hasdata', 'hasdata', null), inputs };
+      break;
+    }
+    case 'choose-branch': {
+      const inputs: LocalJoinInput[] = inputIndexes().map((i): LocalJoinInput => {
+        const common = inputCommon(i);
+        const free = internal(`free_${i}`, 'free', i);
+        if (common.required) {
+          const readyData = internal(`ready_${i}_data`, 'ready', i, { variant: 'data' });
+          const readyEmpty = common.emptyCapable ? internal(`ready_${i}_empty`, 'ready', i, { variant: 'empty' }) : null;
+          return { ...common, slot: 'ready-split', free, readyData, readyEmpty };
+        }
+        return { ...common, slot: 'ready', free, ready: internal(`ready_${i}`, 'ready', i) };
+      });
+      side = { form, inputs };
+      break;
+    }
+    default: return assertNever(form, 'join form');
   }
-  const hasdata = form === 'join' ? internal('hasdata', 'hasdata', null) : null;
+  /** The join-slot inputs (empty for the direct, OR and tool forms), for the refunds every start / skip writes. */
+  const joinInputs: readonly LocalJoinInput[] = side.form === 'join' || side.form === 'choose-branch' ? side.inputs : [];
+  /** Every modelled input, whichever slot shape: the arms and the gadget's `inputs`. */
+  const allInputs: readonly (LocalOrInput | LocalJoinInput)[] = side.form === 'or' ? [side.input] : joinInputs;
+  const slotOf = (i: LocalJoinInput, variant: Variant): Place<unknown> => readySlot({ node: name, form }, i, variant);
 
   // ---- skip exists iff an empty token can arrive where it decides the activation ----
-  const hasSkip = form === 'tool' ? false
-    : form === 'direct' ? inEmptyLocal !== null
-    : form === 'or' ? true
-    : form === 'join' ? inputs.some((i) => i.emptyCapable)
-    : inputs.some((i) => i.required && i.emptyCapable);
+  const hasSkip = side.form === 'tool' ? false
+    : side.form === 'direct' ? side.inEmpty !== null
+    : side.form === 'or' ? true
+    : side.form === 'join' ? side.inputs.some((i) => i.emptyCapable)
+    : side.inputs.some((i) => i.required && i.emptyCapable);
   // The skipped marker also exists when a referencing node's start_unmet twin reads it: as
   // a port when a skip writes it, otherwise as a host-level place owned by this node.
   const referenced = analysis.referenced.has(name);
@@ -445,14 +545,16 @@ export function buildNodeGadget(
   // The empty place of an outgoing tree edge is written by X_route (acyclic producer) or by
   // X_skip (any producer); a cyclic producer without a skip never writes it and declares no
   // port for it (the consumer still owns the place; its skip is simply unreachable).
-  const outputs: LocalOutput[] = [];
+  const collapsedOutputs: LocalCollapsedOutput[] = [];
+  const splitOutputs: LocalSplitOutput[] = [];
   const connectedOutputs = new Set(outgoing.map((e) => e.outputIndex)).size;
   const split = connectedOutputs > SPLIT_ROUTING_ABOVE;
   for (let o = 0; o < a.outputCount; o++) {
     const edges: LocalEdge[] = [];
     for (const e of outgoing) {
       if (e.outputIndex !== o) continue;
-      const slot = edgeSlots.get(e.id)!;
+      const slot = edgeSlots.get(e.id);
+      if (slot === undefined) throw new Error(`internal: node '${name}' has no host slot for edge ${e.id}`);
       const data = place<unknown>(`out_e${e.id}`);
       port(`out_e${e.id}`, data, slot.data, 'output');
       let empty: Place<unknown> | null = null;
@@ -464,19 +566,25 @@ export function buildNodeGadget(
     }
     if (edges.length === 0) continue; // unconnected outputs get no places
     const nil = cyclic ? internal(`nil_${o}`, 'nil', o) : null;
-    const okO = split ? internal(`ok_${o}`, 'ok', o) : null;
-    const routedO = split ? internal(`routed_${o}`, 'routed', o) : null;
-    outputs.push({ index: o, edges, nil, ok: okO, routed: routedO });
+    if (split) {
+      splitOutputs.push({ index: o, edges, nil, routing: 'split', ok: internal(`ok_${o}`, 'ok', o), routed: internal(`routed_${o}`, 'routed', o) });
+    } else {
+      collapsedOutputs.push({ index: o, edges, nil, routing: 'collapsed' });
+    }
   }
   // `X/routed`: the single "the outcome has been delivered" marker of a node that routes
   // inside `X_run`. A split node has one per output instead (`outputs[*].routed`).
-  const routed = split ? null : internal('routed', 'routed', null);
+  const routing: LocalRouting = split
+    ? { kind: 'split', outputs: splitOutputs }
+    : { kind: 'collapsed', routed: internal('routed', 'routed', null), outputs: collapsedOutputs };
+  const outputs: readonly LocalOutput[] = routing.outputs;
   const skipEmpties: Out[] = [];
   for (const out of outputs) for (const e of out.edges) if (e.empty !== null) skipEmpties.push(outPlace(e.empty));
 
   // ---- references: read arcs on Y/done, twins on Y/skipped ----
   const refDone: Place<unknown>[] = [];
-  const refSkipped: Place<unknown>[] = [];
+  /** Per reference: the referenced node and the local `Y/skipped` read port its twin uses. */
+  const refSkipped: Array<{ readonly node: string; readonly skipped: Place<unknown> }> = [];
   const referenceNames: string[] = [];
   const unguardedReferences: string[] = [];
   for (const ref of a.references) {
@@ -491,14 +599,18 @@ export function buildNodeGadget(
     portDecls.push({ name: `ref_${k}`, local: doneLocal, direction: 'input' });
     refPorts.push({ port: `ref_${k}`, node: ref.node, marker: 'done' });
     const skippedLocal = place<unknown>(`refskip_${k}`);
-    refSkipped.push(skippedLocal);
+    refSkipped.push({ node: ref.node, skipped: skippedLocal });
     portDecls.push({ name: `refskip_${k}`, local: skippedLocal, direction: 'input' });
     refPorts.push({ port: `refskip_${k}`, node: ref.node, marker: 'skipped' });
   }
 
   // ---- retry places ----
-  const retry = a.retryOnFail ? internal('retry', 'retry', null) : null;
-  const tries = a.retryOnFail ? internal('tries', 'tries', null) : null;
+  const retry: LocalRetry | null = a.retry === null ? null : {
+    retry: internal('retry', 'retry', null),
+    tries: internal('tries', 'tries', null),
+    maxTries: a.retry.maxTries,
+    waitBetweenTries: a.retry.waitBetweenTries,
+  };
 
   // ---- onFailure chain places (ADR 0009) ----
   // One `running` / `failed` pair per attempt, plus a `timedout` when a deadline is declared.
@@ -507,15 +619,36 @@ export function buildNodeGadget(
   const chain = a.failure;
   const chainSteps = chain?.steps ?? [];
   const chainTimeoutMs = chain?.timeoutMs ?? null;
-  const attemptRunning: Place<unknown>[] = [];
-  const attemptFailed: Place<unknown>[] = [];
-  const attemptTimedOut: (Place<unknown> | null)[] = [];
-  chainSteps.forEach((step, i) => {
-    attemptRunning.push(i === 0 ? running : internal(`running_${step.attempt}`, 'running', null));
-    attemptFailed.push(internal(`failed_${step.attempt}`, 'failed', null));
-    attemptTimedOut.push(
-      chainTimeoutMs === null ? null : internal(`timedout_${step.attempt}`, 'failed', null));
-  });
+  const created = chainSteps.map((step, i) => ({
+    step,
+    running: i === 0 ? running : internal(`running_${step.attempt}`, 'running', null),
+    failed: internal(`failed_${step.attempt}`, 'failed', null),
+    timedOut: chainTimeoutMs === null ? null : internal(`timedout_${step.attempt}`, 'failed', null),
+  }));
+  // Linked from the end, so a `retry` step's "next attempt" is the place already created for
+  // it: the chain is unrolled, and `resolveFailureChain` guarantees the last step is terminal.
+  const attempts: LocalAttempt[] = [];
+  let next: Place<unknown> | null = null;
+  for (const c of [...created].reverse()) {
+    const common: LocalAttemptCommon = { index: c.step.attempt, running: c.running, failed: c.failed, timedOut: c.timedOut };
+    let attempt: LocalAttempt;
+    switch (c.step.action) {
+      case 'retry':
+        if (next === null) throw new Error(`internal: node '${name}' onFailure retry step ${c.step.attempt} has no next attempt`);
+        attempt = { ...common, action: 'retry', waitMs: c.step.waitMs, next };
+        break;
+      case 'route':
+        attempt = { ...common, action: 'route', outputIndex: c.step.outputIndex };
+        break;
+      case 'stop':
+      case 'continue':
+        attempt = { ...common, action: c.step.action };
+        break;
+      default: return assertNever(c.step, 'failure step');
+    }
+    attempts.unshift(attempt);
+    next = c.running;
+  }
 
   // ---- agent round places (patterns.md §5, "fan-out and join with pending markers") ----
   // `routed_req` phases the budget refund exactly as `routed` does for every other outcome;
@@ -535,27 +668,37 @@ export function buildNodeGadget(
   // that finite: a refund at the join lets a round dispatch without bound and `T/done`
   // accumulates — measured, the graph truncates. This is NU-040's decidability lever, the
   // budget place, without ν-names because one round is live per agent (`A/idle`).
-  const routedRequest = isAgent ? internal('routed_req', 'routed-request', null) : null;
-  const queue = isAgent ? internal('queue', 'queue', null) : null;
-  const calls = isAgent ? internal('calls', 'calls', null) : null;
-  const drained = isAgent ? internal('drained', 'drained', null) : null;
-  const outstanding = isAgent ? internal('outstanding', 'outstanding', null) : null;
-  const dispatched = isAgent ? internal('dispatched', 'dispatched', null) : null;
-  const rounds = isAgent ? internal('rounds', 'rounds', null) : null;
-  // Owned by the agent, written by every tool it dispatches — exposed like `done` and bound
-  // by each tool's own output port.
-  const response = isAgent ? internal('response', 'response', null) : null;
-  if (response !== null) portDecls.push({ name: 'response', local: response, direction: 'output' });
+  let agent: LocalAgent | null = null;
+  if (tools !== null) {
+    if (a.maxRounds === null || a.maxToolCalls === null) {
+      throw new Error(`internal: agent '${name}' has tools but no round or tool-call budget`);
+    }
+    agent = {
+      routedRequest: internal('routed_req', 'routed-request', null),
+      queue: internal('queue', 'queue', null),
+      calls: internal('calls', 'calls', null),
+      drained: internal('drained', 'drained', null),
+      outstanding: internal('outstanding', 'outstanding', null),
+      dispatched: internal('dispatched', 'dispatched', null),
+      rounds: internal('rounds', 'rounds', null),
+      // Owned by the agent, written by every tool it dispatches — exposed like `done` and bound
+      // by each tool's own output port.
+      response: internal('response', 'response', null),
+      tools, maxRounds: a.maxRounds, roundsAssumed: a.roundsAssumed,
+      maxToolCalls: a.maxToolCalls, toolCallsAssumed: a.toolCallsAssumed,
+    };
+    portDecls.push({ name: 'response', local: agent.response, direction: 'output' });
+  }
 
   // An agent's write port into each of its tools' `in_tool`, and a tool's write port into each
   // of its agents' `response`. Both are cross-node, so both are bound in `compile()`.
-  const toolInPorts = tools.map((toolName, k) => {
+  const toolInPorts = (tools ?? []).map((toolName, k) => {
     const local = place<unknown>(`tool_${k}`);
     portDecls.push({ name: `tool_${k}`, local, direction: 'output' });
     toolPorts.push({ port: `tool_${k}`, node: toolName, marker: 'in_tool' });
     return local;
   });
-  const agentResponsePorts = agents.map((agentName, k) => {
+  const agentResponsePorts = (agents ?? []).map((agentName, k) => {
     const local = place<unknown>(`resp_${k}`);
     portDecls.push({ name: `resp_${k}`, local, direction: 'output' });
     toolPorts.push({ port: `resp_${k}`, node: agentName, marker: 'response' });
@@ -565,6 +708,8 @@ export function buildNodeGadget(
   // ---- Out spec builders ----
   const routingOf = (out: LocalOutput): Out => xor(
     andOf(out.edges.map((e) => outPlace(e.data))),
+    // An acyclic producer's edges are all tree edges, so each has its empty place: a cycle
+    // edge would put both ends in one SCC and give the producer `nil` instead.
     out.nil !== null ? outPlace(out.nil) : andOf(out.edges.map((e) => outPlace(e.empty!))),
   );
   // The success branch. Collapsed: the per-output routing plus `X/routed`, which `X_done`
@@ -576,44 +721,56 @@ export function buildNodeGadget(
   // share one tool, so the branch is an `xor` over them and the action picks the agent the
   // dispatch token names. `X/routed` still marks the outcome for `X_done` to refund the budget
   // one cycle later, so the phase and the P-semiflow are the ordinary ones (ADR 0004).
-  const success: Out = form === 'tool'
-    ? and(xorOf(agentResponsePorts.map((r) => outPlace(r))), outPlace(routed!))
-    : split
-      ? andOf(outputs.map((o) => outPlace(o.ok!)))
-      : andOf([...outputs.map(routingOf), outPlace(routed!)]);
+  const success: Out = (() => {
+    if (side.form === 'tool') {
+      if (routing.kind === 'split') throw new Error(`internal: tool '${name}' routes per output`);
+      return and(xorOf(agentResponsePorts.map((r) => outPlace(r))), outPlace(routing.routed));
+    }
+    return routing.kind === 'split'
+      ? andOf(routing.outputs.map((o) => outPlace(o.ok)))
+      : andOf([...routing.outputs.map(routingOf), outPlace(routing.routed)]);
+  })();
   const haltBranch = and(outPlace(halt), outPlace(budget));
   // The two pause outcomes: the budget is refunded here since nothing routes afterwards.
   const waitingBranch = and(outPlace(waiting), outPlace(pause), outPlace(budget));
   const stoppedBranch = and(outPlace(stopped), outPlace(pause), outPlace(budget));
-  const freeRefunds = (): Out[] => inputs.map((i) => outPlace(i.free!));
-  const readyOf = (i: LocalInput): Place<unknown> => (i.required && form === 'choose-branch' ? i.readyData! : i.ready!);
+  const freeRefunds = (): Out[] => joinInputs.map((i) => outPlace(i.free));
 
   // ---- X_start and its start_unmet twins ----
   const startBuilder = (local: string, priority: number) => {
     const b = Transition.builder(local).priority(priority).inhibitors(halt, pause);
-    if (form === 'tool') {
-      b.inputs(one(inToolLocal!), one(budget), one(idle)).outputs(outPlace(running));
-    } else if (form === 'direct') {
-      b.inputs(one(inLocal!), one(budget), one(idle)).outputs(outPlace(running));
-    } else if (form === 'or') {
-      const i = inputs[0]!;
-      b.inputs(one(i.hasdata!), one(budget), one(idle)).outputs(and(outPlace(running), outPlace(i.ran!)));
-    } else {
-      for (const i of inputs) b.inputs(one(readyOf(i)));
-      if (hasdata !== null) b.inputs(all(hasdata));
-      b.inputs(one(budget), one(idle)).outputs(and(outPlace(running), ...freeRefunds()));
+    switch (side.form) {
+      case 'tool':
+        b.inputs(one(side.inTool), one(budget), one(idle)).outputs(outPlace(running));
+        break;
+      case 'direct':
+        b.inputs(one(side.in), one(budget), one(idle)).outputs(outPlace(running));
+        break;
+      case 'or':
+        b.inputs(one(side.input.hasdata), one(budget), one(idle)).outputs(and(outPlace(running), outPlace(side.input.ran)));
+        break;
+      case 'join':
+        for (const i of side.inputs) b.inputs(one(i.ready));
+        b.inputs(all(side.hasdata));
+        b.inputs(one(budget), one(idle)).outputs(and(outPlace(running), ...freeRefunds()));
+        break;
+      case 'choose-branch':
+        for (const i of side.inputs) b.inputs(one(slotOf(i, 'data')));
+        b.inputs(one(budget), one(idle)).outputs(and(outPlace(running), ...freeRefunds()));
+        break;
+      default: return assertNever(side, 'input side');
     }
     return b;
   };
   const start = startBuilder('start', depth);
   if (refDone.length > 0) start.reads(...refDone);
   body.push(start.build());
-  tinfo('start', 'start');
+  tinfo('start', { role: 'start' });
   const startUnmetNames: string[] = [];
-  refSkipped.forEach((skippedLocal, k) => {
+  refSkipped.forEach((ref, k) => {
     const local = `start_unmet_${k}`;
-    body.push(startBuilder(local, depth - 1).read(skippedLocal).build());
-    tinfo(local, 'start-unmet', { reference: referenceNames[k]! });
+    body.push(startBuilder(local, depth - 1).read(ref.skipped).build());
+    tinfo(local, { role: 'start-unmet', reference: ref.node });
     startUnmetNames.push(F(local));
   });
 
@@ -622,7 +779,7 @@ export function buildNodeGadget(
   // like the success outcome — `A/routed_req` here, the budget refunded by `A_done_req` one
   // cycle later — so `_budget + Σ(running + retry + routed) = k` still holds with `routed_req`
   // counted among the in-flight markers.
-  const requestBranch = isAgent ? [outPlace(routedRequest!)] : [];
+  const requestBranch = agent === null ? [] : [outPlace(agent.routedRequest)];
   /**
    * The outcome of one attempt. Without a policy this is the historical shape and `failure` is
    * `null`; with one, the retry alternative is that attempt's own `X/failed_i` — a chain
@@ -630,7 +787,7 @@ export function buildNodeGadget(
    */
   const outcomeOf = (failure: Place<unknown> | null): Out => xorOf([
     success,
-    ...(failure !== null ? [outPlace(failure)] : retry !== null ? [outPlace(retry)] : []),
+    ...(failure !== null ? [outPlace(failure)] : retry !== null ? [outPlace(retry.retry)] : []),
     ...(stopWorkflow ? [haltBranch] : []),
     waitingBranch,
     stoppedBranch,
@@ -638,58 +795,57 @@ export function buildNodeGadget(
   ]);
 
   const attemptRunNames: string[] = [];
-  if (chainSteps.length === 0) {
+  if (attempts.length === 0) {
     body.push(Transition.builder('run')
       .inputs(one(running))
       .outputs(and(outcomeOf(null), outPlace(idle)))
       .priority(depth + 1).build());
-    tinfo('run', 'run');
+    tinfo('run', { role: 'run', attempt: 1 });
   } else {
-    chainSteps.forEach((step, i) => {
+    for (const att of attempts) {
       // Attempt 1 keeps the name `run`, so every consumer that addresses a node's run
       // transition by name — the scheduler's binder, `NetMap`, the differ — is unchanged.
-      const local = i === 0 ? 'run' : `run_${step.attempt}`;
-      const normal = and(outcomeOf(attemptFailed[i]!), outPlace(idle));
+      const local = att.index === 1 ? 'run' : `run_${att.index}`;
+      const normal = and(outcomeOf(att.failed), outPlace(idle));
       // IO-013's timeout child is an `Xor` sibling of the normal spec, and IO-015 needs
       // exactly one assignment to explain a write. It therefore has to claim a place the
       // normal branches do not, or every failing firing would be ambiguous — hence the
       // separate `timedout_i`, funnelled into `failed_i` below.
-      const timedOut = attemptTimedOut[i];
       body.push(Transition.builder(local)
-        .inputs(one(attemptRunning[i]!))
-        .outputs(timedOut == null
+        .inputs(one(att.running))
+        .outputs(att.timedOut === null || chainTimeoutMs === null
           ? normal
           // `forwardInput`, not `outPlace`: IO-013 AC3 gives the timeout child *sentinel*
           // tokens, so a plain output would land a `null` on `timedout_i` and the step would
           // have no `executionData` to act on. IO-014 forwards the very token the firing
           // consumed from `X/running_i` — the run payload — which is what "this enables retry
           // patterns without losing tokens" means.
-          : xor(normal, timeout(chainTimeoutMs!,
-              and(forwardInput(attemptRunning[i]!, timedOut), outPlace(idle)))))
+          : xor(normal, timeout(chainTimeoutMs,
+              and(forwardInput(att.running, att.timedOut), outPlace(idle)))))
         .priority(depth + 1).build());
-      tinfo(local, 'run', { attempt: step.attempt });
+      tinfo(local, { role: 'run', attempt: att.index });
       attemptRunNames.push(F(local));
-    });
+    }
   }
 
   // ---- X_route_o (split shape only) and X_done: the budget refund, one cycle later ----
   const routeNames: string[] = [];
-  if (split) {
-    for (const out of outputs) {
+  if (routing.kind === 'split') {
+    for (const out of routing.outputs) {
       const local = `route_${out.index}`;
       body.push(Transition.builder(local)
-        .inputs(one(out.ok!))
-        .outputs(and(routingOf(out), outPlace(out.routed!)))
+        .inputs(one(out.ok))
+        .outputs(and(routingOf(out), outPlace(out.routed)))
         .priority(depth + 1).build());
-      tinfo(local, 'route', { port: out.index });
+      tinfo(local, { role: 'route', port: out.index });
       routeNames.push(F(local));
     }
   }
   body.push(Transition.builder('done')
-    .inputs(...(split ? outputs.map((o) => one(o.routed!)) : [one(routed!)]))
+    .inputs(...(routing.kind === 'split' ? routing.outputs.map((o) => one(o.routed)) : [one(routing.routed)]))
     .outputs(and(outPlace(budget), outPlace(done)))
     .priority(depth + 1).build());
-  tinfo('done', 'done');
+  tinfo('done', { role: 'done' });
   const doneName = F('done');
 
   // ---- the agent round: done_req, dispatch, collect, resume ----
@@ -699,17 +855,17 @@ export function buildNodeGadget(
   let resumeName: string | null = null;
   let roundsOutName: string | null = null;
   let callsOutName: string | null = null;
-  if (isAgent) {
+  if (agent !== null) {
     // `A_done_req`: the round opens with something to dispatch, or — an empty request — with
     // nothing, in which case it is already drained and `A_resume` fires next.
     body.push(Transition.builder('done_req')
-      .inputs(one(routedRequest!))
+      .inputs(one(agent.routedRequest))
       .outputs(xor(
-        and(outPlace(budget), outPlace(queue!), outPlace(dispatched!)),
-        and(outPlace(budget), outPlace(drained!), outPlace(dispatched!)),
+        and(outPlace(budget), outPlace(agent.queue), outPlace(agent.dispatched)),
+        and(outPlace(budget), outPlace(agent.drained), outPlace(agent.dispatched)),
       ))
       .priority(depth + 1).build());
-    tinfo('done_req', 'done-request');
+    tinfo('done_req', { role: 'done-request' });
     doneRequestName = F('done_req');
 
     // `A_dispatch`: one action per firing, one budget unit per firing. `A/queue` holds a single
@@ -726,15 +882,15 @@ export function buildNodeGadget(
     // warning is about. Both directions are explored, so the graph is an over-approximation of
     // the executor — the sound direction for a safety property.
     body.push(Transition.builder('dispatch')
-      .inputs(one(queue!), one(calls!))
+      .inputs(one(agent.queue), one(agent.calls))
       .inhibitors(halt, pause)
       .outputs(and(
         xorOf(toolInPorts.map((t) => outPlace(t))),
-        outPlace(outstanding!),
-        xor(outPlace(queue!), outPlace(drained!)),
+        outPlace(agent.outstanding),
+        xor(outPlace(agent.queue), outPlace(agent.drained)),
       ))
       .priority(depth + 1).build());
-    tinfo('dispatch', 'dispatch');
+    tinfo('dispatch', { role: 'dispatch' });
     dispatchName = F('dispatch');
 
     // `A_collect`: pairs one arrived response with one outstanding dispatch and produces
@@ -744,9 +900,9 @@ export function buildNodeGadget(
     // inside that window and leak a marker into the next round. High priority, because the
     // pattern's order is store before resolve.
     body.push(Transition.builder('collect')
-      .inputs(one(outstanding!), one(response!))
+      .inputs(one(agent.outstanding), one(agent.response))
       .priority(depth + 2).build());
-    tinfo('collect', 'collect');
+    tinfo('collect', { role: 'collect' });
     collectName = F('collect');
 
     // `A_resume`: the round is complete — nothing left to dispatch, nothing still out — so the
@@ -754,12 +910,12 @@ export function buildNodeGadget(
     // unit and a round unit; when `A/rounds` is empty the loop stops, which is what makes the
     // whole cycle structurally bounded.
     body.push(Transition.builder('resume')
-      .inputs(one(dispatched!), one(drained!), one(rounds!), one(idle))
-      .inhibitors(outstanding!, halt, pause)
+      .inputs(one(agent.dispatched), one(agent.drained), one(agent.rounds), one(idle))
+      .inhibitors(agent.outstanding, halt, pause)
       .inputs(one(budget))
       .outputs(outPlace(running))
       .priority(depth).build());
-    tinfo('resume', 'resume');
+    tinfo('resume', { role: 'resume' });
     resumeName = F('resume');
 
     // `A_calls_out`: the tool-call budget is spent and the queue still holds actions. The agent
@@ -770,11 +926,11 @@ export function buildNodeGadget(
     // priority, though the two are structurally exclusive: one needs `drained`, this one needs
     // the queue.
     body.push(Transition.builder('calls_out')
-      .inputs(one(dispatched!), one(queue!), one(idle), one(budget))
-      .inhibitors(calls!, outstanding!, halt, pause)
+      .inputs(one(agent.dispatched), one(agent.queue), one(idle), one(budget))
+      .inhibitors(agent.calls, agent.outstanding, halt, pause)
       .outputs(outPlace(running))
       .priority(depth - 1).build());
-    tinfo('calls_out', 'calls-out');
+    tinfo('calls_out', { role: 'calls-out' });
     callsOutName = F('calls_out');
 
     // `A_rounds_out`: the round budget is spent and a round is still open, so the agent can
@@ -788,65 +944,85 @@ export function buildNodeGadget(
     // The verifier cannot know that, so without this transition every agent workflow reports a
     // stranding — measured, `tests/verify/measure-graph.ts`.
     body.push(Transition.builder('rounds_out')
-      .inputs(one(dispatched!), one(drained!))
-      .inhibitors(outstanding!, rounds!, halt)
+      .inputs(one(agent.dispatched), one(agent.drained))
+      .inhibitors(agent.outstanding, agent.rounds, halt)
       .outputs(and(outPlace(stopped), outPlace(pause)))
       .priority(depth - 1).build());
-    tinfo('rounds_out', 'rounds-out');
+    tinfo('rounds_out', { role: 'rounds-out' });
     roundsOutName = F('rounds_out');
   }
 
   // ---- X_skip ----
   const skipNames: string[] = [];
-  if (hasSkip) {
-    if (form === 'direct') {
-      body.push(Transition.builder('skip')
-        .inputs(one(inEmptyLocal!))
-        .inhibitor(halt)
-        .outputs(andOf([...skipEmpties, outPlace(skipped!)]))
-        .priority(depth).build());
-      tinfo('skip', 'skip');
-      skipNames.push(F('skip'));
-    } else if (form === 'or') {
-      // read(X/idle): X_start consumes hasdata_i when it fires but deposits ran_i only when
-      // its action completes (outputs land on completion), so without the node's own mutex
-      // an all-delivered round could skip while the run it just started is in flight.
-      const i = inputs[0]!;
-      body.push(Transition.builder('skip')
-        .inputs(exactly(i.round!, i.ready!))
-        .inhibitors(i.hasdata!, i.ran!, halt)
-        .read(idle)
-        .outputs(andOf([...skipEmpties, outPlace(skipped!)]))
-        .priority(depth).build());
-      tinfo('skip', 'skip');
-      skipNames.push(F('skip'));
-    } else if (form === 'join') {
-      const skip = Transition.builder('skip').inhibitors(hasdata!, halt).priority(depth);
-      for (const i of inputs) skip.inputs(one(i.ready!));
-      skip.outputs(and(...skipEmpties, outPlace(skipped!), ...freeRefunds()));
-      body.push(skip.build());
-      tinfo('skip', 'skip');
-      skipNames.push(F('skip'));
-    } else {
-      const listed = inputs.filter((i) => i.required);
-      const choices = listed.map((i): Variant[] => (i.emptyCapable ? ['data', 'empty'] : ['data']));
-      for (const combo of combinations(choices)) {
-        if (combo.every((v) => v === 'data')) continue; // that combination is X_start
-        const local = `skip_${combo.map((v) => v[0]).join('')}`;
-        const skip = Transition.builder(local).inhibitor(halt).priority(depth);
-        for (const i of inputs) {
-          if (!i.required) {
-            skip.inputs(one(i.ready!));
-            continue;
-          }
-          const v = combo[listed.indexOf(i)]!;
-          skip.inputs(one(v === 'data' ? i.readyData! : i.readyEmpty!));
-        }
-        skip.outputs(and(...skipEmpties, outPlace(skipped!), ...freeRefunds()));
-        body.push(skip.build());
-        tinfo(local, 'skip', { combination: combo });
-        skipNames.push(F(local));
+  if (skipped !== null) {
+    // What every skip writes, whichever form decides it: the empty of each outgoing tree
+    // edge, the marker, and the join slots refunded (none outside the join forms).
+    const skipOut = andOf([...skipEmpties, outPlace(skipped), ...freeRefunds()]);
+    switch (side.form) {
+      case 'direct': {
+        if (side.inEmpty === null) throw new Error(`internal: node '${name}' skips without an in-empty place`);
+        body.push(Transition.builder('skip')
+          .inputs(one(side.inEmpty))
+          .inhibitor(halt)
+          .outputs(skipOut)
+          .priority(depth).build());
+        tinfo('skip', { role: 'skip', combination: [] });
+        skipNames.push(F('skip'));
+        break;
       }
+      case 'or': {
+        // read(X/idle): X_start consumes hasdata_i when it fires but deposits ran_i only when
+        // its action completes (outputs land on completion), so without the node's own mutex
+        // an all-delivered round could skip while the run it just started is in flight.
+        const i = side.input;
+        body.push(Transition.builder('skip')
+          .inputs(exactly(i.round, i.ready))
+          .inhibitors(i.hasdata, i.ran, halt)
+          .read(idle)
+          .outputs(skipOut)
+          .priority(depth).build());
+        tinfo('skip', { role: 'skip', combination: [] });
+        skipNames.push(F('skip'));
+        break;
+      }
+      case 'join': {
+        const skip = Transition.builder('skip').inhibitors(side.hasdata, halt).priority(depth);
+        for (const i of side.inputs) skip.inputs(one(i.ready));
+        skip.outputs(skipOut);
+        body.push(skip.build());
+        tinfo('skip', { role: 'skip', combination: [] });
+        skipNames.push(F('skip'));
+        break;
+      }
+      case 'choose-branch': {
+        const listed = side.inputs.filter((i): i is LocalSplitReadyInput => i.slot === 'ready-split');
+        /** Each enumerated input's position in `listed`, which is its column in every combination. */
+        const columnOf = new Map(listed.map((i, k) => [i, k] as const));
+        const choices = listed.map((i): Variant[] => (i.emptyCapable ? ['data', 'empty'] : ['data']));
+        for (const combo of combinations(choices)) {
+          if (combo.every((v) => v === 'data')) continue; // that combination is X_start
+          const local = `skip_${combo.map((v) => v[0]).join('')}`;
+          const skip = Transition.builder(local).inhibitor(halt).priority(depth);
+          for (const i of side.inputs) {
+            if (i.slot === 'ready') {
+              skip.inputs(one(i.ready));
+              continue;
+            }
+            const column = columnOf.get(i);
+            const v = column === undefined ? undefined : combo[column];
+            if (v === undefined) throw new Error(`internal: node '${name}' skip ${local} has no variant for input ${i.index}`);
+            skip.inputs(one(slotOf(i, v)));
+          }
+          skip.outputs(skipOut);
+          body.push(skip.build());
+          tinfo(local, { role: 'skip', combination: combo });
+          skipNames.push(F(local));
+        }
+        break;
+      }
+      case 'tool':
+        throw new Error(`internal: tool '${name}' has a skip transition`);
+      default: return assertNever(side, 'input side');
     }
   }
 
@@ -854,66 +1030,67 @@ export function buildNodeGadget(
   // read(X/idle) for the same reason as X_skip: a run started from this round must have
   // landed its ran_i before the round is cleared, or that marker would leak into the next.
   const clearNames: string[] = [];
-  if (form === 'or') {
-    const i = inputs[0]!;
+  if (side.form === 'or') {
+    const i = side.input;
     const local = `clear_${i.index}`;
     body.push(Transition.builder(local)
-      .inputs(exactly(i.round!, i.ready!), all(i.ran!))
-      .inhibitors(i.hasdata!, halt)
+      .inputs(exactly(i.round, i.ready), all(i.ran))
+      .inhibitors(i.hasdata, halt)
       .read(idle)
       .priority(depth).build());
-    tinfo(local, 'clear', { port: i.index });
+    tinfo(local, { role: 'clear', port: i.index });
     clearNames.push(F(local));
   }
 
   // ---- arms (join, choose-branch and OR forms) ----
   const armNames: string[] = [];
-  for (const i of inputs) {
+  const joinHasdata = side.form === 'join' ? side.hasdata : null;
+  for (const i of allInputs) {
     for (const e of i.edges) {
       const dataName = `arm_e${e.edge.id}_data`;
       const armData = Transition.builder(dataName).inputs(one(e.data)).inhibitor(halt).priority(depth);
-      if (form === 'or') {
+      if (i.slot === 'or') {
         // A tree edge counts towards the round; a cycle edge only triggers a run.
-        armData.outputs(e.empty !== null ? and(outPlace(i.ready!), outPlace(i.hasdata!)) : outPlace(i.hasdata!));
+        armData.outputs(e.empty !== null ? and(outPlace(i.ready), outPlace(i.hasdata)) : outPlace(i.hasdata));
       } else {
-        armData.inputs(one(i.free!));
-        if (form === 'join') armData.outputs(and(outPlace(i.ready!), outPlace(hasdata!)));
-        else armData.outputs(outPlace(readyOf(i)));
+        armData.inputs(one(i.free));
+        const ready = slotOf(i, 'data');
+        armData.outputs(joinHasdata !== null ? and(outPlace(ready), outPlace(joinHasdata)) : outPlace(ready));
       }
       body.push(armData.build());
-      tinfo(dataName, 'arm', { edge: e.edge, variant: 'data' });
+      tinfo(dataName, { role: 'arm', edge: e.edge, variant: 'data' });
       armNames.push(F(dataName));
       if (e.empty !== null) {
         const emptyName = `arm_e${e.edge.id}_empty`;
         const armEmpty = Transition.builder(emptyName).inputs(one(e.empty)).inhibitor(halt).priority(depth);
-        if (form === 'or') {
-          armEmpty.outputs(outPlace(i.ready!));
+        if (i.slot === 'or') {
+          armEmpty.outputs(outPlace(i.ready));
         } else {
-          armEmpty.inputs(one(i.free!));
-          armEmpty.outputs(outPlace(i.required && form === 'choose-branch' ? i.readyEmpty! : i.ready!));
+          armEmpty.inputs(one(i.free));
+          armEmpty.outputs(outPlace(slotOf(i, 'empty')));
         }
         body.push(armEmpty.build());
-        tinfo(emptyName, 'arm', { edge: e.edge, variant: 'empty' });
+        tinfo(emptyName, { role: 'arm', edge: e.edge, variant: 'empty' });
         armNames.push(F(emptyName));
       }
     }
   }
 
   // ---- retry gadget: the budget stays held across the wait (README, ADR 0004) ----
-  if (retry !== null && tries !== null) {
+  if (retry !== null) {
     body.push(Transition.builder('retry_wait')
-      .inputs(one(retry), one(tries), one(idle))
+      .inputs(one(retry.retry), one(retry.tries), one(idle))
       .inhibitors(halt, pause)
-      .timing(delayed(a.waitBetweenTries!))
+      .timing(delayed(retry.waitBetweenTries))
       .outputs(outPlace(running))
       .priority(depth).build());
-    tinfo('retry_wait', 'retry');
+    tinfo('retry_wait', { role: 'retry' });
     body.push(Transition.builder('exhausted')
-      .inputs(one(retry))
-      .inhibitors(tries, halt)
+      .inputs(one(retry.retry))
+      .inhibitors(retry.tries, halt)
       .outputs(xorOf([success, ...(stopWorkflow ? [haltBranch] : []), waitingBranch, stoppedBranch]))
       .priority(depth + 1).build());
-    tinfo('exhausted', 'exhausted');
+    tinfo('exhausted', { role: 'exhausted' });
   }
 
   // ---- the onFailure chain: one step per attempt, plus the deadline funnel (ADR 0009) ----
@@ -924,29 +1101,27 @@ export function buildNodeGadget(
   // so the allowance cannot leak across activations the way `X/tries` does.
   const attemptStepNames: string[] = [];
   const attemptTimeoutNames: string[] = [];
-  chainSteps.forEach((step, i) => {
-    const failed = attemptFailed[i]!;
-    const timedOut = attemptTimedOut[i];
-    if (timedOut != null) {
+  for (const att of attempts) {
+    if (att.timedOut !== null) {
       // A rename, structurally: it inhibits `_halt` like an arm and not `_pause`, so a paused
       // net still funnels and quiesces with one failure place marked rather than two.
-      const local = `timeout_${step.attempt}`;
+      const local = `timeout_${att.index}`;
       body.push(Transition.builder(local)
-        .inputs(one(timedOut))
+        .inputs(one(att.timedOut))
         .inhibitors(halt)
-        .outputs(outPlace(failed))
+        .outputs(outPlace(att.failed))
         .priority(depth + 1).build());
-      tinfo(local, 'deadline', { attempt: step.attempt });
+      tinfo(local, { role: 'deadline', attempt: att.index });
       attemptTimeoutNames.push(F(local));
     }
-    const local = `attempt_${step.attempt}`;
-    const b = Transition.builder(local).inputs(one(failed));
-    if (step.action === 'retry') {
+    const local = `attempt_${att.index}`;
+    const b = Transition.builder(local).inputs(one(att.failed));
+    if (att.action === 'retry') {
       // Holds `_budget` across the wait, as n8n's retry loop does and as `retry_wait` does.
       b.inputs(one(idle))
         .inhibitors(halt, pause)
-        .timing(delayed(step.waitMs ?? 0))
-        .outputs(outPlace(attemptRunning[i + 1]!))
+        .timing(delayed(att.waitMs))
+        .outputs(outPlace(att.next))
         .priority(depth);
     } else {
       // A terminal step *is* `X_exhausted` with the outcome the workflow chose rather than the
@@ -960,16 +1135,16 @@ export function buildNodeGadget(
         .priority(depth + 1);
     }
     body.push(b.build());
-    tinfo(local, 'attempt', { attempt: step.attempt });
+    tinfo(local, { role: 'attempt', attempt: att.index });
     attemptStepNames.push(F(local));
-  });
+  }
 
   // ---- nil sinks (CORE-043 AC4: genuine sinks carry no Out spec) ----
   const sinkNames: string[] = [];
   for (const out of outputs) {
     if (out.nil === null) continue;
     body.push(Transition.builder(`sink_${out.index}`).inputs(one(out.nil)).priority(depth).build());
-    tinfo(`sink_${out.index}`, 'sink');
+    tinfo(`sink_${out.index}`, { role: 'sink' });
     sinkNames.push(F(`sink_${out.index}`));
   }
 
@@ -980,78 +1155,75 @@ export function buildNodeGadget(
       case 'input': defBuilder.inputPort(p.name, p.local); break;
       case 'output': defBuilder.outputPort(p.name, p.local); break;
       case 'inout': defBuilder.inoutPort(p.name, p.local); break;
+      default: assertNever(p.direction, 'port direction');
     }
   }
   const def = defBuilder.build();
 
   const materialise = (lookup: (finalName: string) => Place<unknown>): NodeGadget => {
+    /** The canonical place of a local (`internal`) one: the same name under the instance prefix (MOD-010). */
+    const fin = (p: Place<unknown>): Place<unknown> => lookup(F(p.name));
+    const finOpt = (p: Place<unknown> | null): Place<unknown> | null => (p === null ? null : fin(p));
     const slot = (e: LocalEdge): EdgeSlot => ({
       edge: e.edge,
       data: lookup(e.dataFinal),
       empty: e.emptyFinal === null ? null : lookup(e.emptyFinal),
     });
-    const opt = (p: Place<unknown> | null, local: string): Place<unknown> | null => (p === null ? null : lookup(F(local)));
-    const inputGadgets: InputGadget[] = inputs.map((i) => ({
-      index: i.index,
-      edges: i.edges.map(slot),
-      wired: i.wired,
-      required: i.required,
-      free: opt(i.free, `free_${i.index}`),
-      ready: opt(i.ready, `ready_${i.index}`),
-      readyData: opt(i.readyData, `ready_${i.index}_data`),
-      readyEmpty: opt(i.readyEmpty, `ready_${i.index}_empty`),
-      hasdata: opt(i.hasdata, `hasdata_${i.index}`),
-      ran: opt(i.ran, `ran_${i.index}`),
-      round: i.round,
-      emptyCapable: i.emptyCapable,
-      seedEmpty: i.seedEmpty,
-      unreachableEdges: i.unreachableEdges,
-    }));
-    const outputGadgets: OutputGadget[] = outputs.map((o) => ({
+    const inputCommonOf = (i: LocalInputCommon): InputGadgetCommon => ({
+      index: i.index, edges: i.edges.map(slot), wired: i.wired, required: i.required,
+      emptyCapable: i.emptyCapable, seedEmpty: i.seedEmpty, unreachableEdges: i.unreachableEdges,
+    });
+    const readyInput = (i: LocalReadyInput): ReadyInput => ({
+      ...inputCommonOf(i), slot: 'ready', free: fin(i.free), ready: fin(i.ready),
+    });
+    const splitReadyInput = (i: LocalSplitReadyInput): SplitReadyInput => ({
+      ...inputCommonOf(i), slot: 'ready-split', free: fin(i.free), readyData: fin(i.readyData), readyEmpty: finOpt(i.readyEmpty),
+    });
+    const orInput = (i: LocalOrInput): OrInput => ({
+      ...inputCommonOf(i), slot: 'or', ready: fin(i.ready), hasdata: fin(i.hasdata), ran: fin(i.ran), round: i.round,
+    });
+    const outputCommonOf = (o: LocalOutputCommon): OutputGadgetCommon => ({
       index: o.index,
       name: o.index === a.errorOutputIndex ? 'error' : (a.shape.outputNames?.[o.index] ?? null),
       isErrorOutput: o.index === a.errorOutputIndex,
       edges: o.edges.map(slot),
-      nil: opt(o.nil, `nil_${o.index}`),
-      ok: opt(o.ok, `ok_${o.index}`),
-      routed: opt(o.routed, `routed_${o.index}`),
-    }));
-    return {
+      nil: finOpt(o.nil),
+    });
+    const routingGadget: RoutingGadget = routing.kind === 'split'
+      ? { kind: 'split', outputs: routing.outputs.map((o) => ({ ...outputCommonOf(o), routing: 'split', ok: fin(o.ok), routed: fin(o.routed) })) }
+      : { kind: 'collapsed', routed: fin(routing.routed), outputs: routing.outputs.map((o) => ({ ...outputCommonOf(o), routing: 'collapsed' })) };
+    const attemptGadgets = attempts.map((att): AttemptGadget => {
+      const common = { index: att.index, running: fin(att.running), failed: fin(att.failed), timedOut: finOpt(att.timedOut) };
+      switch (att.action) {
+        case 'retry': return { ...common, action: 'retry', waitMs: att.waitMs, next: fin(att.next) };
+        case 'route': return { ...common, action: 'route', outputIndex: att.outputIndex };
+        case 'stop':
+        case 'continue': return { ...common, action: att.action };
+        default: return assertNever(att, 'attempt');
+      }
+    });
+    const retryGadget: RetryGadget | null = retry === null ? null : {
+      retry: fin(retry.retry), tries: fin(retry.tries), maxTries: retry.maxTries, waitBetweenTries: retry.waitBetweenTries,
+    };
+    const agentGadget: AgentGadget | null = agent === null ? null : {
+      routedRequest: fin(agent.routedRequest), queue: fin(agent.queue), calls: fin(agent.calls), drained: fin(agent.drained),
+      outstanding: fin(agent.outstanding), response: fin(agent.response), dispatched: fin(agent.dispatched), rounds: fin(agent.rounds),
+      tools: agent.tools, maxRounds: agent.maxRounds, roundsAssumed: agent.roundsAssumed,
+      maxToolCalls: agent.maxToolCalls, toolCallsAssumed: agent.toolCallsAssumed,
+    };
+    const common: NodeGadgetCommon = {
       node: name, id, type: a.node.type, typeVersion: a.node.typeVersion,
       disabled: a.node.disabled === true, loopNode: a.shape.loopNode === true,
-      form, depth, cyclic, reachable, isStart: name === analysis.startNode, isStartNode: analysis.startNodes.includes(name),
-      onError: a.onError, retryOnFail: a.retryOnFail, maxTries: a.maxTries, waitBetweenTries: a.waitBetweenTries,
-      in: inFinal === null ? null : lookup(inFinal),
-      inEmpty: inEmptyFinal === null ? null : lookup(inEmptyFinal),
-      running: lookup(F('running')), idle: lookup(F('idle')),
-      routed: opt(routed, 'routed'), splitRouting: split, done: lookup(F('done')),
+      depth, cyclic, reachable, isStart: name === analysis.startNode, isStartNode,
+      onError: a.onError, retry: retryGadget,
+      running: fin(running), idle: fin(idle),
+      routing: routingGadget, done: fin(done),
       skipped: hasSkip || referenced ? lookup(F('skipped')) : null,
-      hasdata: opt(hasdata, 'hasdata'),
-      retry: opt(retry, 'retry'),
-      tries: opt(tries, 'tries'),
-      attempts: chainSteps.map((step, i): AttemptGadget => ({
-        index: step.attempt,
-        running: lookup(F(i === 0 ? 'running' : `running_${step.attempt}`)),
-        failed: lookup(F(`failed_${step.attempt}`)),
-        timedOut: chainTimeoutMs === null ? null : lookup(F(`timedout_${step.attempt}`)),
-        action: step.action,
-        waitMs: step.waitMs,
-        outputIndex: step.outputIndex,
-      })),
+      attempts: attemptGadgets,
       attemptTimeoutMs: chainTimeoutMs,
-      waiting: lookup(F('waiting')), stopped: lookup(F('stopped')),
-      inTool: opt(inToolLocal, 'in_tool'),
-      routedRequest: opt(routedRequest, 'routed_req'),
-      queue: opt(queue, 'queue'),
-      calls: opt(calls, 'calls'),
-      drained: opt(drained, 'drained'),
-      outstanding: opt(outstanding, 'outstanding'),
-      response: opt(response, 'response'),
-      dispatched: opt(dispatched, 'dispatched'),
-      rounds: opt(rounds, 'rounds'),
-      tools, agents, maxRounds: a.maxRounds, roundsAssumed: a.roundsAssumed,
-      maxToolCalls: a.maxToolCalls, toolCallsAssumed: a.toolCallsAssumed,
-      inputs: inputGadgets, outputs: outputGadgets,
+      waiting: fin(waiting), stopped: fin(stopped),
+      agent: agentGadget,
+      outputs: routingGadget.outputs,
       references: referenceNames, unguardedReferences,
       transitions: {
         start: F('start'), startUnmet: startUnmetNames, run: F('run'), routes: routeNames, done: doneName,
@@ -1066,6 +1238,29 @@ export function buildNodeGadget(
         roundsOut: roundsOutName, callsOut: callsOutName,
       },
     };
+    switch (side.form) {
+      case 'direct':
+        return {
+          ...common, form: 'direct',
+          in: lookup(side.inFinal),
+          inEmpty: side.inEmptyFinal === null ? null : lookup(side.inEmptyFinal),
+          inputs: [],
+        };
+      case 'or':
+        return { ...common, form: 'or', inputs: [orInput(side.input)] };
+      case 'join':
+        return { ...common, form: 'join', hasdata: fin(side.hasdata), inputs: side.inputs.map(readyInput) };
+      case 'choose-branch':
+        return {
+          ...common, form: 'choose-branch',
+          inputs: side.inputs.map((i) => (i.slot === 'ready' ? readyInput(i) : splitReadyInput(i))),
+        };
+      case 'tool': {
+        if (agents === null) throw new Error(`internal: tool '${name}' has no agent`);
+        return { ...common, form: 'tool', inTool: fin(side.inTool), agents, inputs: [] };
+      }
+      default: return assertNever(side, 'input side');
+    }
   };
 
   return {

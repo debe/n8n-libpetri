@@ -77,23 +77,26 @@
  * canonical stack order; `decode(encode(m))` reproduces the pending activations of `m`
  * (`tests/codec/roundtrip.test.ts`).
  */
-import { tokenOf, unitToken, type Marking, type Place, type Token } from 'libpetri';
+import { tokenOf, type Marking, type Place, type Token } from 'libpetri';
 import type {
   IExecuteData, INodeExecutionData, IRunData, ISourceData, ITaskDataConnections, ITaskDataConnectionsSource,
   IWaitingForExecution, IWaitingForExecutionSource,
 } from 'n8n-workflow';
-import { readySlot, type CompiledWorkflow, type InputGadget, type NodeGadget, type Variant } from './compiler/index.js';
+import {
+  readyPlacesOf, readySlot,
+  type CompiledWorkflow, type DirectGadget, type EdgeRef, type InputGadget, type NodeGadget, type OrInput,
+  type ReadyInput, type SlottedGadget, type SplitReadyInput, type ToolGadget, type Variant,
+} from './compiler/index.js';
+import { assertNever } from './internal/assert.js';
+import { messageOf } from './internal/errors.js';
+import { unit } from './internal/tokens.js';
 import type { ExecutionDataState } from './n8n/host.js';
 import {
-  isDispatchPayload, isEdgePayload, isEntryPayload, isRequestPayload, isRoundPayload,
-  type EdgePayload, type EntryPayload, type OkPayload, type RequestPayload, type RetryPayload,
-  type RoundPayload, type RunPayload, type StoppedPayload, type WaitingPayload,
+  isDispatchPayload, isEdgePayload, isEntryPayload, isOkPayload, isRequestPayload, isRetryPayload, isRoundPayload,
+  isRunPayload, isStoppedPayload, isWaitingPayload,
+  type EdgePayload, type EntryPayload, type RequestPayload, type RoundPayload,
 } from './scheduler/payloads.js';
-
-export type {
-  DispatchPayload, EdgePayload, EntryPayload, InputPayload, OkPayload, RequestPayload, ResponsePayload,
-  RetryPayload, RoundPayload, RunPayload, StoppedPayload, WaitingPayload,
-} from './scheduler/payloads.js';
+import type { ToolDispatch } from './scheduler/payloads.js';
 
 /** A marking the codec cannot encode or n8n state it cannot decode; the message names node and place. */
 export class CodecError extends Error {
@@ -133,10 +136,6 @@ type SlotSource = Array<ISourceData | null>;
 
 const noop = (): void => {};
 
-function unit(): Token<unknown> {
-  return unitToken() as Token<unknown>;
-}
-
 function add(marking: MarkingMap, place: Place<unknown>, token: Token<unknown>): void {
   const queue = marking.get(place);
   if (queue === undefined) marking.set(place, [token]);
@@ -152,8 +151,8 @@ function edgePayload(items: Items, source: ISourceData | null): EdgePayload {
 }
 
 /** The input index a direct-form node's `X/in` serves (0 for a synthetic `in`). */
-function directInputIndex(compiled: CompiledWorkflow, g: NodeGadget): number {
-  return compiled.netMap.place(g.in!.name)?.edge?.inputIndex ?? 0;
+function directInputIndex(compiled: CompiledWorkflow, g: DirectGadget): number {
+  return compiled.netMap.place(g.in.name)?.edge?.inputIndex ?? 0;
 }
 
 /** n8n's `connectionsByDestinationNode[node].main.length`: the slot arrays are this long. */
@@ -161,6 +160,9 @@ function inputCountOf(compiled: CompiledWorkflow, g: NodeGadget): number {
   if (g.form === 'direct') return directInputIndex(compiled, g) + 1;
   return Math.max(1, ...g.inputs.map((i) => i.index + 1));
 }
+
+/** A join input: the two slot shapes a positional queue is read from. */
+type JoinInput = ReadyInput | SplitReadyInput;
 
 /** The n8n source of an entry's first input (`source.main[0]`), where n8n records a single-input delivery. */
 function sourceOfEntry(entry: IExecuteData): ISourceData | null {
@@ -185,11 +187,11 @@ function countsTowardRound(compiled: CompiledWorkflow, i: InputGadget, source: I
 }
 
 /** `readySlot` as a codec error: the variant has no place on this input (foreign n8n data). */
-function slotPlace(g: NodeGadget, i: InputGadget, variant: Variant): Place<unknown> {
+function slotPlace(g: SlottedGadget, i: JoinInput, variant: Variant): Place<unknown> {
   try {
     return readySlot(g, i, variant);
   } catch (error) {
-    throw new CodecError(`node '${g.node}' input ${i.index} cannot receive an ${variant} arrival (${(error as Error).message})`);
+    throw new CodecError(`node '${g.node}' input ${i.index} cannot receive an ${variant} arrival (${messageOf(error)})`);
   }
 }
 
@@ -219,21 +221,18 @@ export function decodeExecutionData(
   const hasRun = (name: string): boolean => {
     const runs = options.runData?.[name] ?? [];
     if (runs.length === 0) return false;
-    let isTool = false;
-    try { isTool = compiled.netMap.node(name).form === 'tool'; } catch { isTool = false; }
+    const isTool = compiled.netMap.tryNode(name)?.form === 'tool';
     return isTool ? runs.some((t) => t.data !== undefined) : true;
   };
   const nodeOf = (name: string): NodeGadget => {
-    try {
-      return compiled.netMap.node(name);
-    } catch {
-      throw new CodecError(`executionData names node '${name}', which the compiled workflow does not have`);
-    }
+    const g = compiled.netMap.tryNode(name);
+    if (g === undefined) throw new CodecError(`executionData names node '${name}', which the compiled workflow does not have`);
+    return g;
   };
 
   // Join inputs collect their arrivals positionally and are materialised afterwards.
-  const joinQueues = new Map<NodeGadget, Map<number, JoinArrival[]>>();
-  const enqueue = (g: NodeGadget, i: InputGadget, arrival: JoinArrival): void => {
+  const joinQueues = new Map<SlottedGadget, Map<number, JoinArrival[]>>();
+  const enqueue = (g: SlottedGadget, i: JoinInput, arrival: JoinArrival): void => {
     let queues = joinQueues.get(g);
     if (queues === undefined) joinQueues.set(g, (queues = new Map()));
     const q = queues.get(i.index);
@@ -241,8 +240,8 @@ export function decodeExecutionData(
     else q.push(arrival);
   };
   // Deliveries of an open OR round to add to `X/ready_i`.
-  const roundDeliveries = new Map<NodeGadget, number>();
-  const deliver = (g: NodeGadget, n = 1): void => { roundDeliveries.set(g, (roundDeliveries.get(g) ?? 0) + n); };
+  const roundDeliveries = new Map<OrInput, number>();
+  const deliver = (i: OrInput, n = 1): void => { roundDeliveries.set(i, (roundDeliveries.get(i) ?? 0) + n); };
   // Nodes with a decoded activation: what the resumed execution can still reach starts here.
   const pendingNodes = new Set<string>();
 
@@ -252,7 +251,7 @@ export function decodeExecutionData(
   // are recognised here and reassembled after the loop, once every entry has been seen.
   const roundResume = new Map<string, IExecuteData>();
   /** Tool activations in stack order; attributed to their agents after the loop, not during. */
-  const roundPending: Array<{ readonly tool: NodeGadget; readonly entry: IExecuteData }> = [];
+  const roundPending: Array<{ readonly tool: ToolGadget; readonly entry: IExecuteData }> = [];
 
   // ---- nodeExecutionStack: one activation per entry, in stack order ----
   for (const entry of executionData.nodeExecutionStack) {
@@ -262,26 +261,32 @@ export function decodeExecutionData(
     const token = tokenOf<unknown>(payload);
     // An agent's re-entry carries the round it is waiting on. It must not go to `X/in`: that
     // would start a *new* activation from the agent's main input and lose the round.
-    if (g.rounds !== null && entry.metadata?.nodeWasResumed === true
+    if (g.agent !== null && entry.metadata?.nodeWasResumed === true
       && entry.metadata.subNodeExecutionData !== undefined) {
       roundResume.set(g.node, entry);
       continue;
     }
-    if (g.form === 'tool') {
-      roundPending.push({ tool: g, entry });
-      continue;
-    }
-    if (g.form === 'direct') {
-      add(marking, g.in!, token);
-    } else if (g.form === 'or') {
-      const i = g.inputs[0]!;
-      add(marking, i.hasdata!, token);
-      if (countsTowardRound(compiled, i, sourceOfEntry(entry))) deliver(g);
-    } else {
-      // n8n runs an entry unconditionally: the entry heads the first input's slot and every
-      // other input takes a unit companion on its data slot, so X_start fires and the start
-      // action passes the entry through (`startInput`).
-      g.inputs.forEach((i, k) => enqueue(g, i, k === 0 ? { kind: 'entry', token } : { kind: 'companion' }));
+    switch (g.form) {
+      case 'tool':
+        roundPending.push({ tool: g, entry });
+        break;
+      case 'direct':
+        add(marking, g.in, token);
+        break;
+      case 'or': {
+        const [i] = g.inputs;
+        add(marking, i.hasdata, token);
+        if (countsTowardRound(compiled, i, sourceOfEntry(entry))) deliver(i);
+        break;
+      }
+      case 'join':
+      case 'choose-branch':
+        // n8n runs an entry unconditionally: the entry heads the first input's slot and every
+        // other input takes a unit companion on its data slot, so X_start fires and the start
+        // action passes the entry through (`startInput`).
+        g.inputs.forEach((i, k) => enqueue(g, i, k === 0 ? { kind: 'entry', token } : { kind: 'companion' }));
+        break;
+      default: assertNever(g, 'gadget form');
     }
   }
 
@@ -290,12 +295,14 @@ export function decodeExecutionData(
   // *before* its agent (the stack is ordered by depth descending, and a tool sits one below its
   // agent), so during the loop `roundResume` is still empty and a tool shared by two agents
   // would always fall back to the first one.
+  /** The agent a tool answers to: its only agent, or the one whose open round names it. */
+  const ownerOf = (tool: ToolGadget): string | undefined => tool.agents.length === 1
+    ? tool.agents[0]
+    : tool.agents.find((agent) => (roundResume.get(agent)?.metadata?.subNodeExecutionData?.actions ?? [])
+      .some((a) => a.nodeName === tool.node));
   const pendingOf = new Map<string, IExecuteData[]>();
   for (const { tool, entry } of roundPending) {
-    const owner = tool.agents.length === 1
-      ? tool.agents[0]!
-      : tool.agents.find((agent) => (roundResume.get(agent)?.metadata?.subNodeExecutionData?.actions ?? [])
-        .some((a) => a.nodeName === tool.node));
+    const owner = ownerOf(tool);
     if (owner === undefined) {
       diag(
         `node '${tool.node}': a stack entry for an ai_tool activation no open round claims; dropped ` +
@@ -314,17 +321,36 @@ export function decodeExecutionData(
   // `A/outstanding` is therefore zero and `A_resume` waits only on these.
   for (const [agent, resume] of roundResume) {
     const g = nodeOf(agent);
+    // Only an agent's entry was set aside above.
+    if (g.agent === null) throw new CodecError(`node '${agent}' carries a round re-entry but is not an agent`);
+    // An agent that is itself a tool answers the agent that dispatched it. The round token
+    // carries that address ({@link RoundPayload.answers}); it is rebuilt here by the same
+    // attribution a pending tool call gets, from the metadata n8n keeps on the outer round.
+    let answers: ToolDispatch | undefined;
+    if (g.form === 'tool') {
+      const owner = ownerOf(g);
+      if (owner === undefined) {
+        diag(
+          `node '${agent}': a round re-entry for an ai_tool agent no open round claims; dropped ` +
+          `(agents: ${g.agents.join(', ') || 'none'})`);
+        continue;
+      }
+      answers = { agent: owner, roundId: `${owner}#${roundResume.get(owner)?.runIndex ?? 0}` };
+    }
+    const carried = answers === undefined ? {} : { answers };
     const pending = pendingOf.get(agent) ?? [];
     pendingOf.delete(agent);
     const roundId = `${agent}#${resume.runIndex ?? 0}`;
-    add(marking, g.dispatched!, tokenOf<unknown>({ kind: 'round', resume, roundId } as RoundPayload));
+    const round: RoundPayload = { kind: 'round', resume, roundId, ...carried };
+    add(marking, g.agent.dispatched, tokenOf<unknown>(round));
     // The queue when there is anything left to dispatch, `drained` when there is not — the
     // two are exclusive, and `A/calls` comes fresh from `sharedMarking`: the budget resets
     // across a resume, which the ADR records.
     if (pending.length > 0) {
-      add(marking, g.queue!, tokenOf<unknown>({ kind: 'request', pending, resume, roundId } as RequestPayload));
+      const request: RequestPayload = { kind: 'request', pending, resume, roundId, ...carried };
+      add(marking, g.agent.queue, tokenOf<unknown>(request));
     } else {
-      add(marking, g.drained!, unit());
+      add(marking, g.agent.drained, unit());
     }
     pendingNodes.add(agent);
     for (const e of pending) pendingNodes.add(e.node.name);
@@ -363,24 +389,29 @@ export function decodeExecutionData(
         const v = valueAt(index);
         if (v === null) continue;
         pendingNodes.add(g.node);
-        if (v.length > 0) add(marking, g.in!, tokenOf<unknown>(edgePayload(v, sourceAt(index))));
+        if (v.length > 0) add(marking, g.in, tokenOf<unknown>(edgePayload(v, sourceAt(index))));
         else if (g.inEmpty !== null) add(marking, g.inEmpty, unit());
         else diag(`node '${g.node}': waitingExecution[${k}] holds [] for an input that cannot carry an empty; dropped`);
         continue;
       }
       if (g.form === 'or') {
-        const i = g.inputs[0]!;
+        const [i] = g.inputs;
         foreign((idx) => idx === i.index);
         const v = valueAt(i.index);
         if (v === null) continue;
         if (v.length === 0) {
-          deliver(g); // a delivered empty of the open round
+          deliver(i); // a delivered empty of the open round
           continue;
         }
         pendingNodes.add(g.node);
         const source = sourceAt(i.index);
-        add(marking, i.hasdata!, tokenOf<unknown>(edgePayload(v, source)));
-        if (countsTowardRound(compiled, i, source)) deliver(g);
+        add(marking, i.hasdata, tokenOf<unknown>(edgePayload(v, source)));
+        if (countsTowardRound(compiled, i, source)) deliver(i);
+        continue;
+      }
+      if (g.form === 'tool') {
+        // A tool has no main input for n8n to have written; whatever is here is foreign.
+        foreign(() => false);
         continue;
       }
       foreign((idx) => g.inputs.some((i) => i.index === idx));
@@ -399,14 +430,14 @@ export function decodeExecutionData(
   for (const [g, queues] of joinQueues) {
     for (const i of g.inputs) {
       const q = queues.get(i.index);
-      if (q === undefined || q.length === 0) continue;
+      const head = q?.[0];
+      if (q === undefined || head === undefined) continue;
       // The decoded head replaces the seeded empty of an unreachable input and withholds free_i.
-      marking.delete(i.free!);
-      for (const p of [i.ready, i.readyData, i.readyEmpty]) if (p !== null) marking.delete(p);
-      const [head, ...rest] = q as [JoinArrival, ...JoinArrival[]];
+      marking.delete(i.free);
+      for (const p of readyPlacesOf(i)) marking.delete(p);
       add(marking, slotPlace(g, i, head.kind === 'empty' ? 'empty' : 'data'), tokenOfArrival(head));
-      if (g.hasdata !== null && (head.kind === 'data' || head.kind === 'entry')) add(marking, g.hasdata, unit());
-      for (const a of rest) {
+      if (g.form === 'join' && (head.kind === 'data' || head.kind === 'entry')) add(marking, g.hasdata, unit());
+      for (const a of q.slice(1)) {
         const place = a.kind === 'empty' ? (i.edges.find((e) => e.empty !== null)?.empty ?? null) : (i.edges[0]?.data ?? null);
         if (place === null) {
           throw new CodecError(
@@ -419,14 +450,13 @@ export function decodeExecutionData(
   }
 
   // ---- OR rounds: the deliveries, and the marker of a round the node already ran in ----
-  for (const [g, n] of roundDeliveries) {
-    const i = g.inputs[0]!;
-    for (let k = 0; k < n; k++) add(marking, i.ready!, unit());
+  for (const [i, n] of roundDeliveries) {
+    for (let k = 0; k < n; k++) add(marking, i.ready, unit());
   }
   for (const g of compiled.netMap.nodes) {
     if (g.form !== 'or') continue;
-    const i = g.inputs[0]!;
-    if (count(marking, i.ready) > 0 && hasRun(g.node)) add(marking, i.ran!, unit());
+    const [i] = g.inputs;
+    if (count(marking, i.ready) > 0 && hasRun(g.node)) add(marking, i.ran, unit());
   }
 
   // ---- markers: done from runData, skipped for references nothing pending can satisfy ----
@@ -483,12 +513,31 @@ interface Cell {
   readonly place: Place<unknown>;
 }
 
+/** A {@link Cell} whose token is a stack entry: the head of an entry-headed slot. */
+interface EntryCell extends Cell {
+  readonly value: EntryPayload;
+}
+
 /** An arrival a token on `X/ok_o` (routed by the encoder) adds to a consumer's input. */
 interface RoutedArrival {
-  readonly inputIndex: number;
+  /** The edge it travels: `inputIndex` and `id` are what the consumer's input pairs it on. */
+  readonly edge: EdgeRef;
   /** `null`: the output was empty (the consumer's `empty` place would have received a unit). */
   readonly payload: EdgePayload | null;
-  readonly edgeId: number;
+  /** The `X/ok_o` place the token was read from, named when the consumer cannot place the arrival. */
+  readonly ok: Place<unknown>;
+}
+
+/**
+ * A routed arrival over an edge the consumer's input does not carry. Producer and consumer
+ * gadgets are cut from one analysis, so a compile never produces the pair; dropping the
+ * arrival would lose its items from the execution, so it is refused by node, edge and place.
+ */
+function unmatchedArrival(g: NodeGadget, i: InputGadget, r: RoutedArrival): CodecError {
+  const e = r.edge;
+  return new CodecError(
+    `node '${g.node}' input ${i.index}: an arrival routed from '${r.ok.name}' over edge #${e.id} ` +
+    `(${e.from}.${e.outputIndex} -> ${e.to}.${e.inputIndex}) matches none of the input's edges`);
 }
 
 /**
@@ -545,7 +594,10 @@ export function encodeMarking(
       // firing that ends an activation, and both are consumed one cycle later by a transition
       // that inhibits on nothing — so a quiesced net has drained them whatever stopped it.
       const inFlight: Array<Place<unknown> | null> = [
-        g.running, g.routed, g.routedRequest, g.inEmpty, ...g.outputs.flatMap((o) => [o.ok, o.routed]),
+        g.running,
+        ...(g.routing.kind === 'collapsed' ? [g.routing.routed] : g.routing.outputs.flatMap((o) => [o.ok, o.routed])),
+        g.agent?.routedRequest ?? null,
+        g.form === 'direct' ? g.inEmpty : null,
         // An `onFailure` chain's later attempts are `X/running` for every purpose here, and its
         // deadline funnel inhibits `_halt` alone — so a *paused* net has already moved every
         // `X/timedout_i` on to `X/failed_i` and only a halted one can still hold it
@@ -553,33 +605,74 @@ export function encodeMarking(
         ...g.attempts.slice(1).map((a) => a.running),
         ...g.attempts.map((a) => a.timedOut),
       ];
-      if (g.form === 'or') for (const e of g.inputs[0]!.edges) inFlight.push(e.data, e.empty);
+      if (g.form === 'or') for (const e of g.inputs[0].edges) inFlight.push(e.data, e.empty);
       for (const p of inFlight) if (p !== null && marking.tokenCount(p) > 0) throw undrained(g, p);
     }
     if (mode === 'stranded') {
-      if (g.retry !== null && marking.tokenCount(g.retry) > 0) throw undrained(g, g.retry);
+      if (g.retry !== null && marking.tokenCount(g.retry.retry) > 0) throw undrained(g, g.retry.retry);
       // `X/failed_i` is `X/retry` for a chain: a pending activation, not residue.
       for (const a of g.attempts) if (marking.tokenCount(a.failed) > 0) throw undrained(g, a.failed);
     }
   }
 
-  const routed = collectRouted(marking, nodes);
+  const routed = collectRouted(marking, nodes, diag);
 
-  /** `waitingExecution[node][k]` / `waitingExecutionSource[node][k]`, created on first use with `null` per input. */
-  const slot = (g: NodeGadget, k: number): { main: SlotMain; source: SlotSource } => {
-    const inputCount = inputCountOf(compiled, g);
-    const w = (waiting[g.node] ??= {});
-    const ws = (waitingSource[g.node] ??= {});
-    if (w[k] === undefined) {
-      w[k] = { main: Array.from({ length: inputCount }, () => null) };
-      ws[k] = { main: Array.from({ length: inputCount }, () => null) };
+  /**
+   * The tokens on one of `g`'s places that carry the payload the gadget puts there. A token of
+   * any other shape is reported by node and place and skipped: the encoder writes n8n's state
+   * from what a token says, so a token that says nothing cannot become a stack entry.
+   */
+  const payloadsOn = <T>(g: NodeGadget, place: Place<unknown>, guard: (v: unknown) => v is T, expected: string): T[] => {
+    const out: T[] = [];
+    for (const t of marking.peekTokens(place)) {
+      if (guard(t.value)) out.push(t.value);
+      else diag(`node '${g.node}': token on '${place.name}' carries no ${expected}; dropped`);
     }
-    return { main: w[k]!.main as SlotMain, source: ws[k]!.main! };
+    return out;
   };
-  const nextSlot = (g: NodeGadget): { main: SlotMain; source: SlotSource } => slot(g, Object.keys(waiting[g.node] ?? {}).length);
+  /**
+   * A node's own activations in stack order: waiting first, then the ones cancellation caught
+   * — stopped before it ran, retrying, running — and its `onFailure` chain in the same order
+   * and for the same reason: a failure whose step has not acted (`X/failed_i`), an attempt a
+   * deadline abandoned in a halted net (`X/timedout_i`), and a later attempt cancellation
+   * caught mid-run (`X/running_i`). Each becomes an ordinary stack entry and the activation
+   * re-runs from its first attempt — n8n has nowhere to persist the position, which
+   * `tasks/todo.md` §4b records.
+   */
+  const activationsOf = (g: NodeGadget): Array<{ readonly executionData: IExecuteData; readonly waiting: boolean }> => {
+    const out: Array<{ readonly executionData: IExecuteData; readonly waiting: boolean }> = [];
+    const own = (list: ReadonlyArray<{ readonly executionData: IExecuteData }>, waiting = false): void => {
+      for (const v of list) out.push({ executionData: v.executionData, waiting });
+    };
+    own(payloadsOn(g, g.waiting, isWaitingPayload, 'waiting activation'), true);
+    own(payloadsOn(g, g.stopped, isStoppedPayload, 'stopped activation').filter((v) => !v.ran));
+    if (g.retry !== null) own(payloadsOn(g, g.retry.retry, isRetryPayload, 'retry'));
+    own(payloadsOn(g, g.running, isRunPayload, 'run'));
+    for (const a of g.attempts) {
+      own(payloadsOn(g, a.failed, isRetryPayload, 'retry'));
+      if (a.timedOut !== null) own(payloadsOn(g, a.timedOut, isRunPayload, 'run'));
+      if (a.index > 1) own(payloadsOn(g, a.running, isRunPayload, 'run'));
+    }
+    return out;
+  };
 
-  for (const g of nodes) {
-    const canvas = nodes.indexOf(g);
+  /**
+   * The next `waitingExecution[node][k]` / `waitingExecutionSource[node][k]` row, `null` per
+   * input; rows are numbered `0…` per node in the order they are written.
+   */
+  const slotCounts = new Map<string, number>();
+  const nextSlot = (g: NodeGadget): { main: SlotMain; source: SlotSource } => {
+    const k = slotCounts.get(g.node) ?? 0;
+    slotCounts.set(g.node, k + 1);
+    const inputCount = inputCountOf(compiled, g);
+    const main: SlotMain = Array.from({ length: inputCount }, () => null);
+    const source: SlotSource = Array.from({ length: inputCount }, () => null);
+    (waiting[g.node] ??= {})[k] = { main };
+    (waitingSource[g.node] ??= {})[k] = { main: source };
+    return { main, source };
+  };
+
+  for (const [canvas, g] of nodes.entries()) {
     const push = (e: IExecuteData, isWaiting = false): void => {
       pending.push({ executionData: e, depth: g.depth, canvas, waiting: isWaiting, seq: seq++ });
     };
@@ -601,29 +694,8 @@ export function encodeMarking(
     const routedHere = routed.get(g.node) ?? [];
 
     // ---- the node's own activations: waiting first, then the ones cancellation caught ----
-    for (const t of marking.peekTokens(g.waiting)) push((t.value as WaitingPayload).executionData, true);
-    for (const t of marking.peekTokens(g.stopped)) {
-      const v = t.value as StoppedPayload;
-      if (!v.ran) push(v.executionData);
-    }
-    if (g.retry !== null) {
-      for (const t of marking.peekTokens(g.retry)) push((t.value as RetryPayload).executionData);
-    }
-    for (const t of marking.peekTokens(g.running)) push((t.value as RunPayload).executionData);
-    // An `onFailure` chain, in the same order and for the same reason: a failure whose step has
-    // not acted (`X/failed_i`), an attempt a deadline abandoned in a halted net
-    // (`X/timedout_i`), and a later attempt cancellation caught mid-run (`X/running_i`). Each
-    // becomes an ordinary stack entry and the activation re-runs from its first attempt —
-    // n8n has nowhere to persist the position, which `tasks/todo.md` §4b records.
-    for (const a of g.attempts) {
-      for (const t of marking.peekTokens(a.failed)) push((t.value as RetryPayload).executionData);
-      if (a.timedOut !== null) {
-        for (const t of marking.peekTokens(a.timedOut)) push((t.value as RunPayload).executionData);
-      }
-      if (a.index > 1) {
-        for (const t of marking.peekTokens(a.running)) push((t.value as RunPayload).executionData);
-      }
-    }
+    const activations = activationsOf(g);
+    for (const a of activations) push(a.executionData, a.waiting);
 
     // ---- an agent round the pause or the halt caught mid-flight ----
     // The tokens carry the very `IExecuteData` values n8n's own `handleRequest` produced, so
@@ -634,33 +706,33 @@ export function encodeMarking(
     // A dispatched tool that is *running* is already pushed above, off `X/running`; one that
     // finished has its response on `A/response` and its `runData` written, so there is nothing
     // left to re-queue for it.
-    if (g.inTool !== null) {
+    if (g.form === 'tool') {
       for (const t of marking.peekTokens(g.inTool)) {
         const v = t.value;
         if (isDispatchPayload(v)) push(v.executionData);
         else diag(`node '${g.node}': token on '${g.inTool.name}' carries no dispatch; dropped`);
       }
     }
-    if (g.queue !== null) {
-      for (const t of marking.peekTokens(g.queue)) {
+    if (g.agent !== null) {
+      const { queue, dispatched } = g.agent;
+      for (const t of marking.peekTokens(queue)) {
         const v = t.value;
         if (isRequestPayload(v)) for (const e of v.pending) push(e);
-        else diag(`node '${g.node}': token on '${g.queue.name}' carries no request; dropped`);
+        else diag(`node '${g.node}': token on '${queue.name}' carries no request; dropped`);
       }
-    }
-    if (g.dispatched !== null) {
-      for (const t of marking.peekTokens(g.dispatched)) {
+      for (const t of marking.peekTokens(dispatched)) {
         const v = t.value;
         if (isRoundPayload(v)) push(v.resume);
-        else diag(`node '${g.node}': token on '${g.dispatched.name}' carries no round; dropped`);
+        else diag(`node '${g.node}': token on '${dispatched.name}' carries no round; dropped`);
       }
     }
 
+    if (g.form === 'tool') continue;
     if (g.form === 'direct') {
       const inputIndex = directInputIndex(compiled, g);
       const arrivals: Cell[] = [
-        ...marking.peekTokens(g.in!).map((t): Cell => ({ value: t.value, place: g.in! })),
-        ...routedHere.filter((r) => r.payload !== null).map((r): Cell => ({ value: r.payload, place: g.in! })),
+        ...marking.peekTokens(g.in).map((t): Cell => ({ value: t.value, place: g.in })),
+        ...routedHere.filter((r) => r.payload !== null).map((r): Cell => ({ value: r.payload, place: g.in })),
       ];
       for (const a of arrivals) {
         const e = entryOf(inputIndex, a.value, a.place);
@@ -675,9 +747,9 @@ export function encodeMarking(
     }
 
     if (g.form === 'or') {
-      const i = g.inputs[0]!;
+      const [i] = g.inputs;
       // Armed arrivals were counted in the round; arrivals still on an edge (cancelled) were not.
-      const armed = marking.peekTokens(i.hasdata!).map((t): Cell => ({ value: t.value, place: i.hasdata! }));
+      const armed = marking.peekTokens(i.hasdata).map((t): Cell => ({ value: t.value, place: i.hasdata }));
       const unarmed: Cell[] = [];
       let unarmedEmpties = 0;
       for (const e of i.edges) {
@@ -685,22 +757,14 @@ export function encodeMarking(
         if (e.empty !== null) unarmedEmpties += marking.tokenCount(e.empty);
       }
       for (const r of routedHere) {
-        if (r.payload !== null) unarmed.push({ value: r.payload, place: i.edges.find((e) => e.edge.id === r.edgeId)?.data ?? i.hasdata! });
-        else if (i.edges.find((e) => e.edge.id === r.edgeId)?.empty !== null) unarmedEmpties++;
+        if (r.payload !== null) unarmed.push({ value: r.payload, place: i.edges.find((e) => e.edge.id === r.edge.id)?.data ?? i.hasdata });
+        else if (i.edges.find((e) => e.edge.id === r.edge.id)?.empty !== null) unarmedEmpties++;
       }
       // Every activation decode turns back into a stack entry was armed once — waiting,
       // stopped before its run, retrying, running (cancelled) or still on hasdata_i — and
       // decode counts its delivery again, so the encoder subtracts all of them.
       const activationSources: Array<ISourceData | null> = [
-        ...marking.peekTokens(g.waiting).map((t) => sourceOfEntry((t.value as WaitingPayload).executionData)),
-        ...marking.peekTokens(g.stopped).filter((t) => !(t.value as StoppedPayload).ran).map((t) => sourceOfEntry((t.value as StoppedPayload).executionData)),
-        ...(g.retry === null ? [] : marking.peekTokens(g.retry).map((t) => sourceOfEntry((t.value as RetryPayload).executionData))),
-        ...marking.peekTokens(g.running).map((t) => sourceOfEntry((t.value as RunPayload).executionData)),
-        ...g.attempts.flatMap((a) => [
-          ...marking.peekTokens(a.failed).map((t) => sourceOfEntry((t.value as RetryPayload).executionData)),
-          ...(a.timedOut === null ? [] : marking.peekTokens(a.timedOut).map((t) => sourceOfEntry((t.value as RunPayload).executionData))),
-          ...(a.index === 1 ? [] : marking.peekTokens(a.running).map((t) => sourceOfEntry((t.value as RunPayload).executionData))),
-        ]),
+        ...activations.map((a) => sourceOfEntry(a.executionData)),
         ...armed.map((a) => sourceOfValue(a.value)),
       ];
       const counted = activationSources.filter((source) => countsTowardRound(compiled, i, source)).length;
@@ -712,37 +776,38 @@ export function encodeMarking(
       }
       // The open round's other deliveries: one `[]` slot each (n8n's R6 discards them; decode counts them).
       const seeds = g.reachable ? i.unreachableEdges : 0;
-      const deliveries = Math.max(0, marking.tokenCount(i.ready!) - counted - seeds) + unarmedEmpties;
+      const deliveries = Math.max(0, marking.tokenCount(i.ready) - counted - seeds) + unarmedEmpties;
       if (deliveries > 0 && mode === 'stranded') {
-        diag(`node '${g.node}': OR-input round left open on '${i.ready!.name}' (${deliveries} delivered empties, divergence #2); written to waitingExecution`);
+        diag(`node '${g.node}': OR-input round left open on '${i.ready.name}' (${deliveries} delivered empties, divergence #2); written to waitingExecution`);
       }
       for (let k = 0; k < deliveries; k++) nextSlot(g).main[i.index] = [];
       continue;
     }
 
     // ---- join / choose-branch: positional slots over the per-input queues ----
-    const queues = g.inputs.map((i) => joinQueue(g, i, marking, routedHere));
-    if (queues.some((q) => q.length > 0) && queues.every((q, k) => q.every((c) => isSeed(g.inputs[k]!, c)))) {
+    const queues = g.inputs.map((i) => ({ input: i, cells: joinQueue(g, i, marking, routedHere) }));
+    if (queues.some((q) => q.cells.length > 0) && queues.every((q) => q.cells.every((c) => isSeed(q.input, c)))) {
       // Nothing but the seeded empties of inputs fed by unreachable producers:
       // `sharedMarking()` re-seeds them on decode, and n8n never had them. (With anything
       // else queued the seed is written as `[]` in its row, so positions are kept.)
       if (mode === 'stranded') {
         diag(`node '${g.node}': join never completed; only the seeded empty of input ` +
-          `${g.inputs.filter((i, k) => queues[k]!.length > 0 && i.seedEmpty).map((i) => i.index).join(', ')} (unreachable producers) arrived; not written`);
+          `${queues.filter((q) => q.cells.length > 0 && q.input.seedEmpty).map((q) => q.input.index).join(', ')} (unreachable producers) arrived; not written`);
       }
       continue;
     }
-    const depth = Math.max(0, ...queues.map((q) => q.length));
+    const depth = Math.max(0, ...queues.map((q) => q.cells.length));
     for (let j = 0; j < depth; j++) {
-      const cells = queues.map((q) => q[j]);
-      const entries = cells.filter((c): c is Cell => c !== undefined && isEntryPayload(c.value));
-      if (entries.length > 0) {
-        const e = (entries[0]!.value as EntryPayload).executionData;
-        if (entries.some((c) => (c.value as EntryPayload).executionData !== e)) {
+      const cells = queues.map((q) => q.cells[j]);
+      const entries = cells.flatMap((c): EntryCell[] => c !== undefined && isEntryPayload(c.value) ? [{ value: c.value, place: c.place }] : []);
+      const head = entries[0];
+      if (head !== undefined) {
+        const e = head.value.executionData;
+        if (entries.some((c) => c.value.executionData !== e)) {
           throw new CodecError(`node '${g.node}': slot ${j} pairs two different stack entries ('${entries.map((c) => c.place.name).join("', '")}')`);
         }
         if (mode === 'stranded') {
-          diag(`node '${g.node}': stranded entry on '${entries[0]!.place.name}' (divergence #2); written to waitingExecution`);
+          diag(`node '${g.node}': stranded entry on '${head.place.name}' (divergence #2); written to waitingExecution`);
           const s = nextSlot(g);
           for (const i of g.inputs) {
             s.main[i.index] = e.data.main?.[i.index] ?? null;
@@ -797,8 +862,9 @@ export function encodeMarking(
 }
 
 /** A unit token on the `ready` place of an input whose producers are all unreachable: the shared marking's seed. */
-function isSeed(i: InputGadget, c: Cell): boolean {
-  return i.seedEmpty && !isEdgePayload(c.value) && !isEntryPayload(c.value) && (c.place === i.ready || c.place === i.readyEmpty);
+function isSeed(i: JoinInput, c: Cell): boolean {
+  const seedPlace = i.slot === 'ready' ? i.ready : i.readyEmpty;
+  return i.seedEmpty && !isEdgePayload(c.value) && !isEntryPayload(c.value) && c.place === seedPlace;
 }
 
 /**
@@ -807,10 +873,9 @@ function isSeed(i: InputGadget, c: Cell): boolean {
  * the arms fire in when `free_i` returns to simultaneously waiting arrivals (equal priority,
  * declaration order), so it is also the pairing a resumed net produces for them.
  */
-function joinQueue(g: NodeGadget, i: InputGadget, marking: Marking, routedHere: readonly RoutedArrival[]): Cell[] {
+function joinQueue(g: SlottedGadget, i: JoinInput, marking: Marking, routedHere: readonly RoutedArrival[]): Cell[] {
   const q: Cell[] = [];
-  for (const p of [i.ready, i.readyData, i.readyEmpty]) {
-    if (p === null) continue;
+  for (const p of readyPlacesOf(i)) {
     for (const t of marking.peekTokens(p)) q.push({ value: t.value, place: p });
   }
   for (const e of i.edges) {
@@ -818,10 +883,10 @@ function joinQueue(g: NodeGadget, i: InputGadget, marking: Marking, routedHere: 
     if (e.empty !== null) for (const t of marking.peekTokens(e.empty)) q.push({ value: t.value, place: e.empty });
   }
   for (const r of routedHere) {
-    if (r.inputIndex !== i.index) continue;
-    const e = i.edges.find((s) => s.edge.id === r.edgeId);
-    const place = r.payload === null ? (e?.empty ?? e?.data) : e?.data;
-    q.push({ value: r.payload, place: place ?? g.running });
+    if (r.edge.inputIndex !== i.index) continue;
+    const e = i.edges.find((s) => s.edge.id === r.edge.id);
+    if (e === undefined) throw unmatchedArrival(g, i, r);
+    q.push({ value: r.payload, place: r.payload === null ? (e.empty ?? e.data) : e.data });
   }
   return q;
 }
@@ -836,13 +901,17 @@ function joinQueue(g: NodeGadget, i: InputGadget, marking: Marking, routedHere: 
  * deposits the edge tokens itself, so a cancellation catches them already on the consumer's
  * edge places, where `joinQueue` and the direct-form arrival list read them.
  */
-function collectRouted(marking: Marking, nodes: readonly NodeGadget[]): Map<string, RoutedArrival[]> {
+function collectRouted(marking: Marking, nodes: readonly NodeGadget[], diag: (message: string) => void): Map<string, RoutedArrival[]> {
   const routed = new Map<string, RoutedArrival[]>();
   for (const g of nodes) {
-    if (!g.splitRouting) continue;
-    const okTokens = g.outputs.flatMap((o) => marking.peekTokens(o.ok!).map((t) => ({ t, outputs: [o] })));
+    if (g.routing.kind !== 'split') continue;
+    const okTokens = g.routing.outputs.flatMap((o) => marking.peekTokens(o.ok).map((t) => ({ t, outputs: [o] })));
     for (const { t, outputs } of okTokens) {
-      const v = t.value as OkPayload;
+      const v = t.value;
+      if (!isOkPayload(v)) {
+        diag(`node '${g.node}': token on '${outputs.map((o) => o.ok.name).join("', '")}' carries no ok payload; dropped`);
+        continue;
+      }
       for (const out of outputs) {
         const items = v.nodeSuccessData[out.index];
         const payload: EdgePayload | null = items !== undefined && items !== null && items.length !== 0
@@ -851,13 +920,13 @@ function collectRouted(marking: Marking, nodes: readonly NodeGadget[]): Map<stri
         if (payload === null && out.nil !== null) continue; // a cycle edge carries nothing on nil
         for (const e of out.edges) {
           const list = routed.get(e.edge.to) ?? [];
-          list.push({ inputIndex: e.edge.inputIndex, payload, edgeId: e.edge.id });
+          list.push({ edge: e.edge, payload, ok: out.ok });
           routed.set(e.edge.to, list);
         }
       }
     }
   }
-  for (const list of routed.values()) list.sort((a, b) => a.edgeId - b.edgeId);
+  for (const list of routed.values()) list.sort((a, b) => a.edge.id - b.edge.id);
   return routed;
 }
 
@@ -876,6 +945,3 @@ function nodeOfGadget(
   for (const e of executionData.nodeExecutionStack) if (e.node.name === g.node) return e.node;
   return { id: g.id, name: g.node, type: g.type, typeVersion: g.typeVersion, position: [0, 0], parameters: {} };
 }
-
-// Re-exported for the scheduler's start actions (README "Join gadget": the input a slot serves).
-export type { InputGadget };

@@ -22,8 +22,8 @@ import type {
   IRunData,
   IRunExecutionData, IRunNodeResponse, ITaskDataConnections, ITaskMetadata, Workflow,
 } from 'n8n-workflow';
-import type { ExecutionDataState, SchedulerHooks, SchedulerHost, WorkflowScheduler } from '../n8n/host.js';
-import { FakeHost, type FakeHostOptions, type NodeScript } from './harness.js';
+import type { SchedulerHooks, SchedulerHost, WorkflowScheduler } from '../n8n/host.js';
+import { FakeHost, sleep } from './harness.js';
 
 /** `makeEngineResponse()` (`requests-response.ts:296`). */
 function makeEngineResponse(): EngineResponse {
@@ -35,14 +35,24 @@ function isEngineRequest(value: IRunNodeResponse | EngineRequest): value is Engi
   return !!value && 'actions' in value;
 }
 
-/** `sleep()` from `@n8n/utils/sleep`, as the inner soft-failure loop uses it. */
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * `IRunExecutionData.executionData` as n8n's loop writes it: the stack it pops, and the
+ * per-node, per-run-index waiting slots (one `main` array per multi-input node, a slot per
+ * input, `null` until that input arrives) with the sources of each slot alongside. The
+ * `n8n-workflow` typings say `IWaitingForExecution` / `IWaitingForExecutionSource`; this is
+ * the same shape written out, because the port indexes it the way the original does.
+ */
+export interface ReferenceExecutionState {
+  nodeExecutionStack: IExecuteData[];
+  waitingExecution: Record<string, Record<number, { main: Array<INodeExecutionData[] | null> }>>;
+  waitingExecutionSource: Record<string, Record<number, { main: Array<unknown | null> }>>;
+}
 
 /**
  * `FakeHost` plus `addNodeToBeExecuted`: the enqueue half of n8n's loop. The
  * `PetriScheduler` must never reach it (the net decides what runs), so it stays fatal
- * unless the host is built for the reference engine — {@link referenceHost} is the only
- * thing that turns it on.
+ * unless the host is built for the reference engine — {@link enableEnqueue} is the only
+ * thing that turns it on, and `runReference` is the only caller.
  */
 export class ReferenceHost extends FakeHost {
   private enqueueEnabled = false;
@@ -53,16 +63,14 @@ export class ReferenceHost extends FakeHost {
     return this;
   }
 
-  private get execData(): ExecutionDataState {
-    return this.runExecutionData.executionData!;
+  /** {@link FakeHost.exec} in the shape the port indexes. */
+  private get state(): ReferenceExecutionState {
+    return this.exec as unknown as ReferenceExecutionState;
   }
 
   /** `prepareWaitingToExecution` (`workflow-execute.ts:426-442`). */
   private prepareWaitingToExecution(nodeName: string, numberOfConnections: number, runIndex: number): void {
-    const executionData = this.execData as unknown as {
-      waitingExecution: Record<string, Record<number, { main: Array<INodeExecutionData[] | null> }>>;
-      waitingExecutionSource: Record<string, Record<number, { main: Array<unknown | null> }>>;
-    };
+    const executionData = this.state;
     executionData.waitingExecution ??= {};
     executionData.waitingExecutionSource ??= {};
     const nodeWaiting = (executionData.waitingExecution[nodeName] ??= []);
@@ -127,11 +135,7 @@ export class ReferenceHost extends FakeHost {
     }
     this.calls.push(`addNodeToBeExecuted(${parentNodeName}->${connectionData.node})`);
 
-    const exec = this.execData as unknown as {
-      nodeExecutionStack: IExecuteData[];
-      waitingExecution: Record<string, Record<number, { main: Array<INodeExecutionData[] | null> }>>;
-      waitingExecutionSource: Record<string, Record<number, { main: Array<unknown | null> }>>;
-    };
+    const exec = this.state;
     const nodes = workflow.nodes as unknown as Record<string, INode>;
     const byDestination = workflow.connectionsByDestinationNode as unknown as
       Record<string, { main: Array<IConnection[] | null> }>;
@@ -143,13 +147,12 @@ export class ReferenceHost extends FakeHost {
     const numberOfInputs = byDestination[connectionData.node]?.main?.length ?? 0;
     if (numberOfInputs > 1) {
       exec.waitingExecutionSource ??= {};
-      let nodeWasWaiting = true;
+      // 487-501: the original also records `nodeWasWaiting` here; only the ancestor-forcing
+      // block (610, v0 only) reads it, so the port does not keep it.
       if (exec.waitingExecution[connectionData.node] === undefined) {
         exec.waitingExecution[connectionData.node] = {};
         exec.waitingExecutionSource[connectionData.node] = {};
-        nodeWasWaiting = false;
       }
-      void nodeWasWaiting; // 610: only the ancestor-forcing block reads it (v0 only).
 
       // 503-524: reuse the first waiting entry whose slot for this input is still free.
       let createNewWaitingEntry = true;
@@ -238,16 +241,6 @@ export class ReferenceHost extends FakeHost {
       } as unknown as IExecuteData);
     }
   }
-}
-
-/** A `ReferenceHost` with the enqueue half enabled: the host n8n's own loop needs. */
-export function referenceHost(
-  workflow: Workflow,
-  runExecutionData: IRunExecutionData,
-  scripts: Readonly<Record<string, NodeScript>>,
-  options: FakeHostOptions = {},
-): ReferenceHost {
-  return new ReferenceHost(workflow, runExecutionData, scripts, options).enableEnqueue();
 }
 
 /**
@@ -459,11 +452,7 @@ export class StackReferenceScheduler implements WorkflowScheduler {
     workflow: Workflow,
     runExecutionData: IRunExecutionData,
   ): Promise<void> {
-    const exec = runExecutionData.executionData! as unknown as {
-      nodeExecutionStack: IExecuteData[];
-      waitingExecution: Record<string, Record<number, { main: Array<INodeExecutionData[] | null> }>>;
-      waitingExecutionSource: Record<string, Record<number, unknown>>;
-    };
+    const exec = runExecutionData.executionData! as unknown as ReferenceExecutionState;
     let waitingNodes: string[] = Object.keys(exec.waitingExecution);
     if (exec.nodeExecutionStack.length !== 0 || waitingNodes.length === 0) return;
 

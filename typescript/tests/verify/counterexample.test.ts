@@ -13,6 +13,7 @@ import type { SmtVerificationResult } from 'libpetri/verification';
 import {
   decodeCounterexample, decodeMarking, decodeStep, renderMarkedPlace, renderNodePath, stripBranch,
 } from '../../src/verify/index.js';
+import { inputOf, readyOf } from '../compiler/support.js';
 
 const compiled = compile(diamond);
 const map = compiled.netMap;
@@ -88,7 +89,7 @@ describe('counterexample decoding', () => {
   it('decodes the violating marking into node, role and port', () => {
     const merge = map.node('Merge');
     const state = MarkingState.builder()
-      .tokens(merge.inputs[0]!.ready!, 1)
+      .tokens(readyOf(inputOf(merge, 0)), 1)
       .tokens(map.shared.budget, 2)
       .build();
     const decoded = decodeMarking(state, map);

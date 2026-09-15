@@ -46,6 +46,17 @@ describe('describeWorkflow', () => {
     expect(d.nodes[2]).toMatchObject({ retryOnFail: true, maxTries: 4, waitBetweenTries: 7 });
     expect(Object.keys(d.nodes[3] as object)).not.toContain('disabled');
   });
+
+  it('never hands an id-less node the n<index> prefix another node already owns', () => {
+    // n8n runs a workflow whose node ids are `n1` and undefined; `analyse()` refuses a
+    // duplicate id, so the fallback has to skip what is taken rather than collide with it.
+    const wf = fakeWorkflow(workflow('ids2', [node('T', 'trigger', [0, 0]), node('A', 'set', [1, 0])], [conn('T', 0, 'A', 0)], 'T'));
+    (wf.nodes.T as { id: string }).id = 'n1';
+    (wf.nodes.A as { id?: string }).id = undefined;
+    const d = describeWorkflow(wf, newRunExecutionData(wf.nodes.T!), adapter);
+    expect(d.nodes.map((n) => n.id)).toEqual(['n1', 'n2']);
+    expect(() => compile(d)).not.toThrow();
+  });
 });
 
 describe('nodeShapeOf', () => {

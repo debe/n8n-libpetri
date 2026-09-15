@@ -6,7 +6,9 @@
  */
 import { compile, routingActions, type UnmetReferencePayload } from '../../src/compiler/index.js';
 import { conn, expressionRef, node, workflow } from '../fixtures/workflows.js';
-import { failed, gadget, readNames, runCompiled, started, transitionOf, type Executor } from './support.js';
+import {
+  failed, gadget, inOf, readNames, routedOf, runCompiled, started, transitionInfoOf, transitionOf, type Executor,
+} from './support.js';
 
 const ITEMS = { items: [{ json: { n: 1 } }] };
 
@@ -70,8 +72,8 @@ describe('reference classification', () => {
     expect(x.references).toEqual(['A', 'T']);
     expect(x.unguardedReferences).toEqual(['Down']);
     expect(x.transitions.startUnmet).toEqual(['id:X/start_unmet_0', 'id:X/start_unmet_1']);
-    expect(c.netMap.transition('id:X/start_unmet_0')!.reference).toBe('A');
-    expect(c.netMap.transition('id:X/start_unmet_1')!.reference).toBe('T');
+    expect(transitionInfoOf(c, 'id:X/start_unmet_0', 'start-unmet').reference).toBe('A');
+    expect(transitionInfoOf(c, 'id:X/start_unmet_1', 'start-unmet').reference).toBe('T');
     expect(readNames(transitionOf(c, 'X', 'start'))).toEqual(['id:A/done', 'id:T/done']);
     const other = compile({ ...base, expressionReferences: (n) => (n.name === 'X' ? ['A', 'T'] : []) });
     expect(other.structuralHash).not.toBe(c.structuralHash);
@@ -100,7 +102,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('reference twin end to end on
           tagged = ctx.input(g.running);
           // B has one connected output; `X_run` routes it and marks `X/routed` (ADR 0004).
           for (const out of g.outputs) for (const e of out.edges) ctx.output(e.data, tagged);
-          ctx.output(g.routed!, null);
+          ctx.output(routedOf(g), null);
           ctx.output(g.idle, null);
         };
       });
@@ -108,7 +110,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('reference twin end to end on
     expect(failed(store)).toEqual([]);
     expect(marking.tokenCount(gadget(c, 'A').skipped!)).toBe(1);
     expect(marking.tokenCount(gadget(c, 'B').done)).toBe(1);
-    expect(marking.tokenCount(gadget(c, 'B').in!)).toBe(0);
+    expect(marking.tokenCount(inOf(gadget(c, 'B')))).toBe(0);
     expect(started(store, (n) => n.startsWith('id:B/start'))).toEqual(['id:B/start_unmet_0']);
     expect(tagged as UnmetReferencePayload).toEqual({ unmetReference: 'A', input: ITEMS });
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(1);

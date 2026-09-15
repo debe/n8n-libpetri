@@ -16,8 +16,8 @@ import {
   twoTriggers, userCycle,
 } from '../fixtures/workflows.js';
 import {
-  edgeSlot, gadget, inhibitorNames, inputNames, outputNames, placeNames, readNames,
-  routingPlaces, successBranches, transitionOf,
+  asForm, edgeSlot, gadget, inhibitorNames, inputNames, outputNames, placeNames, readNames, retryOf, routingPlaces,
+  successBranches, transitionInfoOf, transitionOf,
 } from './support.js';
 
 function branchesOf(t: Transition): string[][] {
@@ -100,7 +100,7 @@ describe('emission rule inside a cycle (Loop Over Items)', () => {
     }
     // Body sits on a cycle edge only: no in_empty, no skip, no skipped marker.
     const bodyGadget = gadget(c, 'Body');
-    expect(bodyGadget.inEmpty).toBeNull();
+    expect(asForm(bodyGadget, 'direct').inEmpty).toBeNull();
     expect(bodyGadget.skipped).toBeNull();
     expect(bodyGadget.transitions.skip).toEqual([]);
     expect(successBranches(c, 'Body')).toEqual([
@@ -162,8 +162,8 @@ describe('join gadget (ADR 0003)', () => {
     const armEmpty = c.netMap.transitionObject('id:Merge/arm_e0_empty');
     expect(inputNames(armEmpty)).toEqual(['id:Merge/free_0', 'id:Merge/in0_e0_empty']);
     expect(outputNames(armEmpty)).toEqual(['id:Merge/ready_0']);
-    expect(c.netMap.transition('id:Merge/arm_e0_data')!.edge!.from).toBe('A');
-    expect(c.netMap.transition('id:Merge/arm_e5_data')!.edge!.from).toBe('B');
+    expect(transitionInfoOf(c, 'id:Merge/arm_e0_data', 'arm').edge.from).toBe('A');
+    expect(transitionInfoOf(c, 'id:Merge/arm_e5_data', 'arm').edge.from).toBe('B');
     expect(merge().inputs.map((i) => i.index)).toEqual([0, 1]);
   });
 
@@ -196,8 +196,9 @@ describe('join gadget (ADR 0003)', () => {
     const m = compile(multiProducer);
     const g = gadget(m, 'C');
     expect(g.form).toBe('or');
-    expect(g.inputs.map((i) => [i.index, i.round, i.free, i.ready!.name, i.hasdata!.name, i.ran!.name]))
-      .toEqual([[0, 2, null, 'id:C/ready_0', 'id:C/hasdata_0', 'id:C/ran_0']]);
+    const [i] = asForm(g, 'or').inputs;
+    expect([i.index, i.round, c.netMap.placeFor('C', 'free', 0), i.ready.name, i.hasdata.name, i.ran.name])
+      .toEqual([0, 2, undefined, 'id:C/ready_0', 'id:C/hasdata_0', 'id:C/ran_0']);
     expect(g.transitions.arms).toEqual(['id:C/arm_e0_data', 'id:C/arm_e0_empty', 'id:C/arm_e3_data', 'id:C/arm_e3_empty']);
     expect(inputNames(transitionOf(m, 'C', 'start'))).toEqual(['_budget', 'id:C/hasdata_0', 'id:C/idle']);
     expect(gadget(m, 'A').form).toBe('direct');
@@ -214,7 +215,7 @@ describe('Merge chooseBranch: all inputs required, combinations enumerated', () 
   it('X_start consumes ready_i_data for every input; no hasdata place', () => {
     const g = gadget(c, 'Merge');
     expect(g.form).toBe('choose-branch');
-    expect(g.hasdata).toBeNull();
+    expect(c.netMap.placeFor('Merge', 'hasdata')).toBeUndefined();
     expect(inputNames(transitionOf(c, 'Merge', 'start'))).toEqual(['_budget', 'id:Merge/idle', 'id:Merge/ready_0_data', 'id:Merge/ready_1_data']);
   });
 
@@ -276,13 +277,13 @@ describe('retry gadget', () => {
       ['id:A/routed', 'id:B/in'], ['id:A/routed', 'id:B/in_empty'],
       ['_budget', '_halt'], ['_budget', '_pause', 'id:A/waiting'], ['_budget', '_pause', 'id:A/stopped'],
     ]);
-    expect(gadget(c, 'A')).toMatchObject({ retryOnFail: true, maxTries: 3, waitBetweenTries: 10 });
+    expect(retryOf(gadget(c, 'A'))).toMatchObject({ maxTries: 3, waitBetweenTries: 10 });
   });
 
   it('nodes without retry have no retry places or transitions', () => {
     const b = gadget(c, 'B');
     expect(b.retry).toBeNull();
-    expect(b.tries).toBeNull();
+    expect(c.netMap.placeFor('B', 'tries')).toBeUndefined();
     expect(b.transitions.retryWait).toBeNull();
     // The pause outcomes (M2) exist on every node; only the retry alternative is missing.
     expect(outputNames(transitionOf(c, 'B', 'run'))).toEqual([

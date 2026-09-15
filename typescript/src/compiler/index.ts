@@ -12,34 +12,40 @@
  * halt + reap, expression read arcs, unreachable-input seeding and the k-safety check are
  * specified in README.md ("The model") and ADRs 0002–0004.
  */
-export { compile, kSafety, readySlot } from './compile.js';
-export {
-  analyse, isAllRequired, joinFormOf, requiredInputsOf, retryParamsOf, resolveFailureChain,
-  DEFAULT_MAX_TRIES, DEFAULT_WAIT_BETWEEN_TRIES_MS, MIN_MAX_TRIES, MAX_MAX_TRIES, MAX_WAIT_BETWEEN_TRIES_MS,
-  DEFAULT_MAX_AGENT_ROUNDS, DEFAULT_MAX_AGENT_TOOL_CALLS,
-} from './graph.js';
+export { compile, readyPlacesOf, readySlot } from './compile.js';
+export { analyse, DEFAULT_MAX_AGENT_ROUNDS, DEFAULT_MAX_AGENT_TOOL_CALLS } from './graph.js';
 export type { AnalysisOptions } from './graph.js';
-export { SPLIT_ROUTING_ABOVE } from './gadget.js';
-export type {
-  AnalysedNode, FailureChain, MultiProducerInput, ReferenceKind, ResolvedReference, ResolvedStep,
-  RetryParams, WorkflowAnalysis,
-} from './graph.js';
-export {
-  parseExecutionPolicy, mergePolicies, plannedBehavioursOf, isTerminalAction, PolicyError,
-  BEHAVIOURS, POLICY_SCHEMA_VERSION,
-} from './policy.js';
+export { parseExecutionPolicy, mergePolicies, PolicyError, POLICY_SCHEMA_VERSION } from './policy.js';
 export type {
   BehaviourEntry, BehaviourStatus, ExecutionPolicy, FailureAction, FailureStep, PolicyParse,
 } from './policy.js';
 export { structuralHash } from './hash.js';
 export { NetMap } from './net-map.js';
-export { placeholderActions, forwardAllActions, routingActions, structuralActions } from './actions.js';
 export type { RoutingMode, RoutingPolicy } from './actions.js';
+// test-facing: the suites pin these facts of the model directly; no other layer reads them.
+export { kSafety } from './compile.js';
+export { isAllRequired, joinFormOf, requiredInputsOf, retryParamsOf } from './graph.js';
+export { SPLIT_ROUTING_ABOVE } from './gadget.js';
+export { placeholderActions, forwardAllActions, routingActions } from './actions.js';
 export type {
-  ActionBinder, BudgetRestriction, CompileOptions, CompiledWorkflow, EdgeKind, EdgeRef, EdgeSlot,
-  ExpressionReferences, InputGadget, JoinForm, JoinReadyPlaces, MainConnection, NetMapView, NodeDescription, NodeGadget,
-  AttemptGadget, NodeGadgetTransitions, NodeTypeResolver, NodeTypeShape, OnError, OutputGadget,
+  ActionBinder, BudgetRestriction, CompileOptions, CompiledWorkflow, EdgeRef, EdgeSlot,
+  InputGadget, JoinForm, JoinReadyPlaces, MainConnection, NetMapView, NodeDescription, NodeGadget,
+  AttemptGadget, NodeTypeShape, OnError, OutputGadget,
   PlaceInfo, PlaceRole,
   SharedPlaces, ToolConnection, TransitionInfo, TransitionRole, UnmetReferencePayload, Variant,
   WorkflowDescription,
+  // Analysis vocabulary (moved from graph.ts; the names are unchanged).
+  AnalysedNode, FailureChain, MultiProducerInput, ReferenceKind, ResolvedReference, ResolvedStep,
+  ResolvedRetryStep, ResolvedRouteStep, ResolvedStepCommon, ResolvedTerminalStep, RetryParams, WorkflowAnalysis,
+  // Gadget union members.
+  NodeGadgetCommon, DirectGadget, OrGadget, JoinGadget, ChooseBranchGadget, ToolGadget, SlottedGadget,
+  RetryGadget, AgentGadget, RoutingGadget,
+  InputGadgetCommon, InputSlot, OrSlot, ReadySlot, SplitReadySlot, OrInput, ReadyInput, SplitReadyInput,
+  OutputGadgetCommon, CollapsedOutput, SplitOutput,
+  AttemptGadgetCommon, RetryAttempt, RouteAttempt, TerminalAttempt,
+  // Transition union members.
+  TransitionInfoCommon, TransitionInfoOf, StartTransition, StartUnmetTransition, RunTransition, RouteTransition,
+  DoneTransition, SkipTransition, ArmTransition, ClearTransition, RetryTransition, ExhaustedTransition,
+  SinkTransition, AttemptTransition, DeadlineTransition, DoneRequestTransition, DispatchTransition,
+  CollectTransition, ResumeTransition, RoundsOutTransition, CallsOutTransition,
 } from './types.js';

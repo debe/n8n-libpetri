@@ -74,18 +74,18 @@ function verdictOf(baseline: EngineStatus, candidate: EngineStatus): Verdict {
   return 'changed';
 }
 
+/** The tally of no rows: what a pattern without a row reports. */
+export const EMPTY_TALLY: Tally = { total: 0, passed: 0, failed: 0, skipped: 0, missing: 0 };
+
 function tally(rows: readonly MatrixRow[]): Tally {
-  let passed = 0;
-  let failed = 0;
-  let skipped = 0;
-  let missing = 0;
+  const t = { ...EMPTY_TALLY, total: rows.length };
   for (const r of rows) {
-    if (r.candidate === 'pass') passed++;
-    else if (r.candidate === 'fail') failed++;
-    else if (r.candidate === 'skip') skipped++;
-    else missing++;
+    if (r.candidate === 'pass') t.passed++;
+    else if (r.candidate === 'fail') t.failed++;
+    else if (r.candidate === 'skip') t.skipped++;
+    else t.missing++;
   }
-  return { total: rows.length, passed, failed, skipped, missing };
+  return t;
 }
 
 /** Build the matrix. Rows follow the baseline's document order; candidate-only rows come last. */
@@ -108,12 +108,19 @@ export function buildMatrix(
   const loop = rows.filter((r) => r.classification.loopDriving);
   // Pattern order, not document order: the junit lists the waiting cases' file before
   // workflow-execute.test.ts, and the headline should still read in the classifier's order.
-  const ids = [...LOOP_DRIVING_PATTERNS.map((p) => p.id), ...loop.map((r) => r.classification.pattern ?? '')];
+  // Grouped in one pass; the ids are then visited in the classifier's order first, and a
+  // custom classifier's ids in order of first appearance.
+  const groups = new Map<string, MatrixRow[]>();
+  for (const r of loop) {
+    const id = r.classification.pattern ?? '';
+    const group = groups.get(id);
+    if (group === undefined) groups.set(id, [r]);
+    else group.push(r);
+  }
   const byPattern = new Map<string, Tally>();
-  for (const id of ids) {
-    if (byPattern.has(id)) continue;
-    const group = loop.filter((r) => r.classification.pattern === id);
-    if (group.length > 0) byPattern.set(id, tally(group));
+  for (const id of [...LOOP_DRIVING_PATTERNS.map((p) => p.id), ...groups.keys()]) {
+    const group = groups.get(id);
+    if (group !== undefined && !byPattern.has(id)) byPattern.set(id, tally(group));
   }
   return {
     baselineLabel: options.baselineLabel ?? 'baseline',

@@ -23,10 +23,13 @@ export { PetriScheduler, registerPetriScheduler, CompiledWorkflowCache, schedule
 export type {
   PetriSchedulerOptions, SchedulerOutcome, RegisterPetriSchedulerOptions, PetriSchedulerRegistration, ExecutionEnv,
   SchedulerState,
-  EdgePayload, EntryPayload, InputPayload, OkPayload, RetryPayload, RetryReason, RunPayload, StoppedPayload, WaitingPayload,
+  DispatchPayload, EdgePayload, EntryPayload, InputPayload, OkPayload, RequestPayload, ResponsePayload, RetryPayload,
+  RetryReason, RoundPayload, RunPayload, StoppedPayload, WaitingPayload,
 } from './scheduler/index.js';
 export {
-  SchedulerNodeError, UnmetReferenceError, UNMET_REFERENCE_MESSAGE_TEMPLATE, isEdgePayload, isEntryPayload,
+  SchedulerNodeError, UnmetReferenceError, UnexpectedTokenError, UNMET_REFERENCE_MESSAGE_TEMPLATE,
+  isDispatchPayload, isEdgePayload, isEntryPayload, isOkPayload, isRequestPayload, isRetryPayload, isRoundPayload,
+  isRunPayload, isStoppedPayload, isWaitingPayload,
 } from './scheduler/index.js';
 export {
   decodeExecutionData, encodeMarking, entryForEdge, CodecError,
@@ -34,6 +37,7 @@ export {
 } from './codec.js';
 export {
   describeWorkflow, scanExpressionReferences, mainConnectionsOf, nodeShapeOf, startNodesOf, LOOP_NODE_TYPES,
+  UnknownNodeError, inheritableWorkflowPolicy,
 } from './n8n/adapter.js';
 export type { AdapterOptions } from './n8n/adapter.js';
 export type {

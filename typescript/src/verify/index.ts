@@ -69,9 +69,9 @@ export type {
   SmtFallbackMode, SolverInfo, StateSpaceSummary, VerificationReport, VerifyOptions,
 } from './types.js';
 export {
-  BUILT_IN_SHAPES, connectionsOf, describeWorkflowJson, looksLikeTrigger, parseWorkflowJson,
+  BUILT_IN_SHAPES, connectionsOf, describeWorkflowJson, looksLikeTrigger, parseNodeTypesFile, parseWorkflowJson,
   pickStartNode, shapeOf,
 } from './workflow-json.js';
 export type { NodeTypesFile, WorkflowJsonOptions, WorkflowJsonResult } from './workflow-json.js';
-export { USAGE, nodeIo, parseArgs, runCli } from './cli.js';
-export type { CliIo } from './cli.js';
+export { USAGE, UsageError, nodeIo, parseArgs, runCli } from './cli.js';
+export type { CliIo, ParsedArgs } from './cli.js';

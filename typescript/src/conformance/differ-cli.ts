@@ -17,18 +17,24 @@
 import { writeFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { diffFixture, renderDiffReport, type DifferFixture, type DiffResult } from './differ.js';
+import {
+  diffFixture, fixtureStatics, novelMechanismsOf, renderDiffReport,
+  type DifferFixture, type DiffResult, type FixtureStatics,
+} from './differ.js';
 
 export interface DifferCliIo {
   readonly load: (specifier: string) => Promise<unknown>;
   readonly writeFile: (path: string, content: string) => void;
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
-  /** Runs one fixture at one budget; {@link diffFixture} unless a test substitutes one. */
-  readonly diff?: (fixture: DifferFixture, budget: number) => Promise<DiffResult>;
+  /**
+   * Runs one fixture at one budget; {@link diffFixture} unless a test substitutes one. The
+   * statics are the fixture's, computed once for every budget it runs at.
+   */
+  readonly diff?: (fixture: DifferFixture, budget: number, statics: FixtureStatics) => Promise<DiffResult>;
 }
 
-export const DIFFER_USAGE =
+const DIFFER_USAGE =
   'usage: differ-cli <fixtures-module> [--budget N]… [--fixture NAME]… [--out FILE] [--title T]';
 
 /** Pull the fixture array out of a loaded module. */
@@ -82,9 +88,11 @@ export async function runDifferCli(argv: readonly string[], io: DifferCliIo): Pr
     return 2;
   }
   const results: DiffResult[] = [];
+  const diff = io.diff ?? diffFixture;
   for (const fixture of selected) {
+    const statics = fixtureStatics(fixture.workflow);
     for (const budget of budgets.length > 0 ? budgets : (fixture.budgets ?? [1, 2, 4])) {
-      results.push(await (io.diff ?? diffFixture)(fixture, budget));
+      results.push(await diff(fixture, budget, statics));
     }
   }
   const report = renderDiffReport(results, title);
@@ -92,7 +100,7 @@ export async function runDifferCli(argv: readonly string[], io: DifferCliIo): Pr
   else io.writeFile(out, report);
   const failed = results.filter((r) => r.verdict === 'fail');
   const divergent = results.filter((r) => r.verdict === 'divergent');
-  const novel = [...new Set(results.flatMap((r) => r.novelMechanisms))].sort();
+  const novel = novelMechanismsOf(results);
   io.stderr(
     `${results.length - failed.length - divergent.length} pass, ${divergent.length} divergent, ` +
     `${failed.length} fail${failed.length > 0 ? `: ${failed.map((r) => `${r.fixture}@k=${r.requestedBudget}`).join(', ')}` : ''}` +

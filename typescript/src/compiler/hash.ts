@@ -3,7 +3,7 @@
  * `PrecompiledNet` program (CONC-020: compile once per workflow version).
  */
 import { createHash } from 'node:crypto';
-import type { WorkflowAnalysis } from './graph.js';
+import type { WorkflowAnalysis } from './types.js';
 
 /**
  * SHA-256 (hex) over a canonical JSON rendering of everything the compiler reads: nodes in
@@ -41,10 +41,10 @@ export function structuralHash(analysis: WorkflowAnalysis): string {
       position: [a.node.position[0], a.node.position[1]],
       disabled: a.node.disabled === true,
       onError: a.onError,
-      retryOnFail: a.retryOnFail,
+      retryOnFail: a.retry !== null,
       // Clamped as n8n reads them, so values n8n treats alike hash alike.
-      maxTries: a.maxTries,
-      waitBetweenTries: a.waitBetweenTries,
+      maxTries: a.retry === null ? null : a.retry.maxTries,
+      waitBetweenTries: a.retry === null ? null : a.retry.waitBetweenTries,
       inputCount: a.shape.inputCount,
       outputCount: a.shape.outputCount,
       requiredInputs: a.shape.requiredInputs === undefined ? null
@@ -67,7 +67,12 @@ export function structuralHash(analysis: WorkflowAnalysis): string {
       // field that changes the net — two workflows sharing one compiled net.
       failure: a.failure === null ? null : {
         timeoutMs: a.failure.timeoutMs,
-        steps: a.failure.steps.map((step) => [step.action, step.waitMs, step.outputIndex]),
+        // `[action, waitMs, outputIndex]`, a field the step does not carry serialised as `null`
+        // — the triple every step hashed as before the steps became a union, so the hash of a
+        // chain is unchanged.
+        steps: a.failure.steps.map((step) => step.action === 'retry' ? [step.action, step.waitMs, null]
+          : step.action === 'route' ? [step.action, null, step.outputIndex]
+          : [step.action, null, null]),
       },
     })),
     edges: analysis.edges.map((e) => [e.from, e.outputIndex, e.to, e.inputIndex]),

@@ -30,6 +30,7 @@ import {
   CASE_TIMEOUT_MS, TEST_TIMEOUT_MS, checksOf, describeZ3, digest, liveSampleNode, orphanBranch,
   retryFour, unbalancedJoin,
 } from './support.js';
+import { retryOf, splitOutputsOf } from '../compiler/support.js';
 
 const base = { timeoutMs: TEST_TIMEOUT_MS } as const;
 
@@ -62,7 +63,7 @@ describeZ3('verify: properties', () => {
         // The in-flight place: `X/routed` for a node that routes inside `X_run`, `X/ok_o`
         // for one above `SPLIT_ROUTING_ABOVE` — where the enumeration returns one law per
         // output rather than one folded law.
-        const inFlight = g.routed?.name ?? g.outputs[0]!.ok!.name;
+        const inFlight = g.routing.kind === 'collapsed' ? g.routing.routed.name : splitOutputsOf(g)[0]!.ok.name;
         expect(semiflow, `${g.node} holds no in-flight place in the semiflow`).toContain(inFlight);
       }
       const structural = report.checks.find((c) => c.subject.kind === 'net')!;
@@ -166,7 +167,7 @@ describeZ3('verify: properties', () => {
     it('the producer half is what carries the attempt bound: nothing in the net produces X/tries', () => {
       // Structural, no solver: the check reads the flattened net the encoder sees.
       const compiled = compile(retryFour);
-      const tries = compiled.netMap.node('A').tries!;
+      const tries = retryOf(compiled.netMap.node('A')).tries;
       expect(producersOf(flatten(compiled.net), tries)).toEqual([]);
       // The query is live rather than vacuous: something *does* produce X/running.
       expect(producersOf(flatten(compiled.net), compiled.netMap.node('A').running).length).toBeGreaterThan(0);

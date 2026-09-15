@@ -21,9 +21,12 @@
  * Places are addressed through the canonical objects of the flat net (`NetMap`); the
  * context resolves them by name (CORE-002), so no MOD-031 alias is involved.
  */
-import type { TransitionAction, TransitionContext } from 'libpetri';
+import type { Place, TransitionAction, TransitionContext } from 'libpetri';
+import { assertNever } from '../internal/assert.js';
+import { readySlot } from './gadget.js';
 import type {
-  ActionBinder, InputGadget, NetMapView, NodeGadget, OutputGadget, TransitionInfo, UnmetReferencePayload,
+  ActionBinder, ArmTransition, AttemptTransition, DeadlineTransition, NetMapView, NodeGadget, OutputGadget,
+  AgentGadget, AttemptGadget, RouteTransition, SlottedGadget, StartUnmetTransition, UnmetReferencePayload,
 } from './types.js';
 
 export type RoutingMode = 'no-data' | 'data';
@@ -44,21 +47,25 @@ function routeOutput(ctx: TransitionContext, g: NodeGadget, out: OutputGadget, m
   }
 }
 
-/** The place `X_start` consumes for input `i` (README join gadget / chooseBranch enumeration). */
-function readyOf(g: NodeGadget, i: InputGadget) {
-  return g.form === 'choose-branch' && i.required ? i.readyData! : i.ready!;
-}
-
 /** Consumes the start inputs and returns the value to put on `X/running`, refunding the join slots. */
 function startInput(ctx: TransitionContext, g: NodeGadget): unknown {
-  if (g.form === 'direct') return ctx.input(g.in!);
-  if (g.form === 'or') {
-    const i = g.inputs[0]!;
-    ctx.output(i.ran!, null);
-    return ctx.input(i.hasdata!);
+  switch (g.form) {
+    case 'direct': return ctx.input(g.in);
+    case 'tool': return ctx.input(g.inTool);
+    case 'or': {
+      const [i] = g.inputs;
+      ctx.output(i.ran, null);
+      return ctx.input(i.hasdata);
+    }
+    case 'join':
+    case 'choose-branch': return startJoin(ctx, g);
+    default: return assertNever(g, 'gadget form');
   }
-  const values = g.inputs.map((i) => ctx.input(readyOf(g, i)));
-  for (const i of g.inputs) ctx.output(i.free!, null);
+}
+
+function startJoin(ctx: TransitionContext, g: SlottedGadget): unknown[] {
+  const values = g.inputs.map((i) => ctx.input(readySlot(g, i, 'data')));
+  for (const i of g.inputs) ctx.output(i.free, null);
   return values;
 }
 
@@ -68,8 +75,8 @@ function startAction(g: NodeGadget): TransitionAction {
   };
 }
 
-function startUnmetAction(g: NodeGadget, info: TransitionInfo): TransitionAction {
-  const unmetReference = info.reference!;
+function startUnmetAction(g: NodeGadget, info: StartUnmetTransition): TransitionAction {
+  const { reference: unmetReference } = info;
   return async (ctx) => {
     const payload: UnmetReferencePayload = { unmetReference, input: startInput(ctx, g) };
     ctx.output(g.running, payload);
@@ -85,16 +92,24 @@ function succeed(ctx: TransitionContext, g: NodeGadget, policy: RoutingPolicy, v
     // A tool's output is its agent's `A/response`, not a main edge. Several agents can share a
     // tool, so the outcome is an `xor` over them; the placeholder takes the first branch, and
     // the scheduler's action reads the agent off the dispatch token.
-    ctx.output(map.node(g.agents[0]!).response!, value);
-    ctx.output(g.routed!, null);
+    ctx.output(responseOf(map, g.agents[0]), value);
+    if (g.routing.kind === 'split') throw new Error(`internal: tool '${g.node}' routes per output`);
+    ctx.output(g.routing.routed, null);
     return;
   }
-  if (g.splitRouting) {
-    for (const out of g.outputs) ctx.output(out.ok!, value);
+  if (g.routing.kind === 'split') {
+    for (const out of g.routing.outputs) ctx.output(out.ok, value);
     return;
   }
-  for (const out of g.outputs) routeOutput(ctx, g, out, policy(g, out), value);
-  ctx.output(g.routed!, null);
+  for (const out of g.routing.outputs) routeOutput(ctx, g, out, policy(g, out), value);
+  ctx.output(g.routing.routed, null);
+}
+
+/** The `A/response` place of `agent`, which every node a tool is wired to has by construction. */
+function responseOf(map: NetMapView, agent: string): Place<unknown> {
+  const owner = map.node(agent);
+  if (owner.agent === null) throw new Error(`internal: '${agent}' is wired as an agent but compiled without an agent side`);
+  return owner.agent.response;
 }
 
 function runAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView): TransitionAction {
@@ -104,12 +119,14 @@ function runAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView): Trans
   };
 }
 
-/** Per-output routing only (`splitRouting`): `X_route_o` drains one `X/ok_o`. */
-function routeAction(g: NodeGadget, info: TransitionInfo, policy: RoutingPolicy): TransitionAction {
-  const out = g.outputs.find((o) => o.index === info.port)!;
+/** Per-output routing only (`routing.kind === 'split'`): `X_route_o` drains one `X/ok_o`. */
+function routeAction(g: NodeGadget, info: RouteTransition, policy: RoutingPolicy): TransitionAction {
+  if (g.routing.kind !== 'split') throw new Error(`internal: node '${g.node}' has a route transition but routes in X_run`);
+  const out = g.routing.outputs.find((o) => o.index === info.port);
+  if (out === undefined) throw new Error(`internal: node '${g.node}' has no output ${info.port} for '${info.name}'`);
   return async (ctx) => {
-    routeOutput(ctx, g, out, policy(g, out), ctx.input(out.ok!));
-    ctx.output(out.routed!, null);
+    routeOutput(ctx, g, out, policy(g, out), ctx.input(out.ok));
+    ctx.output(out.routed, null);
   };
 }
 
@@ -121,40 +138,51 @@ function doneAction(g: NodeGadget, map: NetMapView): TransitionAction {
 }
 
 function exhaustedAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView): TransitionAction {
+  const { retry } = g;
+  if (retry === null) throw new Error(`internal: node '${g.node}' has an exhausted transition but no retry gadget`);
   return async (ctx) => {
-    succeed(ctx, g, policy, ctx.input(g.retry!), map);
+    succeed(ctx, g, policy, ctx.input(retry.retry), map);
   };
 }
 
 function skipAction(g: NodeGadget): TransitionAction {
+  const { skipped } = g;
+  if (skipped === null) throw new Error(`internal: node '${g.node}' has a skip transition but no skipped place`);
+  const refunds = g.form === 'join' || g.form === 'choose-branch' ? g.inputs.map((i) => i.free) : [];
   return async (ctx) => {
     for (const out of g.outputs) for (const e of out.edges) if (e.empty !== null) ctx.output(e.empty, null);
-    ctx.output(g.skipped!, null);
-    if (g.form !== 'or') for (const i of g.inputs) ctx.output(i.free!, null);
+    ctx.output(skipped, null);
+    for (const free of refunds) ctx.output(free, null);
   };
 }
 
-function armAction(g: NodeGadget, info: TransitionInfo): TransitionAction {
-  const edge = info.edge!;
-  const input = g.inputs.find((i) => i.index === edge.inputIndex)!;
-  const slot = input.edges.find((e) => e.edge.id === edge.id)!;
-  if (g.form === 'or') {
-    if (info.variant === 'data') {
+function armAction(g: NodeGadget, info: ArmTransition): TransitionAction {
+  const { edge, variant } = info;
+  if (g.form === 'direct' || g.form === 'tool') throw new Error(`internal: node '${g.node}' has an arm but no join input`);
+  const input = g.inputs.find((i) => i.index === edge.inputIndex);
+  const slot = input?.edges.find((e) => e.edge.id === edge.id);
+  if (input === undefined || slot === undefined) {
+    throw new Error(`internal: node '${g.node}' has no input ${edge.inputIndex} edge ${edge.id} for '${info.name}'`);
+  }
+  if (input.slot === 'or') {
+    if (variant === 'data') {
       return async (ctx) => {
-        ctx.output(input.hasdata!, ctx.input(slot.data));
-        if (slot.empty !== null) ctx.output(input.ready!, null);
+        ctx.output(input.hasdata, ctx.input(slot.data));
+        if (slot.empty !== null) ctx.output(input.ready, null);
       };
     }
-    return async (ctx) => { ctx.output(input.ready!, null); };
+    return async (ctx) => { ctx.output(input.ready, null); };
   }
-  if (info.variant === 'data') {
+  const ready = readySlot(g, input, variant);
+  if (variant === 'data') {
+    const hasdata = g.form === 'join' ? g.hasdata : null;
     return async (ctx) => {
-      ctx.output(readyOf(g, input), ctx.input(slot.data));
-      if (g.hasdata !== null) ctx.output(g.hasdata, null);
+      ctx.output(ready, ctx.input(slot.data));
+      if (hasdata !== null) ctx.output(hasdata, null);
     };
   }
   return async (ctx) => {
-    ctx.output(g.form === 'choose-branch' && input.required ? input.readyEmpty! : input.ready!, null);
+    ctx.output(ready, null);
   };
 }
 
@@ -167,12 +195,19 @@ function armAction(g: NodeGadget, info: TransitionInfo): TransitionAction {
  * the placeholders' whole job; the scheduler's own action puts the queue up when there is one.
  */
 function doneRequestAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  const agent = agentOf(g);
   return async (ctx) => {
-    const value = ctx.input(g.routedRequest!);
+    const value = ctx.input(agent.routedRequest);
     ctx.output(map.shared.budget, null);
-    ctx.output(g.drained!, value);
-    ctx.output(g.dispatched!, value);
+    ctx.output(agent.drained, value);
+    ctx.output(agent.dispatched, value);
   };
+}
+
+/** The agent side of a node whose round transitions are being bound: the gadget built them only for an agent. */
+function agentOf(g: NodeGadget): AgentGadget {
+  if (g.agent === null) throw new Error(`internal: node '${g.node}' has a round transition but no agent side`);
+  return g.agent;
 }
 
 /**
@@ -182,87 +217,99 @@ function doneRequestAction(g: NodeGadget, map: NetMapView): TransitionAction {
  * takes the tool the action names and knows whether the queue has more.
  */
 function dispatchAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  const agent = agentOf(g);
+  const firstTool = map.node(agent.tools[0]);
+  if (firstTool.form !== 'tool') throw new Error(`internal: agent '${g.node}' dispatches to '${firstTool.node}', which is not a tool`);
   return async (ctx) => {
-    const value = ctx.input(g.queue!);
-    ctx.output(map.node(g.tools[0]!).inTool!, value);
-    ctx.output(g.drained!, value);
-    ctx.output(g.outstanding!, null);
+    const value = ctx.input(agent.queue);
+    ctx.output(firstTool.inTool, value);
+    ctx.output(agent.drained, value);
+    ctx.output(agent.outstanding, null);
   };
 }
 
 /** `A_calls_out`: the budget is spent with calls queued, so the agent re-enters to fail. */
 function callsOutAction(g: NodeGadget): TransitionAction {
+  const agent = agentOf(g);
   return async (ctx) => {
-    ctx.output(g.running, ctx.input(g.dispatched!));
+    ctx.output(g.running, ctx.input(agent.dispatched));
   };
 }
 
 /** `A_resume`: the round is complete, so the agent re-enters `X_run` with its resume entry. */
 function resumeAction(g: NodeGadget): TransitionAction {
+  const agent = agentOf(g);
   return async (ctx) => {
-    ctx.output(g.running, ctx.input(g.dispatched!));
+    ctx.output(g.running, ctx.input(agent.dispatched));
   };
 }
 
 /** `A_rounds_out`: the budget is spent, so the open round becomes a designed pause. */
 function roundsOutAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  const agent = agentOf(g);
   return async (ctx) => {
-    ctx.output(g.stopped, ctx.input(g.dispatched!));
+    ctx.output(g.stopped, ctx.input(agent.dispatched));
     ctx.output(map.shared.pause, null);
   };
 }
 
 function retryWaitAction(g: NodeGadget): TransitionAction {
+  const { retry } = g;
+  if (retry === null) throw new Error(`internal: node '${g.node}' has a retry_wait transition but no retry gadget`);
   return async (ctx) => {
-    ctx.output(g.running, ctx.input(g.retry!));
+    ctx.output(g.running, ctx.input(retry.retry));
   };
+}
+
+/** The attempt a chain transition serves; the gadget names one per attempt it built. */
+function attemptOf(g: NodeGadget, info: AttemptTransition | DeadlineTransition): AttemptGadget {
+  const attempt = g.attempts.find((att) => att.index === info.attempt);
+  if (attempt === undefined) throw new Error(`internal: node '${g.node}' has no attempt ${info.attempt} for '${info.name}'`);
+  return attempt;
 }
 
 /** The `onFailure` step for one attempt: escalate to the next, or take the terminal arm. */
 function attemptAction(
-  g: NodeGadget, info: TransitionInfo, policy: RoutingPolicy, map: NetMapView,
+  g: NodeGadget, info: AttemptTransition, policy: RoutingPolicy, map: NetMapView,
 ): TransitionAction {
-  const i = g.attempts.findIndex((att) => att.index === info.attempt);
-  const attempt = g.attempts[i]!;
+  const attempt = attemptOf(g, info);
   switch (attempt.action) {
-    case 'retry': {
+    case 'retry':
       // The chain is unrolled, so "the next attempt" is a place rather than a decrement.
-      const next = g.attempts[i + 1]!;
       return async (ctx) => {
-        ctx.output(next.running, ctx.input(attempt.failed));
+        ctx.output(attempt.next, ctx.input(attempt.failed));
       };
-    }
     case 'stop':
       return async (ctx) => {
         ctx.input(attempt.failed);
         ctx.output(map.shared.halt, null);
         ctx.output(map.shared.budget, null);
       };
-    default:
+    case 'route':
+    case 'continue':
       // `route` and `continue` share the success spec; which output carries the data is the
       // scheduler's decision, and the placeholder keeps its usual no-data routing.
       return async (ctx) => {
         succeed(ctx, g, policy, ctx.input(attempt.failed), map);
       };
+    default: return assertNever(attempt, 'attempt');
   }
 }
 
 /** The deadline funnel: an expired attempt becomes the ordinary failure its step answers. */
-function deadlineAction(g: NodeGadget, info: TransitionInfo): TransitionAction {
-  const attempt = g.attempts.find((att) => att.index === info.attempt)!;
+function deadlineAction(g: NodeGadget, info: DeadlineTransition): TransitionAction {
+  const attempt = attemptOf(g, info);
+  const { timedOut } = attempt;
+  if (timedOut === null) throw new Error(`internal: node '${g.node}' has a deadline funnel but attempt ${info.attempt} has no timedout place`);
   return async (ctx) => {
-    ctx.output(attempt.failed, ctx.input(attempt.timedOut!));
+    ctx.output(attempt.failed, ctx.input(timedOut));
   };
 }
 
 /** Binds a structural action for every role that declares an `Out` spec; sinks and `clear` keep passthrough. */
 export function structuralActions(policy: RoutingPolicy): ActionBinder {
   return (info, map) => {
-    // `clear` and `collect` close a round and produce nothing: genuine sinks (CORE-043 AC4),
-    // so they keep libpetri's passthrough rather than a placeholder that would have to invent
-    // an output.
-    if (info.role === 'sink' || info.role === 'clear' || info.role === 'collect') return null;
-    const g = map.node(info.node!);
+    const g = map.node(info.node);
     switch (info.role) {
       case 'start': return startAction(g);
       case 'start-unmet': return startUnmetAction(g, info);
@@ -280,6 +327,13 @@ export function structuralActions(policy: RoutingPolicy): ActionBinder {
       case 'resume': return resumeAction(g);
       case 'rounds-out': return roundsOutAction(g, map);
       case 'calls-out': return callsOutAction(g);
+      // `sink`, `clear` and `collect` close a round or drain a `nil` and produce nothing:
+      // genuine sinks (CORE-043 AC4), so they keep libpetri's passthrough rather than a
+      // placeholder that would have to invent an output.
+      case 'sink':
+      case 'clear':
+      case 'collect': return null;
+      default: return assertNever(info, 'transition role');
     }
   };
 }

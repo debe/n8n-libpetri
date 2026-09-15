@@ -15,6 +15,7 @@ import {
   execute, expectedSuccessSequence, items, ranNodes, transitionsFailed, withoutStackMachinery,
   type NodeScript,
 } from './support.js';
+import { inOf } from '../compiler/support.js';
 
 const START = items({ n: 1 });
 
@@ -139,7 +140,7 @@ describe('fan-out', () => {
     const trig = r.runData.Trigger![0]!.data!.main![0];
     for (const n of ['A', 'B', 'C']) {
       const g = r.scheduler.compiled!.netMap.node(n);
-      const added = r.store.events().find((e) => e.type === 'token-added' && e.placeName === g.in!.name) as { token: { value: EdgePayload } };
+      const added = r.store.events().find((e) => e.type === 'token-added' && e.placeName === inOf(g).name) as { token: { value: EdgePayload } };
       expect(added.token.value.items, n).toBe(trig);
       expect(added.token.value.source, n).toEqual({ previousNode: 'Trigger', previousNodeOutput: 0, previousNodeRun: 0 });
     }

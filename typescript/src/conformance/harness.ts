@@ -21,7 +21,7 @@ import type {
 } from 'n8n-workflow';
 import type { NodeDescription, WorkflowDescription } from '../compiler/index.js';
 import { POLICY_SCHEMA_VERSION } from '../compiler/index.js';
-import type { NodeHelpersLike, PlannedNode, SchedulerHooks, SchedulerHost } from '../n8n/host.js';
+import type { ExecutionDataState, NodeHelpersLike, PlannedNode, SchedulerHooks, SchedulerHost } from '../n8n/host.js';
 
 // ==================== fake Workflow ====================
 
@@ -35,7 +35,7 @@ export interface FakeWorkflowOptions {
   readonly requiredInputsExpression?: Readonly<Record<string, string>>;
 }
 
-export function toINode(n: NodeDescription, options: FakeWorkflowOptions = {}): INode {
+function toINode(n: NodeDescription, options: FakeWorkflowOptions = {}): INode {
   return {
     id: n.id,
     name: n.name,
@@ -168,8 +168,6 @@ export const fakeNodeHelpers: NodeHelpersLike = {
 
 // ==================== run data ====================
 
-export const ITEM: INodeExecutionData = { json: { n: 1 } };
-
 export function items(...values: unknown[]): INodeExecutionData[] {
   return values.map((v) => ({ json: (typeof v === 'object' && v !== null ? v : { v }) as INodeExecutionData['json'] }));
 }
@@ -282,7 +280,8 @@ export class FakeHost implements SchedulerHost {
     this.calls.push(node === undefined ? method : `${method}(${node})`);
   }
 
-  private get exec() {
+  /** `executionData`: the stack, the waiting slots and the context, which every run has. */
+  protected get exec(): ExecutionDataState {
     return this.runExecutionData.executionData!;
   }
 
@@ -605,9 +604,16 @@ export class FakeHost implements SchedulerHost {
     return { continueExecution: false, nodeSuccessData };
   }
 
+  /**
+   * `upsertTaskData` (`workflow-execute.ts:2154-2161`). n8n indexes `runData[nodeName]`
+   * without a check because its loop created the array just before (`stack-scheduler.ts:216-218`),
+   * as the scheduler's action does (`src/scheduler/actions.ts`); creating it here on a miss
+   * is that same behaviour, minus the `TypeError` a caller that skipped the step would
+   * otherwise get from the mirror.
+   */
   upsertTaskData(nodeName: string, runIndex: number, taskData: ITaskData): void {
     this.record('upsertTaskData', nodeName);
-    const nodeRunData = this.runData[nodeName]!;
+    const nodeRunData = (this.runData[nodeName] ??= []);
     if (nodeRunData[runIndex]) Object.assign(nodeRunData[runIndex], taskData);
     else nodeRunData.push(taskData);
   }

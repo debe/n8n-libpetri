@@ -34,6 +34,7 @@ import {
 import {
   CASE_TIMEOUT_MS, cyclicStranding, digest, generateChain, generateFanOut, retryFour, unbalancedJoin,
 } from './support.js';
+import { retryOf } from '../compiler/support.js';
 
 /**
  * Every check the proper-completion family produced, and the one whole-net row that is the
@@ -538,8 +539,8 @@ describe('the solver-free route (VER-010)', () => {
       const gadget = compiled.netMap.node('A');
       // Seeded with maxTries - 1 = 3, and the graph reaches every count down to 0, so the
       // delayed transition fires as often as the seeding allows.
-      expect(space.peak(gadget.tries!)).toBe(3);
-      expect(space.everMarked(gadget.retry!)).toBe(true);
+      expect(space.peak(retryOf(gadget).tries)).toBe(3);
+      expect(space.everMarked(retryOf(gadget).retry)).toBe(true);
       // And the exhausted branch beyond it: `_halt` is only reachable through a node failure.
       expect(space.everMarked(compiled.netMap.shared.halt)).toBe(true);
     });

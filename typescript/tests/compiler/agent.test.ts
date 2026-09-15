@@ -13,9 +13,11 @@ import { verify } from '../../src/verify/index.js';
 import { renderStateSpace } from '../../src/verify/report.js';
 import { StateSpace } from '../../src/verify/state-class.js';
 import { markingStateOf } from '../../src/verify/verify.js';
+import type { NodeDescription } from '../../src/compiler/index.js';
 import {
-  agentAssumedRounds, agentNested, agentOneTool, agentSharedTool, agentTwoTools, linear,
+  agentAssumedRounds, agentNested, agentOneTool, agentSharedTool, agentTwoTools, conn, linear, node,
 } from '../fixtures/workflows.js';
+import { agentOf, asForm, inOf, inToolOf, outputNames, transitionOf } from './support.js';
 
 describe('analysis', () => {
   it('classifies the tool and the agent', () => {
@@ -77,13 +79,14 @@ describe('the compiled net', () => {
 
     expect(agent.form).toBe('direct');
     expect(tool.form).toBe('tool');
-    for (const p of [agent.routedRequest, agent.queue, agent.drained, agent.outstanding,
-      agent.response, agent.dispatched, agent.rounds, agent.calls]) {
+    const round = agentOf(agent);
+    for (const p of [round.routedRequest, round.queue, round.drained, round.outstanding,
+      round.response, round.dispatched, round.rounds, round.calls]) {
       expect(p).not.toBeNull();
     }
-    expect(tool.inTool).not.toBeNull();
+    expect(inToolOf(tool)).not.toBeNull();
     // A tool has no main producer, so it must not have picked up a synthetic `X/in` either.
-    expect(tool.in).toBeNull();
+    expect(c.netMap.placeFor('Calculator', 'in-data')).toBeUndefined();
 
     const t = agent.transitions;
     expect(t.doneRequest).not.toBeNull();
@@ -99,11 +102,11 @@ describe('the compiled net', () => {
     const c = compile(agentOneTool);
     const agent = c.netMap.node('Agent');
     const marking = c.initialMarking([{ json: {} }]);
-    expect(marking.get(agent.rounds!)).toHaveLength(3);
+    expect(marking.get(agentOf(agent).rounds)).toHaveLength(3);
     expect(marking.get(agent.idle)).toHaveLength(1);
     // The tool starts idle and undispatched.
     const tool = c.netMap.node('Calculator');
-    expect(marking.get(tool.inTool!)).toBeUndefined();
+    expect(marking.get(inToolOf(tool))).toBeUndefined();
     expect(marking.get(tool.idle)).toHaveLength(1);
   });
 
@@ -114,16 +117,16 @@ describe('the compiled net', () => {
     // The agent writes each tool's own `in_tool` place; the composition funnels the agent's
     // `tool_k` port onto it rather than leaving two places behind.
     for (const toolName of ['Calculator', 'Search']) {
-      expect(names.has(c.netMap.node(toolName).inTool!.name)).toBe(true);
+      expect(names.has(inToolOf(c.netMap.node(toolName)).name)).toBe(true);
     }
-    expect(names.has(agent.response!.name)).toBe(true);
-    expect(agent.tools).toEqual(['Calculator', 'Search']);
+    expect(names.has(agentOf(agent).response.name)).toBe(true);
+    expect(agentOf(agent).tools).toEqual(['Calculator', 'Search']);
   });
 
   it('lets two agents share one tool', () => {
     const c = compile(agentSharedTool);
     const tool = c.netMap.node('Calculator');
-    expect(tool.agents).toEqual(['A1', 'A2']);
+    expect(asForm(tool, 'tool').agents).toEqual(['A1', 'A2']);
     // One dispatch place, one idle token: the tool is serialised across both agents.
     expect(c.initialMarking([{ json: {} }]).get(tool.idle)).toHaveLength(1);
   });
@@ -137,6 +140,55 @@ describe('the compiled net', () => {
   });
 });
 
+describe('a tool wired to main consumers', () => {
+  // n8n draws no main output on a tool, but an export can still carry the connections. A
+  // tool's result goes to its agent's `A/response` and nowhere else (ADR 0008), so those
+  // connections never carry a token: `analyse` says so and drops them, and the gadget must
+  // then see no main output at all — not a routed place that no transition writes, and not,
+  // above `SPLIT_ROUTING_ABOVE`, a per-output routing the tool form cannot take.
+  const toolWithConsumers = (outputs: number) => ({
+    ...agentOneTool,
+    nodes: [
+      ...agentOneTool.nodes,
+      ...Array.from({ length: outputs }, (_, o) => node(`C${o}`, 'set', [400, 200 + 100 * o])),
+    ],
+    connections: [
+      ...agentOneTool.connections,
+      ...Array.from({ length: outputs }, (_, o) => conn('Calculator', o, `C${o}`, 0)),
+    ],
+    nodeTypes: (n: NodeDescription) => (n.name === 'Calculator'
+      ? { inputCount: 0, outputCount: outputs }
+      : agentOneTool.nodeTypes(n)),
+  });
+
+  it('compiles with four connected outputs, in the tool form and with no output at all', async () => {
+    const wf = toolWithConsumers(4);
+    const a = analyse(wf);
+    expect(a.diagnostics.join('\n')).toMatch(/'Calculator' has main consumers/);
+    expect(a.outgoing.get('Calculator')).toEqual([]);
+
+    const c = compile(wf);
+    const tool = asForm(c.netMap.node('Calculator'), 'tool');
+    expect(tool.outputs).toEqual([]);
+    expect(tool.routing.kind).toBe('collapsed');
+    expect(() => c.program).not.toThrow();
+
+    // The same structural check every agent net gets: the graph closes and completes.
+    const r = await verify(wf, { properties: ['proper-completion'], timeoutMs: 1 });
+    expect(r.stateSpace.complete).toBe(true);
+  });
+
+  it('declares no out_e port with one connected output', () => {
+    const c = compile(toolWithConsumers(1));
+    const tool = c.netMap.node('Calculator');
+    expect(tool.outputs).toEqual([]);
+    // The consumer still owns its `in` place, but the tool's run writes nothing there.
+    const consumerIn = inOf(c.netMap.node('C0'));
+    expect(outputNames(transitionOf(c, 'Calculator', 'run'))).not.toContain(consumerIn.name);
+    expect(c.netMap.placesOf('Calculator').some((p) => p.role === 'edge-data')).toBe(false);
+  });
+});
+
 describe('the round budget is a hard bound', () => {
   it('nothing in the compiled net refunds A/rounds', () => {
     // The whole verification story rests on this: `A/rounds` is seeded once and consumed by
@@ -144,7 +196,7 @@ describe('the round budget is a hard bound', () => {
     // transition ever produced it, the cycle would be unbounded again and the graph would stop
     // closing — silently, because it would just truncate instead.
     const c = compile(agentTwoTools);
-    const rounds = c.netMap.node('Agent').rounds!;
+    const rounds = agentOf(c.netMap.node('Agent')).rounds;
     const producers: string[] = [];
     for (const t of c.net.transitions) {
       const out = (t as unknown as { outputSpec?: unknown }).outputSpec;
@@ -198,20 +250,20 @@ describe('the round budget is a hard bound', () => {
     const branches = enumerateBranches((doneReq as unknown as { outputSpec: never }).outputSpec);
     // No count in any branch: the round opens with a queue or already drained, and that is all.
     expect(branches).toHaveLength(2);
-    expect(branches.every((b) => ![...b].some((p) => p.name === g.calls!.name))).toBe(true);
+    expect(branches.every((b) => ![...b].some((p) => p.name === agentOf(g).calls.name))).toBe(true);
 
     const space = StateSpace.explore(c.net, markingStateOf(c.initialMarking(null)), c.netMap, 200_000);
     expect(space.complete).toBe(true);
-    expect(space.peak(g.calls!)).toBe(K);
-    expect(space.peak(g.outstanding!)).toBe(K);
+    expect(space.peak(agentOf(g).calls)).toBe(K);
+    expect(space.peak(agentOf(g).outstanding)).toBe(K);
     // Both tools reachable, and a round can hold both in flight at once — the executor's case.
-    expect(space.everMarked(c.netMap.node('Calculator').inTool!)).toBe(true);
-    expect(space.everMarked(c.netMap.node('Search').inTool!)).toBe(true);
+    expect(space.everMarked(inToolOf(c.netMap.node('Calculator')))).toBe(true);
+    expect(space.everMarked(inToolOf(c.netMap.node('Search')))).toBe(true);
   });
 
   it('nothing in the compiled net refunds A/calls either', () => {
     const c = compile(agentTwoTools);
-    const calls = c.netMap.node('Agent').calls!;
+    const calls = agentOf(c.netMap.node('Agent')).calls;
     const producers: string[] = [];
     for (const t of c.net.transitions) {
       const out = (t as unknown as { outputSpec?: unknown }).outputSpec;
@@ -391,8 +443,8 @@ describe('an agent used as another agent\'s tool', () => {
     // recursion cap: the bound is in the marking of the level that is spending.
     for (const n of ['A', 'B']) {
       const g = c.netMap.node(n);
-      expect(space.peak(g.calls!), n).toBe(2);
-      expect(space.peak(g.outstanding!), n).toBe(2);
+      expect(space.peak(agentOf(g).calls), n).toBe(2);
+      expect(space.peak(agentOf(g).outstanding), n).toBe(2);
     }
     // Nothing anywhere refunds either budget, which is what keeps the nesting finite.
     const refunds: string[] = [];

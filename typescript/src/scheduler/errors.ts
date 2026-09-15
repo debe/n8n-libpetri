@@ -6,7 +6,18 @@
  * fields `ExecutionBaseError` carries: `name`, `description`, `context`, `timestamp`,
  * `functionality`, `level`, plus `node` for the node-scoped one.
  */
-import type { INode } from 'n8n-workflow';
+import type { ExecutionBaseError, INode } from 'n8n-workflow';
+
+/**
+ * n8n's serialisable error shape (`initializeExecution`, `reportNodeExecutionError`):
+ * `{ ...e, message, stack }`. What the scheduler stores as the contract value for an error the
+ * mirrored loop would have thrown out of `run()` — a hook rejecting, a host helper throwing
+ * outside n8n's own `try` — so it reads like every other `executionError` n8n persists.
+ */
+export function asExecutionError(error: unknown): ExecutionBaseError {
+  const e = (typeof error === 'object' && error !== null ? error : { message: String(error) }) as Error;
+  return { ...e, message: e.message, stack: e.stack } as unknown as ExecutionBaseError;
+}
 
 /** Mirror of `NodeOperationError` (name, node, description, level `'warning'`). */
 export class SchedulerNodeError extends Error {

@@ -48,9 +48,9 @@ import { describeWorkflow } from '../n8n/adapter.js';
 import type {
   ExecutionDataState, NodeHelpersLike, SchedulerHooks, SchedulerHost, WorkflowScheduler,
 } from '../n8n/host.js';
-import { ENV_KEY, schedulerActions, type ExecutionEnv, type SchedulerState } from './actions.js';
+import { ENV_KEY, schedulerActions, UnexpectedTokenError, type ExecutionEnv, type SchedulerState } from './actions.js';
 import { CompiledWorkflowCache } from './cache.js';
-import type { StoppedPayload } from './payloads.js';
+import { isStoppedPayload } from './payloads.js';
 
 export interface PetriSchedulerOptions {
   /** `NodeHelpers` from `n8n-workflow` (injected; not a runtime dependency). */
@@ -86,7 +86,7 @@ export class PetriScheduler implements WorkflowScheduler {
   private readonly state: SchedulerState = {
     haltError: undefined, leftoverError: undefined, closeFunction: undefined, fatal: undefined,
     waitingNode: undefined, waitTillAtStart: undefined,
-    starts: new Map(), inFlight: 0, maxInFlight: 0, abandoned: new WeakSet(), startedData: new WeakMap(),
+    inFlight: 0, maxInFlight: 0, abandoned: new WeakSet(), startedData: new WeakMap(),
   };
   private readonly cache: CompiledWorkflowCache;
   /** Diagnostics of the last `run()`, in order. */
@@ -163,13 +163,18 @@ export class PetriScheduler implements WorkflowScheduler {
     runExecutionData: IRunExecutionData,
     hooks: SchedulerHooks,
   ): Promise<void> {
+    // Everything a `run()` leaves behind is reset here, so a second `run()` on one instance
+    // starts from nothing: in particular the close function, which n8n awaits at the end of
+    // the execution that produced it and must never inherit from an earlier one.
     this.diagnostics.length = 0;
+    this.compiled = undefined;
+    this.outcome = undefined;
     this.state.haltError = undefined;
     this.state.leftoverError = undefined;
+    this.state.closeFunction = undefined;
     this.state.fatal = undefined;
     this.state.waitingNode = undefined;
     this.state.waitTillAtStart = runExecutionData.waitTill;
-    this.state.starts.clear();
     this.state.inFlight = 0;
     this.state.maxInFlight = 0;
 
@@ -292,7 +297,9 @@ export class PetriScheduler implements WorkflowScheduler {
     let stoppedBeforeRun = false;
     for (const g of compiled.netMap.nodes) {
       for (const t of marking.peekTokens(g.stopped)) {
-        if ((t.value as StoppedPayload).ran) destinationStopped = true;
+        const v = t.value;
+        if (!isStoppedPayload(v)) throw new UnexpectedTokenError(g.transitions.run, g.stopped.name);
+        if (v.ran) destinationStopped = true;
         else stoppedBeforeRun = true;
       }
     }

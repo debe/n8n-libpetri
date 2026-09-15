@@ -80,8 +80,22 @@ interface MutableElement {
   readonly children: XmlNode[];
 }
 
-function isNameChar(ch: string): boolean {
-  return /[A-Za-z0-9_.:-]/.test(ch);
+/** `[A-Za-z0-9_.:-]`, by char code: the tokenizer asks this once per character. */
+function isNameCode(code: number): boolean {
+  return (code >= 0x30 && code <= 0x39)       // 0-9
+    || (code >= 0x41 && code <= 0x5a)         // A-Z
+    || (code >= 0x61 && code <= 0x7a)         // a-z
+    || code === 0x5f || code === 0x2e || code === 0x3a || code === 0x2d; // _ . : -
+}
+
+/** `\s` of a JavaScript RegExp, by char code, so the tokenizer skips exactly what it did. */
+function isSpaceCode(code: number): boolean {
+  return code === 0x20
+    || (code >= 0x09 && code <= 0x0d)         // \t \n \v \f \r
+    || code === 0xa0 || code === 0x1680
+    || (code >= 0x2000 && code <= 0x200a)
+    || code === 0x2028 || code === 0x2029 || code === 0x202f || code === 0x205f
+    || code === 0x3000 || code === 0xfeff;
 }
 
 /**
@@ -106,10 +120,10 @@ export function parseXml(xml: string): XmlElement {
   };
   const readName = (): string => {
     const start = i;
-    while (i < s.length && isNameChar(s.charAt(i))) i++;
+    while (i < s.length && isNameCode(s.charCodeAt(i))) i++;
     return i === start ? fail('expected a name') : s.slice(start, i);
   };
-  const skipSpace = (): void => { while (i < s.length && /\s/.test(s.charAt(i))) i++; };
+  const skipSpace = (): void => { while (i < s.length && isSpaceCode(s.charCodeAt(i))) i++; };
 
   while (i < s.length) {
     const lt = s.indexOf('<', i);

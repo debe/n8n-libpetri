@@ -7,8 +7,24 @@
  */
 import type { PetriNet, Transition } from 'libpetri';
 import type {
-  NetMapView, NodeGadget, PlaceInfo, PlaceRole, SharedPlaces, TransitionInfo, TransitionRole,
+  NetMapView, NodeGadget, PlaceInfo, PlaceRole, SharedPlaces, TransitionInfo, TransitionInfoOf, TransitionRole,
 } from './types.js';
+
+/**
+ * The key of a `(node, role, port)` lookup. `port` is `null` for an info that carries none
+ * (a `PlaceInfo` says so with `null`, a `TransitionInfo` by having no `port` field), and
+ * a query without a port is keyed on the pair alone, so it finds the first info of that
+ * role in declaration order whatever its port — the match the linear scan made.
+ */
+function roleKey(node: string, role: string, port: number | null | undefined): string {
+  // NUL never occurs in an n8n node name; roles are identifiers and ports integers.
+  return port === undefined ? `${node}\0${role}` : `${node}\0${role}\0${port}`;
+}
+
+/** The port a transition info carries, `null` when its role has none (`route`, `clear` carry one). */
+function transitionPort(t: TransitionInfo): number | null {
+  return 'port' in t ? t.port : null;
+}
 
 export class NetMap implements NetMapView {
   readonly shared: SharedPlaces;
@@ -18,8 +34,10 @@ export class NetMap implements NetMapView {
 
   private readonly transitionsByName = new Map<string, TransitionInfo>();
   private readonly transitionsByNode = new Map<string, TransitionInfo[]>();
+  private readonly transitionsByRole = new Map<string, TransitionInfo>();
   private readonly placesByName = new Map<string, PlaceInfo>();
   private readonly placesByNode = new Map<string, PlaceInfo[]>();
+  private readonly placesByRole = new Map<string, PlaceInfo>();
   private readonly nodesByName = new Map<string, NodeGadget>();
   private readonly transitionObjects = new Map<string, Transition>();
 
@@ -38,10 +56,12 @@ export class NetMap implements NetMapView {
     for (const t of transitions) {
       if (this.transitionsByName.has(t.name)) throw new Error(`NetMap: duplicate transition '${t.name}'`);
       this.transitionsByName.set(t.name, t);
-      if (t.node !== null) {
-        const list = this.transitionsByNode.get(t.node) ?? [];
-        list.push(t);
-        this.transitionsByNode.set(t.node, list);
+      const list = this.transitionsByNode.get(t.node) ?? [];
+      list.push(t);
+      this.transitionsByNode.set(t.node, list);
+      // First in declaration order wins both keys: the match the linear scan made.
+      for (const key of [roleKey(t.node, t.role, undefined), roleKey(t.node, t.role, transitionPort(t))]) {
+        if (!this.transitionsByRole.has(key)) this.transitionsByRole.set(key, t);
       }
     }
     for (const p of places) {
@@ -51,6 +71,9 @@ export class NetMap implements NetMapView {
         const list = this.placesByNode.get(p.node) ?? [];
         list.push(p);
         this.placesByNode.set(p.node, list);
+        for (const key of [roleKey(p.node, p.role, undefined), roleKey(p.node, p.role, p.port)]) {
+          if (!this.placesByRole.has(key)) this.placesByRole.set(key, p);
+        }
       }
     }
     for (const t of net.transitions) this.transitionObjects.set(t.name, t);
@@ -70,6 +93,14 @@ export class NetMap implements NetMapView {
     return g;
   }
 
+  hasNode(name: string): boolean {
+    return this.nodesByName.has(name);
+  }
+
+  tryNode(name: string): NodeGadget | undefined {
+    return this.nodesByName.get(name);
+  }
+
   transition(name: string): TransitionInfo | undefined {
     return this.transitionsByName.get(name);
   }
@@ -78,8 +109,11 @@ export class NetMap implements NetMapView {
     return this.transitionsByNode.get(node) ?? [];
   }
 
-  transitionFor(node: string, role: TransitionRole, port?: number): TransitionInfo | undefined {
-    return this.transitionsOf(node).find((t) => t.role === role && (port === undefined || t.port === port));
+  transitionFor<R extends TransitionRole>(node: string, role: R, port?: number): TransitionInfoOf<R> | undefined {
+    // `port` is carried by `route` (an output index) and `clear` (an input index) only; asking
+    // another role for one matches nothing, as it always did.
+    const t = this.transitionsByRole.get(roleKey(node, role, port));
+    return t === undefined ? undefined : (t as TransitionInfoOf<R>);
   }
 
   transitionObject(name: string): Transition {
@@ -97,6 +131,6 @@ export class NetMap implements NetMapView {
   }
 
   placeFor(node: string, role: PlaceRole, port?: number): PlaceInfo | undefined {
-    return this.placesOf(node).find((p) => p.role === role && (port === undefined || p.port === port));
+    return this.placesByRole.get(roleKey(node, role, port));
   }
 }

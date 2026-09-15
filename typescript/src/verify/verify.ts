@@ -304,14 +304,13 @@ export function budgetSemiflowOf(
 
 function nodeCarriesUnit(g: NodeGadget, terms: ReadonlyMap<string, number>, w: number): boolean {
   if ((terms.get(g.running.name) ?? 0) !== w) return false;
-  const inFlight = [
-    g.routed,
-    g.retry,
+  const inFlight: Place<unknown>[] = [
+    ...(g.routing.kind === 'collapsed' ? [g.routing.routed] : g.routing.outputs.flatMap((o) => [o.ok, o.routed])),
+    ...(g.retry === null ? [] : [g.retry.retry]),
     // An agent holds its unit on `A/routed_req` between the request outcome and `A_done_req`,
     // exactly as any node holds it on `X/routed` between `X_run` and `X_done` (ADR 0004).
-    g.routedRequest,
-    ...g.outputs.flatMap((o) => [o.ok, o.routed]),
-  ].filter((p): p is Place<unknown> => p !== null);
+    ...(g.agent === null ? [] : [g.agent.routedRequest]),
+  ];
   return inFlight.length === 0 || inFlight.some((p) => (terms.get(p.name) ?? 0) > 0);
 }
 
@@ -807,7 +806,7 @@ function explain(verdict: CheckVerdict, text: { proven: string; violated: string
  */
 function arrivalCapacity(ctx: Context, node: string, inputIndex: number): { capacity: number; round: boolean } {
   const input = ctx.map.node(node).inputs.find((i) => i.index === inputIndex);
-  return input?.round === null || input?.round === undefined
+  return input === undefined || input.slot !== 'or'
     ? { capacity: 1, round: false }
     : { capacity: input.round, round: true };
 }
@@ -1447,15 +1446,16 @@ async function runAttemptBound(ctx: Context): Promise<void> {
 async function runRetryBound(ctx: Context): Promise<void> {
   await runAttemptBound(ctx);
   for (const g of ctx.map.nodes) {
-    if (g.tries === null || g.maxTries === null) continue;
-    const bound = g.maxTries - 1;
-    const property = placeBound(g.tries, bound);
-    const decision = graphBound(ctx, g.tries, bound)
+    if (g.retry === null) continue;
+    const { tries, maxTries } = g.retry;
+    const bound = maxTries - 1;
+    const property = placeBound(tries, bound);
+    const decision = graphBound(ctx, tries, bound)
       ?? boundedOrUnknown(ctx, await smtDecision(ctx, property));
     record(ctx, {
       property: 'retry-bound',
       name: `${g.node}/tries never holds more than ${bound}`,
-      subject: { kind: 'node', node: g.node, place: g.tries.name },
+      subject: { kind: 'node', node: g.node, place: tries.name },
       verdict: decision.verdict,
       explanation: explain(decision.verdict, {
         proven: `${g.node}/tries never exceeds the ${bound} token(s) it is seeded with. On its own that bounds ` +
@@ -1469,7 +1469,7 @@ async function runRetryBound(ctx: Context): Promise<void> {
       counterexample: decision.counterexample,
     });
 
-    const producers = producersOf(ctx.flat, g.tries);
+    const producers = producersOf(ctx.flat, tries);
     // The attempt bound is the conjunction, so it is only ever as strong as the weaker half:
     // a `bounded` place bound makes the attempt bound `bounded` too, never `proven`.
     const attempts: CheckVerdict = producers.length > 0
@@ -1481,20 +1481,20 @@ async function runRetryBound(ctx: Context): Promise<void> {
     };
     record(ctx, {
       property: 'retry-bound',
-      name: `${g.node} attempts at most ${g.maxTries} times`,
-      subject: { kind: 'node', node: g.node, place: g.tries.name },
+      name: `${g.node} attempts at most ${maxTries} times`,
+      subject: { kind: 'node', node: g.node, place: tries.name },
       verdict: attempts,
       explanation: explain(attempts, {
-        proven: `No transition produces ${g.tries.name} and it never exceeds ${bound}, so X_retry_wait can fire at ` +
-          `most ${bound} times and ${g.node} runs at most ${g.maxTries} times before X_exhausted.`,
-        violated: `${producers.length} transition(s) produce ${g.tries.name} (${producers.join(', ')}), so the try ` +
+        proven: `No transition produces ${tries.name} and it never exceeds ${bound}, so X_retry_wait can fire at ` +
+          `most ${bound} times and ${g.node} runs at most ${maxTries} times before X_exhausted.`,
+        violated: `${producers.length} transition(s) produce ${tries.name} (${producers.join(', ')}), so the try ` +
           'tokens are refunded and the number of attempts is not bounded by the seeding.',
-        unknown: `Nothing produces ${g.tries.name}, but the bound on it was not established, so the attempt count ` +
+        unknown: `Nothing produces ${tries.name}, but the bound on it was not established, so the attempt count ` +
           'is not bounded either.',
       }),
       reason: attempts === 'unknown' || attempts === 'bounded' ? unknownReason(ctx, decision) : null,
       elapsedMs: 0,
-      query: { ...queryRecord('none', structural), place: g.tries.name },
+      query: { ...queryRecord('none', structural), place: tries.name },
       counterexample: null,
     });
   }
@@ -1697,9 +1697,9 @@ export function truncationShapeOf(compiled: CompiledWorkflow): TruncationShape {
       break;
     }
   }
-  const agents = compiled.netMap.nodes
-    .filter((g) => g.calls !== null && g.maxToolCalls !== null)
-    .map((g) => ({ node: g.node, tools: g.tools.length, maxToolCalls: g.maxToolCalls!, assumed: g.toolCallsAssumed }));
+  const agents = compiled.netMap.nodes.flatMap((g) => (g.agent === null ? [] : [{
+    node: g.node, tools: g.agent.tools.length, maxToolCalls: g.agent.maxToolCalls, assumed: g.agent.toolCallsAssumed,
+  }]));
   return { hasCycle: compiled.analysis.hasCycle, independentBranches: branching, agents };
 }
 

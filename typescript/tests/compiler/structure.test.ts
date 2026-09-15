@@ -150,7 +150,7 @@ describe.each(Object.entries(ALL) as [keyof typeof ALL, (typeof ALL)[keyof typeo
       for (const u of g.transitions.startUnmet) expect(prio(u), u).toBe(depth - 1);
       expect(prio(g.transitions.run), `${node} run`).toBe(depth + 1);
       // A per-output route exists only above SPLIT_ROUTING_ABOVE; X_done always does.
-      expect(g.transitions.routes.length === 0 || g.splitRouting, node).toBe(true);
+      expect(g.transitions.routes.length === 0 || g.routing.kind === 'split', node).toBe(true);
       for (const r of g.transitions.routes) expect(prio(r), r).toBe(depth + 1);
       expect(prio(g.transitions.done), `${node} done`).toBe(depth + 1);
       for (const s of [...g.transitions.skip, ...g.transitions.arms, ...g.transitions.clear, ...g.transitions.sinks]) {
