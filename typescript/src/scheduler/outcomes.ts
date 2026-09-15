@@ -1,23 +1,22 @@
 /**
  * Writing one attempt's outcome, and reading the token a firing consumed.
  *
- * An outcome becomes a complete list of {@link Deposit}s before anything is emitted, and
- * {@link guarded} is the one writer: whatever the body or the list throws takes the halt (or
- * stopped) branch, so a firing never loses the tokens and the budget unit it consumed
- * (EXEC-030). {@link dispatchOf} lives here rather than with the round because a tool's
- * success branch is where the dispatch it carries is spent, and keeping it here leaves the
- * round depending on this module and not the other way round.
+ * An outcome becomes a complete list of deposits (`deposits.ts`) before anything is emitted,
+ * and {@link guarded} is the one writer: whatever the body or the list throws takes the halt
+ * (or stopped) branch, so a firing never loses the tokens and the budget unit it consumed
+ * (EXEC-030). Reading the consumed token is `take.ts`. This module exports both halves' names
+ * as it always has.
  */
-import type { Place, TransitionContext } from 'libpetri';
-import type { IExecuteData, INodeExecutionData, ISourceData } from 'n8n-workflow';
-import type { NetMapView, NodeGadget, ToolGadget } from '../compiler/index.js';
-import { assertNever } from '../internal/assert.js';
+import type { TransitionContext } from 'libpetri';
+import type { IExecuteData, INodeExecutionData } from 'n8n-workflow';
+import type { NetMapView, NodeGadget } from '../compiler/index.js';
+import { deposits, hasHaltBranch, type Deposit } from './deposits.js';
 import type { ExecutionEnv } from './env.js';
-import { asExecutionError, InternalSchedulerError } from './errors.js';
-import type {
-  EdgePayload, OkPayload, RequestPayload, ResponsePayload, RetryPayload, RunPayload, StoppedPayload, ToolDispatch,
-  WaitingPayload,
-} from './payloads.js';
+import { asExecutionError } from './errors.js';
+import type { RequestPayload, RetryPayload, RunPayload } from './payloads.js';
+
+export { dispatchOf, routeOutput } from './deposits.js';
+export { take, UnexpectedTokenError } from './take.js';
 
 export type Outcome =
   | { readonly kind: 'ok'; readonly nodeSuccessData: INodeExecutionData[][]; readonly runIndex: number }
@@ -29,103 +28,11 @@ export type Outcome =
   | { readonly kind: 'request'; readonly payload: RequestPayload };
 
 /**
- * The dispatch a tool's run payload carries: the agent whose `A/response` its success branch
- * writes, and the round it belongs to. Every producer of a tool's `RunPayload` sets both — the
- * dispatch token at `T_start`, and every retry, step, deadline and re-entry after it — so a
- * payload without them is an invariant of this file broken, not a workflow condition.
+ * The success outcome of an activation that records nothing routable: an all-empty `ok`, so
+ * every edge receives `empty` (README "Per-node gadget").
  */
-export function dispatchOf(g: ToolGadget, run: RunPayload | undefined): ToolDispatch {
-  if (run?.agent === undefined || run.roundId === undefined) {
-    throw new InternalSchedulerError(`internal: tool '${g.node}' ran without the agent that dispatched it; its run payload carries no dispatch`);
-  }
-  if (!g.agents.includes(run.agent)) {
-    throw new InternalSchedulerError(`internal: tool '${g.node}' has no ai_tool connection to '${run.agent}'`);
-  }
-  return { agent: run.agent, roundId: run.roundId };
-}
-
-/**
- * One token a firing deposits. An outcome is turned into a complete list of these *before*
- * anything is emitted, so the writer is a pure function of the outcome and the gadget: a list
- * that cannot be computed leaves the marking untouched and takes the fallback branch instead,
- * where a throw mid-way through a sequence of `ctx.output` calls would reject the transition
- * after the firing consumed its tokens and its budget unit (EXEC-030).
- */
-interface Deposit {
-  readonly place: Place<unknown>;
-  readonly value: unknown;
-}
-
-/**
- * The success outcome. Unless the node routes per output ({@link SPLIT_ROUTING_ABOVE}),
- * `X_run` carries the routing in its own `Out` spec, so the edge tokens are deposited here
- * and `X/routed` marks the outcome for `X_done` to refund the budget one cycle later
- * (ADR 0004). A split node writes one `X/ok_o` per output for its `X_route_o` instead.
- */
-function succeed(g: NodeGadget, value: OkPayload, map: NetMapView, run?: RunPayload): Deposit[] {
-  if (g.form === 'tool') {
-    // A tool's output goes to the agent that dispatched it, not to a main edge. The `xor` over
-    // the agents is resolved by the dispatch the run payload carries, which the dispatch token
-    // named when `T_start` fired and every attempt since has kept. The place is the agent's own
-    // `A/response`: composition funnelled this tool's `resp_k` port onto it, so addressing it
-    // through the map is addressing the same place (CORE-002).
-    const dispatch = dispatchOf(g, run);
-    const agent = map.node(dispatch.agent).agent;
-    if (agent === null) {
-      throw new InternalSchedulerError(`internal: '${dispatch.agent}' is wired as an agent of '${g.node}' but compiled without an agent side`);
-    }
-    if (g.routing.kind === 'split') throw new InternalSchedulerError(`internal: tool '${g.node}' routes per output`);
-    const payload: ResponsePayload = { kind: 'response', tool: g.node, roundId: dispatch.roundId };
-    return [{ place: agent.response, value: payload }, { place: g.routing.routed, value: null }];
-  }
-  if (g.routing.kind === 'split') return g.routing.outputs.map((out) => ({ place: out.ok, value }));
-  return [...g.routing.outputs.flatMap((out) => routeOutput(g, out, value)), { place: g.routing.routed, value: null }];
-}
-
-/** Whether `X_run` was compiled with a halt branch (`compiler/gadget.ts`: `stopWorkflow`, or any `onFailure` chain). */
-function hasHaltBranch(g: NodeGadget): boolean {
-  return g.onError === 'stopWorkflow' || g.attempts.length > 0;
-}
-
-/** The tokens `outcome` deposits on `g`'s branch for it; throws only on an invariant of the compiled net broken. */
-function deposits(g: NodeGadget, map: NetMapView, outcome: Outcome, run?: RunPayload): Deposit[] {
-  const shared = map.shared;
-  switch (outcome.kind) {
-    case 'ok':
-      return succeed(g, { kind: 'ok', nodeSuccessData: outcome.nodeSuccessData, runIndex: outcome.runIndex }, map, run);
-    case 'retry': {
-      // With a chain the failure is a *position*, not a counter decrement: it goes to the
-      // place belonging to the attempt that just failed, which `run.attempt` names (0-based,
-      // as `X_start` seeds it). Without one it is n8n's single `X/retry`.
-      if (g.attempts.length > 0) {
-        const failing = g.attempts[run?.attempt ?? 0];
-        if (failing === undefined) {
-          throw new InternalSchedulerError(`internal: node '${g.node}' has no attempt ${run?.attempt ?? 0} in its onFailure chain`);
-        }
-        return [{ place: failing.failed, value: outcome.payload }];
-      }
-      if (g.retry === null) throw new InternalSchedulerError(`internal: node '${g.node}' produced a retry outcome without a retry gadget or an onFailure chain`);
-      return [{ place: g.retry.retry, value: outcome.payload }];
-    }
-    case 'halt':
-      // Unreachable for a gadget without the branch: {@link admissible} has already mapped it.
-      if (!hasHaltBranch(g)) throw new InternalSchedulerError(`internal: node '${g.node}' (onError ${g.onError}) has no halt branch`);
-      return [{ place: shared.halt, value: null }, { place: shared.budget, value: null }];
-    case 'waiting': {
-      const v: WaitingPayload = { kind: 'waiting', executionData: outcome.executionData };
-      return [{ place: g.waiting, value: v }, { place: shared.pause, value: null }, { place: shared.budget, value: null }];
-    }
-    case 'stopped': {
-      const v: StoppedPayload = { kind: 'stopped', executionData: outcome.executionData, ran: outcome.ran };
-      return [{ place: g.stopped, value: v }, { place: shared.pause, value: null }, { place: shared.budget, value: null }];
-    }
-    case 'request':
-      // Phased like the success outcome: the marker here, the budget refunded by `A_done_req`
-      // one cycle later (ADR 0004), so the agent releases its slot for the tools it asked for.
-      if (g.agent === null) throw new InternalSchedulerError(`internal: node '${g.node}' produced a request outcome but is not an agent`);
-      return [{ place: g.agent.routedRequest, value: outcome.payload }];
-    default: return assertNever(outcome, 'outcome');
-  }
+export function emptyOutcome(runIndex: number): Outcome {
+  return { kind: 'ok', nodeSuccessData: [], runIndex };
 }
 
 /**
@@ -190,40 +97,4 @@ export async function guarded(
   // cycle deposits, since `X_run` routes its own outcome and those arrivals reach the
   // marking in the same phase-1 batch as `_halt` itself.
   for (const d of list) ctx.output(d.place, d.value);
-}
-
-/** Lines 272–331 per connected output: the v1 gate `nodeSuccessData[o].length !== 0`. */
-export function routeOutput(g: NodeGadget, out: NodeGadget['outputs'][number], value: OkPayload): Deposit[] {
-  const items = value.nodeSuccessData[out.index];
-  if (items !== undefined && items !== null && items.length !== 0) {
-    const source: ISourceData = { previousNode: g.node, previousNodeOutput: out.index, previousNodeRun: value.runIndex };
-    const payload: EdgePayload = { kind: 'edge', items, source };
-    return out.edges.map((e) => ({ place: e.data, value: payload }));
-  }
-  if (out.nil !== null) return [{ place: out.nil, value: null }];
-  return out.edges.map((e) => {
-    // An acyclic producer's edges are all tree edges, each with its empty place (`compiler/gadget.ts`).
-    if (e.empty === null) throw new InternalSchedulerError(`internal: node '${g.node}' output ${out.index} has a cycle edge but no nil place`);
-    return { place: e.empty, value: null };
-  });
-}
-
-/**
- * A token a transition consumed that is not the payload the gadget puts on that place. The
- * compiler builds every place for one payload and the actions in this file are its only
- * writers, so this is an invariant of the compiled net broken, never an n8n condition: it
- * names the transition and the place so the gadget that wired them can be found.
- */
-export class UnexpectedTokenError extends InternalSchedulerError {
-  constructor(transition: string, place: string) {
-    super(`internal: '${transition}' consumed a token on '${place}' that is not the payload the place carries`);
-    this.name = 'UnexpectedTokenError';
-  }
-}
-
-/** The token `ctx` consumed from `place`, narrowed by `guard`; anything else is an {@link UnexpectedTokenError}. */
-export function take<T>(ctx: TransitionContext, place: Place<unknown>, guard: (v: unknown) => v is T): T {
-  const v = ctx.input(place);
-  if (!guard(v)) throw new UnexpectedTokenError(ctx.transitionName(), place.name);
-  return v;
 }

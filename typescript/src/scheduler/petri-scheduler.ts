@@ -16,7 +16,8 @@
  * 4. `PrecompiledNetExecutor` runs to quiescence (EXEC-040) — never `run(timeoutMs)`;
  *    `host.abortSignal` → `executor.close()` (ENV-013) is the only cancellation. Per-execution
  *    state reaches the actions through `executionContextProvider` under `ENV_KEY`.
- * 5. After quiescence the marking is classified and written back (`finish`), in this order:
+ * 5. After quiescence the marking is classified and written back (`finish`, in
+ *    `write-back.ts`), in this order:
  *    - a halt (`_halt`, which nothing consumes): n8n's `handleNodeExecutionError` pushed the
  *      failed entry and its loop `break`s, leaving every entry it had not popped on the
  *      stack, so the activations still resting in the marking are encoded back after it —
@@ -38,56 +39,23 @@
  *    hook rejecting) rejects `run()` exactly as n8n's does — after the net quiesced and the
  *    pending state was written back, which is the state n8n's loop leaves behind.
  */
-import { Marking, PrecompiledNetExecutor, type EventStore } from 'libpetri';
 import type { ExecutionBaseError, IRunExecutionData, Workflow } from 'n8n-workflow';
-import { decodeExecutionData, encodeMarking, type EncodeMode } from '../codec.js';
-import {
-  analyse, compile, structuralHash, type CompiledWorkflow, type WorkflowDescription,
-} from '../compiler/index.js';
+import type { CompiledWorkflow, WorkflowDescription } from '../compiler/index.js';
 import { describeWorkflow } from '../n8n/adapter.js';
-import type {
-  ExecutionDataState, NodeHelpersLike, SchedulerHooks, SchedulerHost, WorkflowScheduler,
-} from '../n8n/host.js';
-import { ENV_KEY, schedulerActions, UnexpectedTokenError, type ExecutionEnv, type SchedulerState } from './actions.js';
+import type { SchedulerHooks, SchedulerHost, WorkflowScheduler } from '../n8n/host.js';
+import type { ExecutionEnv, SchedulerState } from './actions.js';
 import { CompiledWorkflowCache } from './cache.js';
-import { isStoppedPayload } from './payloads.js';
+import { budgetLowered, compileCached } from './compile-step.js';
+import { runLegacy } from './legacy.js';
+import { quiesce } from './quiescence.js';
+import { initialState, resetState } from './run-state.js';
+import type { PetriSchedulerOptions, SchedulerOutcome } from './scheduler-types.js';
+import { finish } from './write-back.js';
 
-export interface PetriSchedulerOptions {
-  /** `NodeHelpers` from `n8n-workflow` (injected; not a runtime dependency). */
-  readonly nodeHelpers: NodeHelpersLike;
-  /** Creates the legacy `StackScheduler` a non-v1 workflow is delegated to. */
-  readonly legacy: () => WorkflowScheduler;
-  /** Concurrency budget `k` (`_budget` tokens). Default 1 (sequential n8n). */
-  readonly budget?: number;
-  /**
-   * An agent's round budget when its `options.maxIterations` is an expression the adapter could
-   * not read. Default `DEFAULT_MAX_AGENT_ROUNDS`, n8n's own default for that parameter.
-   */
-  readonly maxAgentRounds?: number;
-  /**
-   * An agent's tool-call budget for one execution, unless the workflow declares
-   * `options.maxToolCalls`. Default `DEFAULT_MAX_AGENT_TOOL_CALLS`. Distinct from {@link budget}:
-   * that bounds how many nodes run at once, this bounds how many tool calls an agent may make.
-   */
-  readonly maxAgentToolCalls?: number;
-  /** Compiled-workflow LRU shared across executions. A private one when omitted. */
-  readonly cache?: CompiledWorkflowCache;
-  /** libpetri event store attached to every execution (`InMemoryEventStore` for tests). */
-  readonly eventStore?: EventStore;
-  /** Receives the compiler's and the codec's diagnostics, and the scheduler's own. */
-  readonly onDiagnostic?: (message: string) => void;
-}
-
-/** How a `run()` ended. `fatal`: it rejected, as n8n's loop would have. */
-export type SchedulerOutcome =
-  | 'legacy' | 'nothing-to-run' | 'completed' | 'paused' | 'cancelled' | 'halted' | 'stranded' | 'fatal';
+export type { PetriSchedulerOptions, SchedulerOutcome } from './scheduler-types.js';
 
 export class PetriScheduler implements WorkflowScheduler {
-  private readonly state: SchedulerState = {
-    haltError: undefined, leftoverError: undefined, closeFunction: undefined, fatal: undefined,
-    waitingNode: undefined, waitTillAtStart: undefined,
-    inFlight: 0, maxInFlight: 0, abandoned: new WeakSet(), startedData: new WeakMap(),
-  };
+  private readonly state: SchedulerState = initialState();
   private readonly cache: CompiledWorkflowCache;
   /** Diagnostics of the last `run()`, in order. */
   readonly diagnostics: string[] = [];
@@ -144,23 +112,26 @@ export class PetriScheduler implements WorkflowScheduler {
    * both rather than analysing and hashing the description again.
    */
   compileDescription(description: WorkflowDescription): CompiledWorkflow {
-    // The agent budgets reach the analysis the key hashes *and* the compile, so an agent's
-    // resolved `maxRounds` / `maxToolCalls` — both in the hash — reflect this scheduler's
-    // options and two schedulers configured differently never share an entry.
-    const agents = {
-      ...(this.options.maxAgentRounds === undefined ? {} : { maxAgentRounds: this.options.maxAgentRounds }),
-      ...(this.options.maxAgentToolCalls === undefined ? {} : { maxAgentToolCalls: this.options.maxAgentToolCalls }),
-    };
-    const analysis = analyse(description, agents);
-    const hash = structuralHash(analysis);
-    const key = CompiledWorkflowCache.key(hash, this.budget);
-    const hit = this.cache.get(key);
-    if (hit !== undefined) return hit;
-    const fresh = compile(description, {
-      budget: this.budget, actions: schedulerActions(), analysis, structuralHash: hash,
-    });
-    this.cache.set(key, fresh);
-    return fresh;
+    return compileCached(this.cache, description, this.budget, this.options);
+  }
+
+  /** Everything a `run()` leaves behind is reset here (see {@link resetState}). */
+  private reset(runExecutionData: IRunExecutionData): void {
+    this.diagnostics.length = 0;
+    this.compiled = undefined;
+    this.outcome = undefined;
+    resetState(this.state, runExecutionData.waitTill);
+  }
+
+  /** Step 2: the workflow adapted and compiled, and the compiler's findings reported. */
+  private compileWorkflow(host: SchedulerHost, workflow: Workflow, runExecutionData: IRunExecutionData): CompiledWorkflow {
+    const description = describeWorkflow(workflow, runExecutionData, { nodeHelpers: this.options.nodeHelpers, mode: host.mode });
+    const compiled = this.compileDescription(description);
+    this.compiled = compiled;
+    for (const d of compiled.diagnostics) this.diagnostic(`compile: ${d}`);
+    const lowered = budgetLowered(compiled);
+    if (lowered !== undefined) this.diagnostic(lowered);
+    return compiled;
   }
 
   async run(
@@ -169,32 +140,10 @@ export class PetriScheduler implements WorkflowScheduler {
     runExecutionData: IRunExecutionData,
     hooks: SchedulerHooks,
   ): Promise<void> {
-    // Everything a `run()` leaves behind is reset here, so a second `run()` on one instance
-    // starts from nothing: in particular the close function, which n8n awaits at the end of
-    // the execution that produced it and must never inherit from an earlier one.
-    this.diagnostics.length = 0;
-    this.compiled = undefined;
-    this.outcome = undefined;
-    this.state.haltError = undefined;
-    this.state.leftoverError = undefined;
-    this.state.closeFunction = undefined;
-    this.state.fatal = undefined;
-    this.state.waitingNode = undefined;
-    this.state.waitTillAtStart = runExecutionData.waitTill;
-    this.state.inFlight = 0;
-    this.state.maxInFlight = 0;
-
+    this.reset(runExecutionData);
     if (workflow.settings.executionOrder !== 'v1') {
       this.outcome = 'legacy';
-      const legacy = this.options.legacy();
-      try {
-        await legacy.run(host, workflow, runExecutionData, hooks);
-      } finally {
-        // The legacy scheduler computed the contract value itself; take it whole.
-        this.state.haltError = legacy.executionError;
-        this.state.leftoverError = undefined;
-        this.state.closeFunction = legacy.closeFunction;
-      }
+      await runLegacy(this.options.legacy(), this.state, host, workflow, runExecutionData, hooks);
       return;
     }
 
@@ -205,54 +154,14 @@ export class PetriScheduler implements WorkflowScheduler {
       return;
     }
 
-    const description = describeWorkflow(workflow, runExecutionData, { nodeHelpers: this.options.nodeHelpers, mode: host.mode });
-    const compiled = this.compileDescription(description);
-    this.compiled = compiled;
-    for (const d of compiled.diagnostics) this.diagnostic(`compile: ${d}`);
-    if (compiled.budgetRestriction !== null && compiled.requestedBudget > 1) {
-      // The only place a budget leg can see that this workflow did *not* run at k: the
-      // compiler's k-safety check lowered it (README "Concurrency budget and its safety
-      // condition"). `scripts/run-conformance.sh` collects these into `<label>.budget.txt`.
-      this.diagnostic(
-        `budget: k=${compiled.requestedBudget} lowered to ${compiled.effectiveBudget} ` +
-        `(${compiled.budgetRestriction.reason}: ${compiled.budgetRestriction.detail})`);
-    }
-
-    const initial = decodeExecutionData(compiled, executionData, {
-      runData: runExecutionData.resultData.runData,
-      onDiagnostic: (m) => this.diagnostic(`decode: ${m}`),
-    });
-    // n8n pops every entry it runs; the net took them all at once.
-    while (host.isExecutionStackNotEmpty()) host.popExecutionStack();
-
-    let executor: PrecompiledNetExecutor | undefined;
-    const env: ExecutionEnv = {
-      host, workflow, runExecutionData, hooks, state: this.state, diagnostic: (m) => this.diagnostic(m),
-    };
-    const contexts = new Map<string, unknown>([[ENV_KEY, env]]);
-    executor = new PrecompiledNetExecutor(compiled.net, initial, {
-      program: compiled.program,
-      executionContextProvider: () => contexts,
-      ...(this.options.eventStore === undefined ? {} : { eventStore: this.options.eventStore }),
-    });
-
-    let cancelled = false;
-    const onAbort = (): void => {
-      cancelled = true;
-      executor!.close();
-    };
-    let marking: Marking;
-    if (host.abortSignal.aborted) onAbort();
-    else host.abortSignal.addEventListener('abort', onAbort, { once: true });
-    try {
-      marking = await executor.run();
-    } finally {
-      host.abortSignal.removeEventListener('abort', onAbort);
-    }
+    const compiled = this.compileWorkflow(host, workflow, runExecutionData);
+    const diagnostic = (m: string): void => this.diagnostic(m);
+    const env: ExecutionEnv = { host, workflow, runExecutionData, hooks, state: this.state, diagnostic };
+    const { marking, cancelled } = await quiesce(compiled, executionData, env, this.options.eventStore);
 
     const fatal = this.state.fatal;
     this.state.fatal = undefined;
-    this.outcome = this.finish(compiled, marking, executionData, host, workflow, cancelled);
+    this.outcome = finish({ compiled, marking, executionData, host, workflow, cancelled, diagnostic });
     if (fatal !== undefined) {
       // The mirrored loop would have rejected `run()` mid-way; the action took the halt (or,
       // for a node whose `onError` gives `X_run` no halt branch, the stopped) alternative so
@@ -261,82 +170,4 @@ export class PetriScheduler implements WorkflowScheduler {
       throw fatal;
     }
   }
-
-  /**
-   * Classifies the quiescent marking and writes back what n8n owns. In order: a halt (the
-   * host pushed the failed entry, the snapshot taken before the reap carries the rest), a
-   * pause (`_pause` / `X/waiting` / `X/stopped`), a cancellation, natural quiescence.
-   */
-  private finish(
-    compiled: CompiledWorkflow,
-    marking: Marking,
-    executionData: ExecutionDataState,
-    host: SchedulerHost,
-    workflow: Workflow,
-    cancelled: boolean,
-  ): SchedulerOutcome {
-    const shared = compiled.netMap.shared;
-    const node = (name: string) => workflow.nodes[name];
-    const diag = (m: string) => this.diagnostic(m);
-
-    if (marking.tokenCount(shared.halt) > 0) {
-      // n8n's `handleNodeExecutionError` pushed the failed entry and its loop `break`s, so
-      // everything it had not popped stays on the stack — the entries `ExecutionService`
-      // replays on "Retry execution". Nothing consumes `_halt` and nothing clears those
-      // tokens (`compiler/compile.ts`), so the quiescent marking holds every one of them:
-      // the ones that were pending when the halt branch was written, and the ones an
-      // in-flight action deposited afterwards (EXEC-040: they finish, and their routes are
-      // not halt-inhibited).
-      const pushed = [...executionData.nodeExecutionStack];
-      encodeMarking(compiled, marking, executionData, { mode: 'cancelled', node, onDiagnostic: diag });
-      const pending = executionData.nodeExecutionStack;
-      executionData.nodeExecutionStack = [...pushed, ...pending];
-      if (pending.length > 0) {
-        this.diagnostic(`halted: ${pending.length} pending activation(s) written back to nodeExecutionStack ` +
-          `(${pending.map((e) => e.node.name).join(', ')})`);
-      }
-      return 'halted';
-    }
-
-    const waitingNodes = compiled.netMap.nodes.filter((g) => marking.tokenCount(g.waiting) > 0).map((g) => g.node);
-    let destinationStopped = false;
-    let stoppedBeforeRun = false;
-    for (const g of compiled.netMap.nodes) {
-      for (const t of marking.peekTokens(g.stopped)) {
-        const v = t.value;
-        if (!isStoppedPayload(v)) throw new UnexpectedTokenError(g.transitions.run, g.stopped.name);
-        if (v.ran) destinationStopped = true;
-        else stoppedBeforeRun = true;
-      }
-    }
-    if (marking.tokenCount(shared.pause) > 0 || waitingNodes.length > 0 || destinationStopped || stoppedBeforeRun) {
-      // A cancellation that arrives while the net is paused leaves the tokens `close()`
-      // caught between `X_run` and `X_route` (ENV-013), which only mode `cancelled` can
-      // encode — it routes them as `X_route` would have. Encoding those in mode `pause`
-      // is a `CodecError`, and the pending state would be lost with it.
-      const mode: EncodeMode = cancelled ? 'cancelled' : 'pause';
-      encodeMarking(compiled, marking, executionData, { mode, node, onDiagnostic: diag });
-      if (destinationStopped) {
-        // After the destination node n8n keeps popping: an entry outside the run filter is
-        // dropped at lines 74–76 without running. The pause left those entries pending;
-        // drop them through the same predicate. A waiting node stays: it must re-run.
-        executionData.nodeExecutionStack = executionData.nodeExecutionStack.filter(
-          (e) => waitingNodes.includes(e.node.name) || !host.isNodeFilteredOut(e.node.name));
-      }
-      // Only `ran: false` stops (the host's `shouldStopExecuting()` was true when `X_run`
-      // fired, e.g. the workflow timeout) without a Wait or a destination stop is a
-      // cancellation: n8n's loop `return`s and leaves the entry on the stack.
-      if (cancelled) return 'cancelled';
-      return waitingNodes.length > 0 || destinationStopped ? 'paused' : 'cancelled';
-    }
-    if (cancelled) {
-      encodeMarking(compiled, marking, executionData, { mode: 'cancelled', node, onDiagnostic: diag });
-      return 'cancelled';
-    }
-    const mode: EncodeMode = 'stranded';
-    const before = this.diagnostics.length;
-    encodeMarking(compiled, marking, executionData, { mode, node, onDiagnostic: diag });
-    return this.diagnostics.length > before ? 'stranded' : 'completed';
-  }
-
 }

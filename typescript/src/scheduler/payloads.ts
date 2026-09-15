@@ -12,6 +12,12 @@
  */
 import type { IExecuteData, INodeExecutionData, IRunNodeResponse, ISourceData, ITaskStartedData } from 'n8n-workflow';
 
+// The guards live beside the vocabulary rather than in it; this module exports them as it always has.
+export {
+  isDispatchPayload, isEdgePayload, isEntryPayload, isOkPayload, isRequestPayload, isRetryPayload, isRoundPayload,
+  isRunPayload, isStoppedPayload, isWaitingPayload,
+} from './payload-guards.js';
+
 /**
  * A `data` token on an edge place (`X/in`, `X/in_i_e`, `X/hasdata_i`) or a data-filled
  * `X/ready_i` slot: the producer's non-empty output for that output index, plus the n8n
@@ -176,10 +182,6 @@ export interface RoundPayload {
   readonly answers?: ToolDispatch;
 }
 
-export function isRoundPayload(v: unknown): v is RoundPayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'round';
-}
-
 /** Where a tool activation's answer goes: the agent that dispatched it, and that agent's round. */
 export interface ToolDispatch {
   readonly agent: string;
@@ -203,40 +205,4 @@ export interface ResponsePayload {
   readonly kind: 'response';
   readonly tool: string;
   readonly roundId: string;
-}
-
-export function isRequestPayload(v: unknown): v is RequestPayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'request';
-}
-
-export function isDispatchPayload(v: unknown): v is DispatchPayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'dispatch';
-}
-
-export function isRunPayload(v: unknown): v is RunPayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'run';
-}
-
-export function isRetryPayload(v: unknown): v is RetryPayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'retry';
-}
-
-export function isOkPayload(v: unknown): v is OkPayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'ok';
-}
-
-export function isWaitingPayload(v: unknown): v is WaitingPayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'waiting';
-}
-
-export function isStoppedPayload(v: unknown): v is StoppedPayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'stopped';
-}
-
-export function isEdgePayload(v: unknown): v is EdgePayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'edge';
-}
-
-export function isEntryPayload(v: unknown): v is EntryPayload {
-  return typeof v === 'object' && v !== null && (v as { kind?: unknown }).kind === 'entry';
 }
