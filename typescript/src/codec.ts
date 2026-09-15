@@ -83,7 +83,7 @@ import type {
   IWaitingForExecution, IWaitingForExecutionSource,
 } from 'n8n-workflow';
 import {
-  readyPlacesOf, readySlot,
+  reachableFrom, readyPlacesOf, readySlot,
   type CompiledWorkflow, type DirectGadget, type EdgeRef, type InputGadget, type NodeGadget, type OrInput,
   type ReadyInput, type SlottedGadget, type SplitReadyInput, type ToolGadget, type Variant,
 } from './compiler/index.js';
@@ -466,7 +466,7 @@ export function decodeExecutionData(
   const referenced = new Set<string>();
   for (const g of compiled.netMap.nodes) for (const y of g.references) referenced.add(y);
   if (referenced.size > 0) {
-    const reach = reachableFrom(compiled, pendingNodes);
+    const reach = reachableFrom(compiled.analysis, pendingNodes);
     for (const y of referenced) {
       const g = compiled.netMap.node(y);
       if (g.skipped === null || hasRun(y) || reach.has(y) || count(marking, g.skipped) > 0) continue;
@@ -478,21 +478,6 @@ export function decodeExecutionData(
 
 function tokenOfArrival(a: JoinArrival): Token<unknown> {
   return a.kind === 'entry' || a.kind === 'data' ? a.token : unit();
-}
-
-/** Nodes a resumed execution can still activate: the pending nodes and everything downstream of them. */
-function reachableFrom(compiled: CompiledWorkflow, pending: ReadonlySet<string>): Set<string> {
-  const seen = new Set<string>(pending);
-  const stack = [...pending];
-  while (stack.length > 0) {
-    const n = stack.pop()!;
-    for (const e of compiled.analysis.outgoing.get(n) ?? []) {
-      if (seen.has(e.to)) continue;
-      seen.add(e.to);
-      stack.push(e.to);
-    }
-  }
-  return seen;
 }
 
 // ==================== encode ====================

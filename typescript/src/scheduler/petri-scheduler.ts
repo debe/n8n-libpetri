@@ -139,7 +139,9 @@ export class PetriScheduler implements WorkflowScheduler {
   /**
    * Compile once per `(structural hash, budget)` with the actions bound; cached. The hash
    * is a function of the analysis, which is cheap; the net and its program are built only
-   * on a miss, and the program itself compiles lazily on first access (CONC-020).
+   * on a miss, and the program itself compiles lazily on first access (CONC-020). The
+   * analysis and the hash are computed once per call, for the key, and a miss compiles on
+   * both rather than analysing and hashing the description again.
    */
   compileDescription(description: WorkflowDescription): CompiledWorkflow {
     // The agent budgets reach the analysis the key hashes *and* the compile, so an agent's
@@ -149,10 +151,14 @@ export class PetriScheduler implements WorkflowScheduler {
       ...(this.options.maxAgentRounds === undefined ? {} : { maxAgentRounds: this.options.maxAgentRounds }),
       ...(this.options.maxAgentToolCalls === undefined ? {} : { maxAgentToolCalls: this.options.maxAgentToolCalls }),
     };
-    const key = CompiledWorkflowCache.key(structuralHash(analyse(description, agents)), this.budget);
+    const analysis = analyse(description, agents);
+    const hash = structuralHash(analysis);
+    const key = CompiledWorkflowCache.key(hash, this.budget);
     const hit = this.cache.get(key);
     if (hit !== undefined) return hit;
-    const fresh = compile(description, { budget: this.budget, actions: schedulerActions(), ...agents });
+    const fresh = compile(description, {
+      budget: this.budget, actions: schedulerActions(), analysis, structuralHash: hash,
+    });
     this.cache.set(key, fresh);
     return fresh;
   }

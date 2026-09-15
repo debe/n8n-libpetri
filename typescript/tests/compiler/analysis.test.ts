@@ -2,8 +2,13 @@
  * The structural analysis: validation of the description, canvas order, SCC decomposition,
  * reachability, depth in the condensation and diagnostics.
  */
-import { analyse, compile, isAllRequired, joinFormOf, requiredInputsOf, retryParamsOf } from '../../src/compiler/index.js';
-import { conn, diamond, linear, loopOverItems, node, twoTriggers, userCycle, workflow, SHAPES } from '../fixtures/workflows.js';
+import {
+  analyse, compile, CompileError, InternalCompilerError, isAllRequired, joinFormOf, NetMap, PolicyError, reachableFrom,
+  requiredInputsOf, retryParamsOf, structuralHash,
+} from '../../src/compiler/index.js';
+import {
+  ALL, agentTwoTools, conn, diamond, linear, loopOverItems, node, twoTriggers, userCycle, workflow, SHAPES,
+} from '../fixtures/workflows.js';
 import { inOf, readyDataOf, retryOf } from './support.js';
 
 describe('analyse: validation', () => {
@@ -13,6 +18,65 @@ describe('analyse: validation', () => {
     expect(() => compile(workflow('dup-id', [{ ...node('A', 'trigger', [0, 0]), id: 'x' }, { ...node('B', 'set', [1, 1]), id: 'x' }], [], 'A'))).toThrow(/duplicate node id 'x'/);
     expect(() => compile(workflow('slash', [{ ...node('A', 'trigger', [0, 0]), id: 'a/b' }], [], 'A'))).toThrow(/MOD-010/);
     expect(() => compile(workflow('start', [node('A', 'trigger', [0, 0])], [], 'Nope'))).toThrow(/start node 'Nope'/);
+  });
+
+  it('refuses with a CompileError that carries a code and the node the refusal is about, message unchanged', () => {
+    const refusal = (f: () => unknown): CompileError => {
+      try {
+        f();
+      } catch (e) {
+        if (e instanceof CompileError) return e;
+        throw e;
+      }
+      throw new Error('expected a CompileError, nothing was thrown');
+    };
+    const dupId = refusal(() => compile(workflow('dup-id',
+      [{ ...node('A', 'trigger', [0, 0]), id: 'x' }, { ...node('B', 'set', [1, 1]), id: 'x' }], [], 'A')));
+    expect(dupId).toBeInstanceOf(Error);
+    expect(dupId.name).toBe('CompileError');
+    expect(dupId.code).toBe('duplicate-node-id');
+    expect(dupId.node).toBe('B');
+    expect(dupId.message).toBe("compile: duplicate node id 'x'");
+
+    const missingStart = refusal(() => compile(workflow('start', [node('A', 'trigger', [0, 0])], [], 'Nope')));
+    expect(missingStart.code).toBe('unknown-start-node');
+    expect(missingStart.node).toBe('Nope');
+    expect(missingStart.message).toBe("compile: start node 'Nope' is not in the workflow");
+
+    const noStart = refusal(() => compile({ ...workflow('none', [node('A', 'trigger', [0, 0])], [], 'A'), startNode: undefined }));
+    expect(noStart.code).toBe('no-start-node');
+    expect(noStart.node).toBeUndefined();
+
+    const t = node('T', 'trigger', [0, 0]);
+    const a = node('A', 'set', [100, 0]);
+    expect(refusal(() => compile(workflow('dup', [t, { ...a, name: 'T' }], [], 'T'))))
+      .toMatchObject({ code: 'duplicate-node-name', node: 'T' });
+    expect(refusal(() => compile(workflow('w', [t, a], [conn('T', 0, 'Z', 0)], 'T'))))
+      .toMatchObject({ code: 'unknown-connection-node', node: 'Z' });
+    expect(refusal(() => compile(workflow('w', [t, a], [conn('T', 1, 'A', 0)], 'T'))))
+      .toMatchObject({ code: 'output-index-out-of-range', node: 'T' });
+    expect(refusal(() => compile(workflow('w', [t, a], [conn('T', 0, 'A', 1)], 'T'))))
+      .toMatchObject({ code: 'input-index-out-of-range', node: 'A' });
+    expect(refusal(() => compile(workflow('w', [t, a], [], 'T', { shapes: { A: { inputCount: -1, outputCount: 1 } } }))))
+      .toMatchObject({ code: 'invalid-count', node: 'A', message: "node 'A' inputCount must be a non-negative integer, got -1" });
+    expect(refusal(() => compile(linear, { budget: 0 })))
+      .toMatchObject({ code: 'invalid-budget', message: 'compile: budget must be a positive integer, got 0' });
+    expect(refusal(() => compile(linear).netMap.node('Nope')))
+      .toMatchObject({ code: 'unknown-node', node: 'Nope', message: "NetMap: unknown node 'Nope'" });
+  });
+
+  it('a broken compiler invariant is an InternalCompilerError, and a malformed policy stays a PolicyError', () => {
+    const c = compile(linear);
+    const [first] = c.netMap.transitions;
+    const duplicated = (): NetMap =>
+      new NetMap(c.net, c.netMap.shared, c.netMap.nodes, [...c.netMap.transitions, first!], c.netMap.places);
+    expect(duplicated).toThrow(InternalCompilerError);
+    expect(duplicated).toThrow(`NetMap: duplicate transition '${first!.name}'`);
+    expect(duplicated).not.toThrow(CompileError);
+    const timeoutOnly = workflow('w', [node('T', 'trigger', [0, 0]), { ...node('A', 'set', [100, 0]), executionPolicy: { timeoutMs: 5 } }],
+      [conn('T', 0, 'A', 0)], 'T');
+    expect(() => compile(timeoutOnly)).toThrow(PolicyError);
+    expect(() => compile(timeoutOnly)).not.toThrow(CompileError);
   });
 
   it('rejects connections to unknown nodes or out-of-range ports; the error output is in range only under continueErrorOutput', () => {
@@ -157,5 +221,67 @@ describe('analyse: graph facts', () => {
     expect(c.netMap.node('M').form).toBe('direct');
     expect(inOf(c.netMap.node('M')).name).toBe('id:M/in');
     expect(c.diagnostics).toEqual([]);
+  });
+});
+
+describe('analyse: facts computed once', () => {
+  it('each node carries its join form, the one joinFormOf chooses and the one the compiled gadget has', () => {
+    for (const wf of [...Object.values(ALL), agentTwoTools]) {
+      const a = analyse(wf);
+      const c = compile(wf);
+      for (const n of a.nodes) {
+        expect(n.form).toBe(joinFormOf(n, a.incoming.get(n.node.name)!));
+        expect(c.netMap.node(n.node.name).form).toBe(n.form);
+      }
+    }
+    expect(analyse(agentTwoTools).nodes.filter((n) => n.form === 'tool').map((n) => n.node.name).sort())
+      .toEqual([...analyse(agentTwoTools).agentsOf.keys()].sort());
+  });
+
+  it('startNodeSet is startNodes as a set, and every gadget reads its start flag from it', () => {
+    const a = analyse({ ...twoTriggers, startNode: undefined, startNodes: ['Merge', 'TrigB', 'TrigA'] });
+    expect([...a.startNodeSet].sort()).toEqual([...a.startNodes].sort());
+    const c = compile({ ...twoTriggers, startNode: undefined, startNodes: ['Merge', 'TrigB', 'TrigA'] });
+    for (const g of c.netMap.nodes) expect(g.isStartNode).toBe(a.startNodeSet.has(g.node));
+  });
+
+  it('reachableFrom walks the main edges from any start set, the starts included', () => {
+    const a = analyse(diamond);
+    expect([...reachableFrom(a, a.startNodes)].sort()).toEqual([...a.reachable].sort());
+    expect([...reachableFrom(a, ['A'])].sort()).toEqual(['A', 'End', 'Merge']);
+    expect([...reachableFrom(a, ['B', 'A'])].sort()).toEqual(['A', 'B', 'End', 'Merge']);
+    expect([...reachableFrom(a, ['End'])]).toEqual(['End']);
+    // A name the analysis does not know is its own only member: it has no out-edges.
+    expect([...reachableFrom(a, ['Nope'])]).toEqual(['Nope']);
+    expect(reachableFrom(a, []).size).toBe(0);
+  });
+});
+
+describe('compile over a precomputed analysis', () => {
+  it('uses the analysis it is given as the compiled workflow\'s own, and hashes it only when no hash is given', () => {
+    const a = analyse(diamond);
+    const c = compile(diamond, { analysis: a });
+    expect(c.analysis).toBe(a);
+    expect(c.structuralHash).toBe(structuralHash(a));
+    expect(c.structuralHash).toBe(compile(diamond).structuralHash);
+    expect(compile(diamond, { analysis: a, structuralHash: 'given' }).structuralHash).toBe('given');
+  });
+
+  it('compiles the same net as analysing inside compile', () => {
+    for (const wf of [...Object.values(ALL), agentTwoTools]) {
+      const inside = compile(wf, { budget: 2 });
+      const given = compile(wf, { budget: 2, analysis: analyse(wf) });
+      expect([...given.net.places].map((p) => p.name)).toEqual([...inside.net.places].map((p) => p.name));
+      expect([...given.net.transitions].map((t) => t.name)).toEqual([...inside.net.transitions].map((t) => t.name));
+      expect(given.structuralHash).toBe(inside.structuralHash);
+      expect(given.diagnostics).toEqual(inside.diagnostics);
+    }
+  });
+
+  it('refuses agent budgets beside an analysis that already resolved them, and a hash without its analysis', () => {
+    const a = analyse(agentTwoTools);
+    expect(() => compile(agentTwoTools, { analysis: a, maxAgentRounds: 3 })).toThrow(/pass them to analyse\(\)/);
+    expect(() => compile(agentTwoTools, { analysis: a, maxAgentToolCalls: 3 })).toThrow(/pass them to analyse\(\)/);
+    expect(() => compile(agentTwoTools, { structuralHash: 'x' })).toThrow(/without the analysis it hashes/);
   });
 });

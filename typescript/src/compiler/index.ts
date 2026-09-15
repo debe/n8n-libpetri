@@ -13,13 +13,13 @@
  * specified in README.md ("The model") and ADRs 0002–0004.
  */
 export { compile, readyPlacesOf, readySlot } from './compile.js';
-export { analyse, DEFAULT_MAX_AGENT_ROUNDS, DEFAULT_MAX_AGENT_TOOL_CALLS } from './graph.js';
+export { analyse, reachableFrom, DEFAULT_MAX_AGENT_ROUNDS, DEFAULT_MAX_AGENT_TOOL_CALLS } from './graph.js';
 export type { AnalysisOptions } from './graph.js';
 export { parseExecutionPolicy, mergePolicies, PolicyError, POLICY_SCHEMA_VERSION } from './policy.js';
-export type {
-  BehaviourEntry, BehaviourStatus, ExecutionPolicy, FailureAction, FailureStep, PolicyParse,
-} from './policy.js';
+export type { ExecutionPolicy, FailureAction, FailureStep, PolicyParse } from './policy.js';
 export { structuralHash } from './hash.js';
+export { CompileError, InternalCompilerError } from './errors.js';
+export type { CompileErrorCode } from './errors.js';
 export { NetMap } from './net-map.js';
 export type { RoutingMode, RoutingPolicy } from './actions.js';
 // test-facing: the suites pin these facts of the model directly; no other layer reads them.

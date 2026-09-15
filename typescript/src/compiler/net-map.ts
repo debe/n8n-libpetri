@@ -6,6 +6,7 @@
  * `NetMap` can be re-pointed at a re-bound net (CORE-042) without rebuilding its indexes.
  */
 import type { PetriNet, Transition } from 'libpetri';
+import { CompileError, InternalCompilerError } from './errors.js';
 import type {
   NetMapView, NodeGadget, PlaceInfo, PlaceRole, SharedPlaces, TransitionInfo, TransitionInfoOf, TransitionRole,
 } from './types.js';
@@ -54,7 +55,7 @@ export class NetMap implements NetMapView {
     this.places = places;
     for (const g of nodes) this.nodesByName.set(g.node, g);
     for (const t of transitions) {
-      if (this.transitionsByName.has(t.name)) throw new Error(`NetMap: duplicate transition '${t.name}'`);
+      if (this.transitionsByName.has(t.name)) throw new InternalCompilerError(`NetMap: duplicate transition '${t.name}'`);
       this.transitionsByName.set(t.name, t);
       const list = this.transitionsByNode.get(t.node) ?? [];
       list.push(t);
@@ -65,7 +66,7 @@ export class NetMap implements NetMapView {
       }
     }
     for (const p of places) {
-      if (this.placesByName.has(p.name)) throw new Error(`NetMap: duplicate place '${p.name}'`);
+      if (this.placesByName.has(p.name)) throw new InternalCompilerError(`NetMap: duplicate place '${p.name}'`);
       this.placesByName.set(p.name, p);
       if (p.node !== null) {
         const list = this.placesByNode.get(p.node) ?? [];
@@ -78,7 +79,7 @@ export class NetMap implements NetMapView {
     }
     for (const t of net.transitions) this.transitionObjects.set(t.name, t);
     for (const name of this.transitionsByName.keys()) {
-      if (!this.transitionObjects.has(name)) throw new Error(`NetMap: net has no transition '${name}'`);
+      if (!this.transitionObjects.has(name)) throw new InternalCompilerError(`NetMap: net has no transition '${name}'`);
     }
   }
 
@@ -89,7 +90,7 @@ export class NetMap implements NetMapView {
 
   node(name: string): NodeGadget {
     const g = this.nodesByName.get(name);
-    if (g === undefined) throw new Error(`NetMap: unknown node '${name}'`);
+    if (g === undefined) throw new CompileError('unknown-node', `NetMap: unknown node '${name}'`, name);
     return g;
   }
 
@@ -118,7 +119,7 @@ export class NetMap implements NetMapView {
 
   transitionObject(name: string): Transition {
     const t = this.transitionObjects.get(name);
-    if (t === undefined) throw new Error(`NetMap: unknown transition '${name}'`);
+    if (t === undefined) throw new CompileError('unknown-transition', `NetMap: unknown transition '${name}'`);
     return t;
   }
 

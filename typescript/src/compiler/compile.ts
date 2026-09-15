@@ -18,12 +18,14 @@ import type { Instance, Place, Token } from 'libpetri';
 import { assertNever } from '../internal/assert.js';
 import { units } from '../internal/tokens.js';
 import { placeholderActions } from './actions.js';
-import { buildNodeGadget, readySlot, type GadgetBuild, type HostEdgeSlot } from './gadget.js';
-import { analyse, joinFormOf } from './graph.js';
+import { CompileError, InternalCompilerError } from './errors.js';
+import { buildNodeGadget, readySlot, type GadgetBuild } from './gadget.js';
+import { analyse } from './graph.js';
 import { structuralHash } from './hash.js';
+import { SHARED_PLACE, consumerPortOf, emptyTwinOf, inPlaceOf, qualified, skippedPlaceOf } from './names.js';
 import { NetMap } from './net-map.js';
 import type {
-  ActionBinder, BudgetRestriction, CompileOptions, CompiledWorkflow, InputGadget, JoinReadyPlaces, NodeGadget,
+  ActionBinder, BudgetRestriction, CompileOptions, CompiledWorkflow, EdgeSlot, InputGadget, JoinReadyPlaces, NodeGadget,
   PlaceInfo, SharedPlaces, TransitionInfo, WorkflowAnalysis, WorkflowDescription,
 } from './types.js';
 
@@ -66,28 +68,56 @@ export function readyPlacesOf(i: InputGadget): Place<unknown>[] {
   }
 }
 
+/**
+ * The analysis `compile` builds on: the caller's, when it passed one (`options.analysis`), or a
+ * fresh `analyse(workflow)` under the options' agent budgets. The budgets and a passed analysis
+ * are exclusive — the analysis already resolved them — and a hash without its analysis is
+ * refused rather than trusted.
+ */
+function analysisOf(workflow: WorkflowDescription, options: CompileOptions): WorkflowAnalysis {
+  if (options.analysis === undefined) {
+    if (options.structuralHash !== undefined) {
+      throw new CompileError('invalid-options', 'compile: structuralHash is given without the analysis it hashes');
+    }
+    return analyse(workflow, {
+      maxAgentRounds: options.maxAgentRounds, maxAgentToolCalls: options.maxAgentToolCalls,
+    });
+  }
+  if (options.maxAgentRounds !== undefined || options.maxAgentToolCalls !== undefined) {
+    throw new CompileError('invalid-options',
+      'compile: maxAgentRounds / maxAgentToolCalls are analysis options; with a precomputed analysis, ' +
+      'pass them to analyse()');
+  }
+  return options.analysis;
+}
+
+/**
+ * Compiles `workflow` into one flat net (see the module comment). Analyses it first, unless the
+ * caller already did: `options.analysis` (with `options.structuralHash`, when that is known too)
+ * is then used as given — `compile(workflow, { analysis, structuralHash })` — and becomes the
+ * compiled workflow's `analysis`.
+ */
 export function compile(workflow: WorkflowDescription, options: CompileOptions = {}): CompiledWorkflow {
   const requested = options.budget ?? 1;
   if (!Number.isInteger(requested) || requested < 1) {
-    throw new Error(`compile: budget must be a positive integer, got ${requested}`);
+    throw new CompileError('invalid-budget', `compile: budget must be a positive integer, got ${requested}`);
   }
-  const analysis = analyse(workflow, {
-    maxAgentRounds: options.maxAgentRounds, maxAgentToolCalls: options.maxAgentToolCalls,
-  });
-  const hash = structuralHash(analysis);
+  const analysis = analysisOf(workflow, options);
+  const hash = options.structuralHash ?? structuralHash(analysis);
   const restriction = kSafety(analysis);
   const effectiveBudget = restriction === null ? requested : 1;
 
   const shared: SharedPlaces = {
-    budget: place<unknown>('_budget'),
-    halt: place<unknown>('_halt'),
-    pause: place<unknown>('_pause'),
+    budget: place<unknown>(SHARED_PLACE.budget),
+    halt: place<unknown>(SHARED_PLACE.halt),
+    pause: place<unknown>(SHARED_PLACE.pause),
   };
 
-  // Consumer-owned edge places. The direct form names them `X/in` / `X/in_empty` (README);
-  // a join input names them per edge. Cycle edges carry no empty place (emission rule).
-  // A node with no producer gets a synthetic `X/in` (the start node's trigger data lands there).
-  const edgeSlots = new Map<number, HostEdgeSlot>();
+  // Consumer-owned edge places, named after the consumer port they bind to (`names.ts`). The
+  // direct form names them `X/in` / `X/in_empty` (README); a join input names them per edge.
+  // Cycle edges carry no empty place (emission rule). A node with no producer gets a synthetic
+  // `X/in` (the start node's trigger data lands there).
+  const edgeSlots = new Map<number, EdgeSlot>();
   const syntheticIn = new Map<string, Place<unknown>>();
   for (const a of analysis.nodes) {
     const incoming = analysis.incoming.get(a.node.name) ?? [];
@@ -95,16 +125,16 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
     // its `T/in_tool` instead, so a synthetic `X/in` would be an orphan nothing ever seeds.
     if (a.isTool) continue;
     if (incoming.length === 0) {
-      syntheticIn.set(a.node.name, place<unknown>(`${a.node.id}/in`));
+      syntheticIn.set(a.node.name, place<unknown>(inPlaceOf(a.node.id)));
       continue;
     }
-    const direct = joinFormOf(a, incoming) === 'direct';
+    const direct = a.form === 'direct';
     for (const e of incoming) {
-      const base = direct ? `${a.node.id}/in` : `${a.node.id}/in${e.inputIndex}_e${e.id}`;
+      const port = consumerPortOf(direct, e.inputIndex, e.id);
       edgeSlots.set(e.id, {
         edge: e,
-        data: place<unknown>(base),
-        empty: e.kind === 'tree' ? place<unknown>(`${base}_empty`) : null,
+        data: place<unknown>(qualified(a.node.id, port)),
+        empty: e.kind === 'tree' ? place<unknown>(qualified(a.node.id, emptyTwinOf(port))) : null,
       });
     }
   }
@@ -113,7 +143,7 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   /** The instance of a node another node's port binds to; every name here came from the analysis. */
   const instanceOf = (node: string): Instance<void> => {
     const instance = instanceByNode.get(node);
-    if (instance === undefined) throw new Error(`internal: no instance for node '${node}'`);
+    if (instance === undefined) throw new InternalCompilerError(`internal: no instance for node '${node}'`);
     return instance;
   };
   const composed = analysis.nodes.map((a) => {
@@ -128,7 +158,7 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   const hostSkipped = new Map<string, Place<unknown>>();
   for (const { a, build } of composed) {
     if (analysis.referenced.has(a.node.name) && !build.exposesSkipped) {
-      hostSkipped.set(a.node.name, place<unknown>(`${a.node.id}/skipped`));
+      hostSkipped.set(a.node.name, place<unknown>(skippedPlaceOf(a.node.id)));
     }
   }
 
@@ -165,12 +195,12 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   const structural = builder.build();
   const canonical = new Map<string, Place<unknown>>();
   for (const p of structural.places) {
-    if (canonical.has(p.name)) throw new Error(`internal: two place objects named '${p.name}'`);
+    if (canonical.has(p.name)) throw new InternalCompilerError(`internal: two place objects named '${p.name}'`);
     canonical.set(p.name, p);
   }
   const lookup = (name: string): Place<unknown> => {
     const p = canonical.get(name);
-    if (p === undefined) throw new Error(`internal: no canonical place '${name}'`);
+    if (p === undefined) throw new InternalCompilerError(`internal: no canonical place '${name}'`);
     return p;
   };
 
@@ -186,17 +216,17 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   // Every place and transition of the flat net is mapped exactly once.
   const mappedPlaces = new Set<string>();
   for (const p of placeInfos) {
-    if (mappedPlaces.has(p.name)) throw new Error('internal: a place is mapped twice');
+    if (mappedPlaces.has(p.name)) throw new InternalCompilerError('internal: a place is mapped twice');
     mappedPlaces.add(p.name);
   }
   for (const p of structural.places) {
-    if (!mappedPlaces.has(p.name)) throw new Error(`internal: unmapped place '${p.name}'`);
+    if (!mappedPlaces.has(p.name)) throw new InternalCompilerError(`internal: unmapped place '${p.name}'`);
   }
   if (structural.places.size !== placeInfos.length) {
-    throw new Error(`internal: ${placeInfos.length} mapped places but the net has ${structural.places.size}`);
+    throw new InternalCompilerError(`internal: ${placeInfos.length} mapped places but the net has ${structural.places.size}`);
   }
   if (structural.transitions.size !== transitionInfos.length) {
-    throw new Error(`internal: ${transitionInfos.length} mapped transitions but the net has ${structural.transitions.size}`);
+    throw new InternalCompilerError(`internal: ${transitionInfos.length} mapped transitions but the net has ${structural.transitions.size}`);
   }
 
   const map0 = new NetMap(structural, shared, gadgets, transitionInfos, placeInfos);
@@ -204,7 +234,7 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   const user = options.actions;
   const net = structural.bindActionsWithResolver((name) => {
     const info = map0.transition(name);
-    if (info === undefined) throw new Error(`internal: binding an unmapped transition '${name}'`);
+    if (info === undefined) throw new InternalCompilerError(`internal: binding an unmapped transition '${name}'`);
     return user?.(info, map0) ?? fallback(info, map0);
   });
 
@@ -346,7 +376,7 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
     // creates `Y/skipped` for every referenced node, so a seeded one always has it.
     for (const y of this.analysis.seededSkipped) {
       const skipped = this.netMap.node(y).skipped;
-      if (skipped === null) throw new Error(`internal: referenced node '${y}' has no skipped place to seed`);
+      if (skipped === null) throw new InternalCompilerError(`internal: referenced node '${y}' has no skipped place to seed`);
       put(skipped, units(1));
     }
     return marking;
@@ -360,9 +390,9 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
     // quiesces immediately and looks like a workflow that did nothing; say so instead. A resumed
     // execution reaches a tool through `decodeExecutionData`, never through here.
     if (g.form === 'tool') {
-      throw new Error(
+      throw new CompileError('tool-start-node',
         `compile: start node '${g.node}' is an ai_tool node; a tool is reached only by its ` +
-        "agent's dispatch, so it cannot be where an execution starts");
+        "agent's dispatch, so it cannot be where an execution starts", g.node);
     }
     if (g.form === 'direct') {
       marking.set(g.in, [tokenOf<unknown>(triggerItems)]);
@@ -394,7 +424,7 @@ class CompiledWorkflowImpl implements CompiledWorkflow {
   withActions(binder: ActionBinder): CompiledWorkflow {
     const rebound = this.net.bindActionsWithResolver((name) => {
       const info = this.netMap.transition(name);
-      if (info === undefined) throw new Error(`internal: binding an unmapped transition '${name}'`);
+      if (info === undefined) throw new InternalCompilerError(`internal: binding an unmapped transition '${name}'`);
       return binder(info, this.netMap);
     });
     return new CompiledWorkflowImpl(

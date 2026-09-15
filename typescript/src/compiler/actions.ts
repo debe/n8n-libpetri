@@ -23,6 +23,7 @@
  */
 import type { Place, TransitionAction, TransitionContext } from 'libpetri';
 import { assertNever } from '../internal/assert.js';
+import { InternalCompilerError } from './errors.js';
 import { readySlot } from './gadget.js';
 import type {
   ActionBinder, ArmTransition, AttemptTransition, DeadlineTransition, NetMapView, NodeGadget, OutputGadget,
@@ -41,7 +42,7 @@ function routeOutput(ctx: TransitionContext, g: NodeGadget, out: OutputGadget, m
     ctx.output(out.nil, null);
   } else {
     for (const e of out.edges) {
-      if (e.empty === null) throw new Error(`internal: acyclic producer '${g.node}' has a cycle edge`);
+      if (e.empty === null) throw new InternalCompilerError(`internal: acyclic producer '${g.node}' has a cycle edge`);
       ctx.output(e.empty, null);
     }
   }
@@ -93,7 +94,7 @@ function succeed(ctx: TransitionContext, g: NodeGadget, policy: RoutingPolicy, v
     // tool, so the outcome is an `xor` over them; the placeholder takes the first branch, and
     // the scheduler's action reads the agent off the dispatch token.
     ctx.output(responseOf(map, g.agents[0]), value);
-    if (g.routing.kind === 'split') throw new Error(`internal: tool '${g.node}' routes per output`);
+    if (g.routing.kind === 'split') throw new InternalCompilerError(`internal: tool '${g.node}' routes per output`);
     ctx.output(g.routing.routed, null);
     return;
   }
@@ -108,7 +109,7 @@ function succeed(ctx: TransitionContext, g: NodeGadget, policy: RoutingPolicy, v
 /** The `A/response` place of `agent`, which every node a tool is wired to has by construction. */
 function responseOf(map: NetMapView, agent: string): Place<unknown> {
   const owner = map.node(agent);
-  if (owner.agent === null) throw new Error(`internal: '${agent}' is wired as an agent but compiled without an agent side`);
+  if (owner.agent === null) throw new InternalCompilerError(`internal: '${agent}' is wired as an agent but compiled without an agent side`);
   return owner.agent.response;
 }
 
@@ -121,9 +122,9 @@ function runAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView): Trans
 
 /** Per-output routing only (`routing.kind === 'split'`): `X_route_o` drains one `X/ok_o`. */
 function routeAction(g: NodeGadget, info: RouteTransition, policy: RoutingPolicy): TransitionAction {
-  if (g.routing.kind !== 'split') throw new Error(`internal: node '${g.node}' has a route transition but routes in X_run`);
+  if (g.routing.kind !== 'split') throw new InternalCompilerError(`internal: node '${g.node}' has a route transition but routes in X_run`);
   const out = g.routing.outputs.find((o) => o.index === info.port);
-  if (out === undefined) throw new Error(`internal: node '${g.node}' has no output ${info.port} for '${info.name}'`);
+  if (out === undefined) throw new InternalCompilerError(`internal: node '${g.node}' has no output ${info.port} for '${info.name}'`);
   return async (ctx) => {
     routeOutput(ctx, g, out, policy(g, out), ctx.input(out.ok));
     ctx.output(out.routed, null);
@@ -139,7 +140,7 @@ function doneAction(g: NodeGadget, map: NetMapView): TransitionAction {
 
 function exhaustedAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView): TransitionAction {
   const { retry } = g;
-  if (retry === null) throw new Error(`internal: node '${g.node}' has an exhausted transition but no retry gadget`);
+  if (retry === null) throw new InternalCompilerError(`internal: node '${g.node}' has an exhausted transition but no retry gadget`);
   return async (ctx) => {
     succeed(ctx, g, policy, ctx.input(retry.retry), map);
   };
@@ -147,7 +148,7 @@ function exhaustedAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView):
 
 function skipAction(g: NodeGadget): TransitionAction {
   const { skipped } = g;
-  if (skipped === null) throw new Error(`internal: node '${g.node}' has a skip transition but no skipped place`);
+  if (skipped === null) throw new InternalCompilerError(`internal: node '${g.node}' has a skip transition but no skipped place`);
   const refunds = g.form === 'join' || g.form === 'choose-branch' ? g.inputs.map((i) => i.free) : [];
   return async (ctx) => {
     for (const out of g.outputs) for (const e of out.edges) if (e.empty !== null) ctx.output(e.empty, null);
@@ -158,11 +159,11 @@ function skipAction(g: NodeGadget): TransitionAction {
 
 function armAction(g: NodeGadget, info: ArmTransition): TransitionAction {
   const { edge, variant } = info;
-  if (g.form === 'direct' || g.form === 'tool') throw new Error(`internal: node '${g.node}' has an arm but no join input`);
+  if (g.form === 'direct' || g.form === 'tool') throw new InternalCompilerError(`internal: node '${g.node}' has an arm but no join input`);
   const input = g.inputs.find((i) => i.index === edge.inputIndex);
   const slot = input?.edges.find((e) => e.edge.id === edge.id);
   if (input === undefined || slot === undefined) {
-    throw new Error(`internal: node '${g.node}' has no input ${edge.inputIndex} edge ${edge.id} for '${info.name}'`);
+    throw new InternalCompilerError(`internal: node '${g.node}' has no input ${edge.inputIndex} edge ${edge.id} for '${info.name}'`);
   }
   if (input.slot === 'or') {
     if (variant === 'data') {
@@ -206,7 +207,7 @@ function doneRequestAction(g: NodeGadget, map: NetMapView): TransitionAction {
 
 /** The agent side of a node whose round transitions are being bound: the gadget built them only for an agent. */
 function agentOf(g: NodeGadget): AgentGadget {
-  if (g.agent === null) throw new Error(`internal: node '${g.node}' has a round transition but no agent side`);
+  if (g.agent === null) throw new InternalCompilerError(`internal: node '${g.node}' has a round transition but no agent side`);
   return g.agent;
 }
 
@@ -219,7 +220,7 @@ function agentOf(g: NodeGadget): AgentGadget {
 function dispatchAction(g: NodeGadget, map: NetMapView): TransitionAction {
   const agent = agentOf(g);
   const firstTool = map.node(agent.tools[0]);
-  if (firstTool.form !== 'tool') throw new Error(`internal: agent '${g.node}' dispatches to '${firstTool.node}', which is not a tool`);
+  if (firstTool.form !== 'tool') throw new InternalCompilerError(`internal: agent '${g.node}' dispatches to '${firstTool.node}', which is not a tool`);
   return async (ctx) => {
     const value = ctx.input(agent.queue);
     ctx.output(firstTool.inTool, value);
@@ -255,7 +256,7 @@ function roundsOutAction(g: NodeGadget, map: NetMapView): TransitionAction {
 
 function retryWaitAction(g: NodeGadget): TransitionAction {
   const { retry } = g;
-  if (retry === null) throw new Error(`internal: node '${g.node}' has a retry_wait transition but no retry gadget`);
+  if (retry === null) throw new InternalCompilerError(`internal: node '${g.node}' has a retry_wait transition but no retry gadget`);
   return async (ctx) => {
     ctx.output(g.running, ctx.input(retry.retry));
   };
@@ -264,7 +265,7 @@ function retryWaitAction(g: NodeGadget): TransitionAction {
 /** The attempt a chain transition serves; the gadget names one per attempt it built. */
 function attemptOf(g: NodeGadget, info: AttemptTransition | DeadlineTransition): AttemptGadget {
   const attempt = g.attempts.find((att) => att.index === info.attempt);
-  if (attempt === undefined) throw new Error(`internal: node '${g.node}' has no attempt ${info.attempt} for '${info.name}'`);
+  if (attempt === undefined) throw new InternalCompilerError(`internal: node '${g.node}' has no attempt ${info.attempt} for '${info.name}'`);
   return attempt;
 }
 
@@ -300,7 +301,7 @@ function attemptAction(
 function deadlineAction(g: NodeGadget, info: DeadlineTransition): TransitionAction {
   const attempt = attemptOf(g, info);
   const { timedOut } = attempt;
-  if (timedOut === null) throw new Error(`internal: node '${g.node}' has a deadline funnel but attempt ${info.attempt} has no timedout place`);
+  if (timedOut === null) throw new InternalCompilerError(`internal: node '${g.node}' has a deadline funnel but attempt ${info.attempt} has no timedout place`);
   return async (ctx) => {
     ctx.output(attempt.failed, ctx.input(timedOut));
   };

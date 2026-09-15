@@ -358,25 +358,3 @@ export function mergePolicies(
   }
   return merged;
 }
-
-// ==================== the behaviour vocabulary (layer 2 -> 3) ====================
-
-/**
- * How far a declared behaviour has been taken.
- *
- * `registered` is the bar for the editor: schema, encoding, a declared verification property
- * and a measured state-space cost all exist. `planned` parses and is reported as unverified,
- * so a JSON author is never silently ignored and never silently over-promised.
- */
-export type BehaviourStatus = 'registered' | 'planned';
-
-/** One declared behaviour's layer-3 note — the only place the two vocabularies are allowed to meet. */
-export interface BehaviourEntry {
-  /** The layer-1 key, so an entry can only describe a behaviour the policy can declare. */
-  readonly behaviour: keyof ExecutionPolicy;
-  readonly status: BehaviourStatus;
-  /** What the verifier is asked, and so what a `proven` licenses. */
-  readonly property: string | null;
-  /** One line on the encoding, for the report and for whoever adds the next one. */
-  readonly encoding: string;
-}
