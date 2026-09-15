@@ -3,31 +3,52 @@
  * and the `onFailure` chain of ADR 0009, its output names resolved to indexes. `analyse()` calls
  * both per node; the only graph fact the chain needs — which outputs are connected — it is
  * handed.
+ *
+ * The retry clamps live in `failure-chain/retry-params.ts`, the fields a chain cannot sit beside
+ * in `failure-chain/field-conflicts.ts`, and a `route` step's output resolution in
+ * `failure-chain/route-target.ts`.
  */
 import { assertNever } from '../internal/assert.js';
-import { isTerminalAction, PolicyError, positiveInt } from './policy.js';
-import type { FailureChain, NodeDescription, NodeTypeShape, ResolvedStep, RetryParams } from './types.js';
+import { refuseDeadlineWithoutChain, fieldConflictsOf } from './failure-chain/field-conflicts.js';
+import { routeTargetOf, type RouteTargets } from './failure-chain/route-target.js';
+import { isTerminalAction, PolicyError, positiveInt, type FailureStep } from './policy.js';
+import type { FailureChain, NodeDescription, NodeTypeShape, ResolvedStep } from './types.js';
+
+export {
+  DEFAULT_MAX_TRIES, MIN_MAX_TRIES, MAX_MAX_TRIES, DEFAULT_WAIT_BETWEEN_TRIES_MS, MAX_WAIT_BETWEEN_TRIES_MS, retryParamsOf,
+} from './failure-chain/retry-params.js';
+
+/** One declared step resolved for attempt `i + 1`; `undefined` when its `route` target recorded a problem. */
+function resolveStep(step: FailureStep, i: number, targets: RouteTargets): ResolvedStep | undefined {
+  const attempt = i + 1;
+  switch (step.action) {
+    case 'retry': return { attempt, action: 'retry', waitMs: step.waitMs ?? 0, nextAttempt: attempt + 1 };
+    case 'route': {
+      const outputIndex = routeTargetOf(targets, step.output, `onFailure[${i}]`);
+      return outputIndex === undefined ? undefined : { attempt, action: 'route', outputIndex };
+    }
+    case 'stop':
+    case 'continue': return { attempt, action: step.action };
+    default: return assertNever(step, 'failure step');
+  }
+}
 
 /**
- * n8n's retry parameters as `WorkflowExecute.getRetryParams` reads them
- * (`workflow-execute.ts` @ `441970b`, lines 1801–1811):
- * `maxTries = min(5, max(2, node.maxTries || 3))`,
- * `waitBetweenTries = min(5000, max(0, node.waitBetweenTries || 1000))`.
- * `0`, `undefined` and `NaN` are falsy and take the default; out-of-range values are
- * clamped; nothing is rejected.
+ * `parseExecutionPolicy` already truncated at the first terminal, so this is a defence
+ * against a hand-built description rather than against a workflow. Checked only once every
+ * step resolved: a route step that was dropped is already a problem, and the gap it leaves
+ * is not a second one.
  */
-export const DEFAULT_MAX_TRIES = 3;
-export const MIN_MAX_TRIES = 2;
-export const MAX_MAX_TRIES = 5;
-export const DEFAULT_WAIT_BETWEEN_TRIES_MS = 1000;
-export const MAX_WAIT_BETWEEN_TRIES_MS = 5000;
+function endsTerminal(resolved: readonly ResolvedStep[], declared: number): boolean {
+  if (resolved.length !== declared) return true;
+  const last = resolved[resolved.length - 1];
+  return last !== undefined && isTerminalAction(last.action);
+}
 
-/** The clamped retry parameters of a `retryOnFail` node (see the constants above). */
-export function retryParamsOf(node: Pick<NodeDescription, 'maxTries' | 'waitBetweenTries'>): RetryParams {
-  return {
-    maxTries: Math.min(MAX_MAX_TRIES, Math.max(MIN_MAX_TRIES, node.maxTries || DEFAULT_MAX_TRIES)),
-    waitBetweenTries: Math.min(MAX_WAIT_BETWEEN_TRIES_MS, Math.max(0, node.waitBetweenTries || DEFAULT_WAIT_BETWEEN_TRIES_MS)),
-  };
+function chainDiagnostic(where: string, steps: number, timeoutMs: number | undefined, last: ResolvedStep): string {
+  return `${where}: onFailure declares ${steps} attempt(s)` +
+    (timeoutMs === undefined ? '' : ` with a ${timeoutMs} ms deadline each`) +
+    `, ending in '${last.action}'`;
 }
 
 /**
@@ -55,116 +76,25 @@ export function resolveFailureChain(
   if (policy === undefined) return null;
   const steps = policy.onFailure;
   const where = `node '${node.name}'`;
-  const problems: string[] = [];
-
   if (steps === undefined) {
-    if (policy.timeoutMs !== undefined) {
-      throw new PolicyError(where, [
-        `${where}: executionPolicy.timeoutMs needs an onFailure chain to say what an expired ` +
-        'attempt does']);
-    }
+    refuseDeadlineWithoutChain(policy.timeoutMs, where);
     return null;
   }
-  if (node.retryOnFail === true) {
-    problems.push(
-      `${where}: executionPolicy.onFailure and retryOnFail both set; onFailure is the same ` +
-      'policy at a finer resolution, so declare one of them');
-  }
-  // `continueErrorOutput` is allowed beside a chain, and is the only way to get a second arc
-  // out of a node that has one main output: `NodeHelpers.getNodeOutputs` appends the error
-  // output purely on this field, which is what makes the editor draw the port and lets a user
-  // wire it. So the two divide cleanly — `onError` declares the *shape*, `onFailure` decides
-  // the *policy* — and a `route` step can then name `'error'`.
-  //
-  // `continueRegularOutput` is refused because it declares no port and claims the terminal the
-  // chain already owns.
-  if (node.onError !== undefined
-    && node.onError !== 'stopWorkflow'
-    && node.onError !== 'continueErrorOutput') {
-    problems.push(
-      `${where}: executionPolicy.onFailure and onError '${node.onError}' both set; the chain's ` +
-      "last step is this node's error policy, so declare one of them (onError " +
-      "'continueErrorOutput' is the exception: it declares the error output the chain routes to)");
-  }
-
-  /** An output name or index into a connected output index; `undefined` records a problem. */
-  const outputOf = (raw: string | number, at: string): number | undefined => {
-    // A node with no outputs at all cannot route anywhere, and the commonest one by far is an
-    // `ai_tool` node — whose result is its agent's response, not a main edge — so the message
-    // names that rather than leaving the author to work out why an index is out of range.
-    if (outputCount === 0) {
-      problems.push(
-        `${where}: ${at} declares action 'route', but this node has no output to route to ` +
-        "(a tool's result goes to its agent rather than down a main edge). Use 'retry', " +
-        "'stop' or 'continue'");
-      return undefined;
-    }
-    let index: number;
-    if (typeof raw === 'number') {
-      index = raw;
-    } else if (raw === 'error' && errorOutputIndex !== null) {
-      index = errorOutputIndex;
-    } else {
-      const named = shape.outputNames?.indexOf(raw) ?? -1;
-      if (named < 0) {
-        problems.push(
-          `${where}: ${at} routes to output '${raw}', which this node type does not name` +
-          (shape.outputNames === undefined
-            ? ' (the node type declares no output names; use an index)'
-            : ` (it names ${shape.outputNames.map((n) => `'${n}'`).join(', ')})`));
-        return undefined;
-      }
-      index = named;
-    }
-    if (index >= outputCount) {
-      problems.push(
-        `${where}: ${at} routes to output ${index}, but the node has ${outputCount}`);
-      return undefined;
-    }
-    if (!connectedOutputs.has(index)) {
-      problems.push(
-        `${where}: ${at} routes to output ${index}, which has no connection; wire it or ` +
-        "use 'stop' / 'continue'");
-      return undefined;
-    }
-    return index;
-  };
-
+  const problems = fieldConflictsOf(node, where);
+  const targets: RouteTargets = { where, shape, outputCount, errorOutputIndex, connectedOutputs, problems };
   const resolved: ResolvedStep[] = [];
   steps.forEach((step, i) => {
-    const at = `onFailure[${i}]`;
-    const attempt = i + 1;
-    switch (step.action) {
-      case 'retry':
-        resolved.push({ attempt, action: 'retry', waitMs: step.waitMs ?? 0, nextAttempt: attempt + 1 });
-        break;
-      case 'route': {
-        const outputIndex = outputOf(step.output, at);
-        if (outputIndex !== undefined) resolved.push({ attempt, action: 'route', outputIndex });
-        break;
-      }
-      case 'stop':
-      case 'continue':
-        resolved.push({ attempt, action: step.action });
-        break;
-      default: assertNever(step, 'failure step');
-    }
+    const r = resolveStep(step, i, targets);
+    if (r !== undefined) resolved.push(r);
   });
-  // `parseExecutionPolicy` already truncated at the first terminal, so this is a defence
-  // against a hand-built description rather than against a workflow. Checked only once every
-  // step resolved: a route step that was dropped is already a problem, and the gap it leaves
-  // is not a second one.
-  const last = resolved[resolved.length - 1];
-  if (resolved.length === steps.length && (last === undefined || !isTerminalAction(last.action))) {
+  if (!endsTerminal(resolved, steps.length)) {
     problems.push(`${where}: executionPolicy.onFailure must end with a terminal step`);
   }
   positiveInt(policy.timeoutMs, `${where} timeoutMs`, problems);
   // `last` is undefined only when a step was dropped or the chain is empty, and both recorded
   // a problem; the second test is the same condition, written so the type says so.
+  const last = resolved[resolved.length - 1];
   if (problems.length > 0 || last === undefined) throw new PolicyError(where, problems);
-  diagnostics.push(
-    `${where}: onFailure declares ${resolved.length} attempt(s)` +
-    (policy.timeoutMs === undefined ? '' : ` with a ${policy.timeoutMs} ms deadline each`) +
-    `, ending in '${last.action}'`);
+  diagnostics.push(chainDiagnostic(where, resolved.length, policy.timeoutMs, last));
   return { steps: resolved, timeoutMs: policy.timeoutMs ?? null };
 }

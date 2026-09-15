@@ -6,90 +6,38 @@
  * (MOD-020) into a flat net (MOD-023) with the shared `_budget` / `_halt` /
  * `_pause` places, the consumer-owned edge places and the `Y/done` reference places bound as ports;
  * then action binding (CORE-042) and the `NetMap`. Every transition of the flat net belongs
- * to a node: there is no host-level transition (see the halt note below). The `PrecompiledNet` program is compiled lazily once per `CompiledWorkflow`
- * (CONC-020) and enforces CORE-043.
+ * to a node: there is no host-level transition, and no reap — `_halt` is the halted run's
+ * terminal marker and nothing consumes it (the halt note in `compile/compose.ts`). The
+ * `PrecompiledNet` program is compiled lazily once per `CompiledWorkflow` (CONC-020) and
+ * enforces CORE-043.
+ *
+ * The stages live in `compile/`: the options and their refusals (`options.ts`), the k-safety
+ * check (`k-safety.ts`), the host edge places (`edge-places.ts`), composition (`compose.ts`),
+ * the `NetMap` (`mapping.ts`), action binding (`bind.ts`), and the compiled workflow with its
+ * markings and derived place collections (`compiled-workflow.ts`, `marking.ts`,
+ * `derived-places.ts`).
  *
  * Declaration order is canvas order: nodes are composed sorted by `(y, x)` ascending and
  * each gadget declares its transitions in a fixed order, so libpetri's declaration-order
  * tiebreak (EXEC-002 AC3) reproduces n8n's sibling order.
  */
-import { PetriNet, PrecompiledNet, place, tokenOf } from 'libpetri';
-import type { Instance, Place, Token } from 'libpetri';
-import { assertNever } from '../internal/assert.js';
-import { units } from '../internal/tokens.js';
 import { placeholderActions } from './actions.js';
-import { CompileError, InternalCompilerError } from './errors.js';
-import { buildNodeGadget, readySlot, type GadgetBuild } from './gadget.js';
-import { analyse } from './graph.js';
+import { readySlot } from './gadget.js';
 import { structuralHash } from './hash.js';
-import { SHARED_PLACE, consumerPortOf, emptyTwinOf, inPlaceOf, qualified, skippedPlaceOf } from './names.js';
-import { NetMap } from './net-map.js';
-import type {
-  ActionBinder, BudgetRestriction, CompileOptions, CompiledWorkflow, EdgeSlot, InputGadget, JoinReadyPlaces, NodeGadget,
-  PlaceInfo, SharedPlaces, TransitionInfo, WorkflowAnalysis, WorkflowDescription,
-} from './types.js';
+import type { CompileOptions, CompiledWorkflow, WorkflowDescription } from './types.js';
+import { bindActions } from './compile/bind.js';
+import { CompiledWorkflowImpl } from './compile/compiled-workflow.js';
+import { composeNet } from './compile/compose.js';
+import { DerivedPlaces } from './compile/derived-places.js';
+import { kSafety } from './compile/k-safety.js';
+import { mapNet } from './compile/mapping.js';
+import { analysisOf, requestedBudgetOf } from './compile/options.js';
 
 // The one copy of the "which ready place" rule lives beside the gadget that lays the places
 // out; it is published from here, where every consumer of the compiled net has always found it.
 export { readySlot };
-
-/**
- * README "Concurrency budget and its safety condition": positional pairing is sound above
- * k = 1 only if every node fires at most once per execution, so the budget is forced to 1
- * for a cyclic workflow or one where an input index has more than one producer.
- */
-export function kSafety(analysis: WorkflowAnalysis): BudgetRestriction | null {
-  if (analysis.hasCycle) {
-    return {
-      reason: 'cyclic',
-      detail: `nodes in a cycle: ${[...analysis.cyclic].sort().join(', ')}`,
-    };
-  }
-  if (analysis.multiProducerInputs.length > 0) {
-    const detail = analysis.multiProducerInputs
-      .map((m) => `${m.node}.${m.inputIndex} has ${m.producers} producers`)
-      .join('; ');
-    return { reason: 'multi-producer-input', detail };
-  }
-  return null;
-}
-
-/**
- * Every `ready` place of one input, in the order the codec and the marking read them: the
- * OR form's round counter, a generic slot's single place, an enumerated slot's `data` place
- * and (when it exists) its `empty` place.
- */
-export function readyPlacesOf(i: InputGadget): Place<unknown>[] {
-  switch (i.slot) {
-    case 'or':
-    case 'ready': return [i.ready];
-    case 'ready-split': return i.readyEmpty === null ? [i.readyData] : [i.readyData, i.readyEmpty];
-    default: return assertNever(i, 'input slot');
-  }
-}
-
-/**
- * The analysis `compile` builds on: the caller's, when it passed one (`options.analysis`), or a
- * fresh `analyse(workflow)` under the options' agent budgets. The budgets and a passed analysis
- * are exclusive — the analysis already resolved them — and a hash without its analysis is
- * refused rather than trusted.
- */
-function analysisOf(workflow: WorkflowDescription, options: CompileOptions): WorkflowAnalysis {
-  if (options.analysis === undefined) {
-    if (options.structuralHash !== undefined) {
-      throw new CompileError('invalid-options', 'compile: structuralHash is given without the analysis it hashes');
-    }
-    return analyse(workflow, {
-      maxAgentRounds: options.maxAgentRounds, maxAgentToolCalls: options.maxAgentToolCalls,
-    });
-  }
-  if (options.maxAgentRounds !== undefined || options.maxAgentToolCalls !== undefined) {
-    throw new CompileError('invalid-options',
-      'compile: maxAgentRounds / maxAgentToolCalls are analysis options; with a precomputed analysis, ' +
-      'pass them to analyse()');
-  }
-  return options.analysis;
-}
+export { kSafety } from './compile/k-safety.js';
+export { readyPlacesOf } from './compile/derived-places.js';
 
 /**
  * Compiles `workflow` into one flat net (see the module comment). Analyses it first, unless the
@@ -98,337 +46,18 @@ function analysisOf(workflow: WorkflowDescription, options: CompileOptions): Wor
  * compiled workflow's `analysis`.
  */
 export function compile(workflow: WorkflowDescription, options: CompileOptions = {}): CompiledWorkflow {
-  const requested = options.budget ?? 1;
-  if (!Number.isInteger(requested) || requested < 1) {
-    throw new CompileError('invalid-budget', `compile: budget must be a positive integer, got ${requested}`);
-  }
+  const requested = requestedBudgetOf(options);
   const analysis = analysisOf(workflow, options);
   const hash = options.structuralHash ?? structuralHash(analysis);
   const restriction = kSafety(analysis);
   const effectiveBudget = restriction === null ? requested : 1;
 
-  const shared: SharedPlaces = {
-    budget: place<unknown>(SHARED_PLACE.budget),
-    halt: place<unknown>(SHARED_PLACE.halt),
-    pause: place<unknown>(SHARED_PLACE.pause),
-  };
-
-  // Consumer-owned edge places, named after the consumer port they bind to (`names.ts`). The
-  // direct form names them `X/in` / `X/in_empty` (README); a join input names them per edge.
-  // Cycle edges carry no empty place (emission rule). A node with no producer gets a synthetic
-  // `X/in` (the start node's trigger data lands there).
-  const edgeSlots = new Map<number, EdgeSlot>();
-  const syntheticIn = new Map<string, Place<unknown>>();
-  for (const a of analysis.nodes) {
-    const incoming = analysis.incoming.get(a.node.name) ?? [];
-    // A tool node has no main producer *and* no synthetic in: an agent's `A_dispatch` writes
-    // its `T/in_tool` instead, so a synthetic `X/in` would be an orphan nothing ever seeds.
-    if (a.isTool) continue;
-    if (incoming.length === 0) {
-      syntheticIn.set(a.node.name, place<unknown>(inPlaceOf(a.node.id)));
-      continue;
-    }
-    const direct = a.form === 'direct';
-    for (const e of incoming) {
-      const port = consumerPortOf(direct, e.inputIndex, e.id);
-      edgeSlots.set(e.id, {
-        edge: e,
-        data: place<unknown>(qualified(a.node.id, port)),
-        empty: e.kind === 'tree' ? place<unknown>(qualified(a.node.id, emptyTwinOf(port))) : null,
-      });
-    }
-  }
-
-  const instanceByNode = new Map<string, Instance<void>>();
-  /** The instance of a node another node's port binds to; every name here came from the analysis. */
-  const instanceOf = (node: string): Instance<void> => {
-    const instance = instanceByNode.get(node);
-    if (instance === undefined) throw new InternalCompilerError(`internal: no instance for node '${node}'`);
-    return instance;
-  };
-  const composed = analysis.nodes.map((a) => {
-    const build: GadgetBuild = buildNodeGadget(a, analysis, edgeSlots, syntheticIn.get(a.node.name) ?? null, shared);
-    const instance = build.def.instantiate(build.prefix);
-    instanceByNode.set(a.node.name, instance);
-    return { a, build, instance };
-  });
-  const builds = composed.map((c) => c.build);
-  // A referenced node without a skip transition has no body transition touching `skipped`,
-  // so the marker lives at the host level and is bound straight into the twins' read ports.
-  const hostSkipped = new Map<string, Place<unknown>>();
-  for (const { a, build } of composed) {
-    if (analysis.referenced.has(a.node.name) && !build.exposesSkipped) {
-      hostSkipped.set(a.node.name, place<unknown>(skippedPlaceOf(a.node.id)));
-    }
-  }
-
-  const builder = PetriNet.builder(workflow.name ?? workflow.id ?? 'workflow');
-  for (const { build: b, instance } of composed) {
-    const ports = new Map<string, Place<unknown>>(b.ports);
-    for (const r of b.refPorts) {
-      const host = r.marker === 'skipped' ? hostSkipped.get(r.node) : undefined;
-      ports.set(r.port, host ?? instanceOf(r.node).port<unknown>(r.marker));
-    }
-    // Agent tool dispatch: the agent's `tool_k` port binds to the tool's own `in_tool` place,
-    // and the tool's `resp_k` port to its agent's `response` place. Same mechanism as a
-    // reference port — the owner exposes it, the writer binds to it.
-    for (const t of b.toolPorts) {
-      ports.set(t.port, instanceOf(t.node).port<unknown>(t.marker));
-    }
-    builder.compose(instance, ports);
-  }
-
-  // There is no reap: `_halt` is the halted run's terminal marker and nothing consumes it
-  // (README "Retries, halt, cancellation", ADR 0004). Every transition that could move a
-  // pending activation on - start, start_unmet, retry_wait, exhausted, skip, arm, clear -
-  // inhibits on it, so the run quiesces with each arrival still on the `in` / edge /
-  // `ready` / `hasdata` place it was delivered to, which is where `encodeMarking` in mode
-  // `cancelled` reads it and `HALT_REST_ROLES` counts it as a designed terminal's residue
-  // (`verify/state-class.ts`). Destroying them with reset arcs and reconstructing them from
-  // a marking snapshot, as this did through M5, could not survive `X_run` routing its own
-  // outcome: a sibling that resolves in the same executor cycle as the halting node deposits
-  // its arrivals in the same phase-1 batch that carries `_halt`, later than any snapshot the
-  // halting action could take and earlier than the reap that destroyed them.
-  //
-  // Canonical place objects are the flat net's own (CORE-002: TS Place identity is by name,
-  // so the composition may have funnelled several objects of one name into one).
-  const structural = builder.build();
-  const canonical = new Map<string, Place<unknown>>();
-  for (const p of structural.places) {
-    if (canonical.has(p.name)) throw new InternalCompilerError(`internal: two place objects named '${p.name}'`);
-    canonical.set(p.name, p);
-  }
-  const lookup = (name: string): Place<unknown> => {
-    const p = canonical.get(name);
-    if (p === undefined) throw new InternalCompilerError(`internal: no canonical place '${name}'`);
-    return p;
-  };
-
-  const gadgets: NodeGadget[] = builds.map((b) => b.materialise(lookup));
-  const placeInfos: PlaceInfo[] = [
-    { name: shared.budget.name, role: 'budget', node: null, port: null, place: lookup(shared.budget.name) },
-    { name: shared.halt.name, role: 'halt', node: null, port: null, place: lookup(shared.halt.name) },
-    { name: shared.pause.name, role: 'pause', node: null, port: null, place: lookup(shared.pause.name) },
-    ...builds.flatMap((b) => b.places.map((p): PlaceInfo => ({ ...p, place: lookup(p.name) }))),
-  ];
-  const transitionInfos: TransitionInfo[] = builds.flatMap((b) => b.transitions);
-
-  // Every place and transition of the flat net is mapped exactly once.
-  const mappedPlaces = new Set<string>();
-  for (const p of placeInfos) {
-    if (mappedPlaces.has(p.name)) throw new InternalCompilerError('internal: a place is mapped twice');
-    mappedPlaces.add(p.name);
-  }
-  for (const p of structural.places) {
-    if (!mappedPlaces.has(p.name)) throw new InternalCompilerError(`internal: unmapped place '${p.name}'`);
-  }
-  if (structural.places.size !== placeInfos.length) {
-    throw new InternalCompilerError(`internal: ${placeInfos.length} mapped places but the net has ${structural.places.size}`);
-  }
-  if (structural.transitions.size !== transitionInfos.length) {
-    throw new InternalCompilerError(`internal: ${transitionInfos.length} mapped transitions but the net has ${structural.transitions.size}`);
-  }
-
-  const map0 = new NetMap(structural, shared, gadgets, transitionInfos, placeInfos);
+  const { structural, builds, shared } = composeNet(workflow, analysis);
+  const map0 = mapNet(structural, shared, builds);
   const fallback = placeholderActions();
   const user = options.actions;
-  const net = structural.bindActionsWithResolver((name) => {
-    const info = map0.transition(name);
-    if (info === undefined) throw new InternalCompilerError(`internal: binding an unmapped transition '${name}'`);
-    return user?.(info, map0) ?? fallback(info, map0);
-  });
+  const net = bindActions(structural, map0, (info, map) => user?.(info, map) ?? fallback(info, map));
 
   return new CompiledWorkflowImpl(
     net, map0.rebind(net), analysis, hash, requested, effectiveBudget, restriction, new DerivedPlaces(map0));
-}
-
-/**
- * The place collections the verifier reads off a compiled net, derived from the `NetMap`'s
- * gadgets and place infos on first use. A re-bound net (`withActions`, CORE-042) keeps the
- * same places under the same names, so one instance serves every rebinding of a compile.
- */
-class DerivedPlaces {
-  private readonly netMap: NetMap;
-  private joinInput: readonly Place<unknown>[] | null = null;
-  private joinReady: readonly JoinReadyPlaces[] | null = null;
-  private edgeData: readonly Place<unknown>[] | null = null;
-  private running: readonly Place<unknown>[] | null = null;
-
-  constructor(netMap: NetMap) {
-    this.netMap = netMap;
-  }
-
-  get joinInputPlaces(): readonly Place<unknown>[] {
-    return (this.joinInput ??= this.netMap.places.filter((p) => p.role === 'ready').map((p) => p.place));
-  }
-
-  get joinReadyPlaces(): readonly JoinReadyPlaces[] {
-    return (this.joinReady ??= this.netMap.nodes.flatMap((g) => g.inputs.map((i): JoinReadyPlaces => ({
-      node: g.node,
-      inputIndex: i.index,
-      places: readyPlacesOf(i),
-    }))));
-  }
-
-  get edgeDataPlaces(): readonly Place<unknown>[] {
-    return (this.edgeData ??= this.netMap.places
-      .filter((p) => p.role === 'in-data' || p.role === 'edge-data')
-      .map((p) => p.place));
-  }
-
-  /**
-   * Every attempt's running place, not only the first: `no-double-activation` and the
-   * mutual-exclusion pass ask about "this node is running", and an `onFailure` chain spreads
-   * that across `X/running_i` (ADR 0009). `attempts` is empty for a policy-free node, so this
-   * is `g.running` alone there.
-   */
-  get runningPlaces(): readonly Place<unknown>[] {
-    return (this.running ??= this.netMap.nodes.flatMap((g) =>
-      g.attempts.length === 0 ? [g.running] : g.attempts.map((att) => att.running)));
-  }
-}
-
-class CompiledWorkflowImpl implements CompiledWorkflow {
-  readonly net: PetriNet;
-  readonly netMap: NetMap;
-  readonly analysis: WorkflowAnalysis;
-  readonly structuralHash: string;
-  readonly startNode: string;
-  readonly startNodes: readonly string[];
-  readonly requestedBudget: number;
-  readonly effectiveBudget: number;
-  readonly budgetRestriction: BudgetRestriction | null;
-  readonly diagnostics: readonly string[];
-  private readonly derived: DerivedPlaces;
-  private compiledProgram: PrecompiledNet | null = null;
-
-  constructor(
-    net: PetriNet,
-    netMap: NetMap,
-    analysis: WorkflowAnalysis,
-    structuralHash: string,
-    requestedBudget: number,
-    effectiveBudget: number,
-    budgetRestriction: BudgetRestriction | null,
-    derived: DerivedPlaces,
-  ) {
-    this.net = net;
-    this.netMap = netMap;
-    this.analysis = analysis;
-    this.structuralHash = structuralHash;
-    this.startNode = analysis.startNode;
-    this.startNodes = analysis.startNodes;
-    this.requestedBudget = requestedBudget;
-    this.effectiveBudget = effectiveBudget;
-    this.budgetRestriction = budgetRestriction;
-    this.diagnostics = analysis.diagnostics;
-    this.derived = derived;
-  }
-
-  get joinInputPlaces(): readonly Place<unknown>[] { return this.derived.joinInputPlaces; }
-  get joinReadyPlaces(): readonly JoinReadyPlaces[] { return this.derived.joinReadyPlaces; }
-  get edgeDataPlaces(): readonly Place<unknown>[] { return this.derived.edgeDataPlaces; }
-  get runningPlaces(): readonly Place<unknown>[] { return this.derived.runningPlaces; }
-
-  get program(): PrecompiledNet {
-    if (this.compiledProgram === null) this.compiledProgram = PrecompiledNet.compile(this.net);
-    return this.compiledProgram;
-  }
-
-  sharedMarking(): Map<Place<unknown>, Token<unknown>[]> {
-    const marking = new Map<Place<unknown>, Token<unknown>[]>();
-    const put = (p: Place<unknown>, tokens: Token<unknown>[]): void => {
-      if (tokens.length > 0) marking.set(p, tokens);
-    };
-    put(this.netMap.shared.budget, units(this.effectiveBudget));
-    for (const g of this.netMap.nodes) {
-      put(g.idle, units(1));
-      if (g.retry !== null) put(g.retry.tries, units(g.retry.maxTries - 1));
-      // The agent's round budget: one token per tool-call round its own `options.maxIterations`
-      // permits. It bounds the `queue → dispatched → running → queue` cycle structurally, which
-      // is what lets the reachability graph close on an agent workflow at all. It never enforces
-      // — the node's own `checkMaxIterations` throws first — so seeding exactly `maxRounds`
-      // keeps `A/rounds` from binding before n8n does.
-      if (g.agent !== null) put(g.agent.rounds, units(g.agent.maxRounds));
-      // The tool-call budget: one unit per call the agent may dispatch in this execution,
-      // consumed by `A_dispatch` and refunded by nothing. The seed is what the graph explores
-      // up to, so it is the width of the claim a `proven` makes about this agent.
-      if (g.agent !== null) put(g.agent.calls, units(g.agent.maxToolCalls));
-      if (g.form === 'or') {
-        // An OR input has no slots: every unreachable tree producer is one empty delivery of
-        // the first round (the start node's producers are all unreachable, so its round is
-        // complete).
-        const [i] = g.inputs;
-        if (g.reachable && i.unreachableEdges > 0) put(i.ready, units(i.unreachableEdges));
-      }
-      // Join inputs: a pre-filled slot (unreachable producers) withholds its free token so
-      // free_i + ready_i <= 1 from the outset. A dead (unwired, required) input keeps its
-      // free token and is never written.
-      if (g.form === 'join' || g.form === 'choose-branch') {
-        for (const i of g.inputs) {
-          if (i.seedEmpty) put(readySlot(g, i, 'empty'), units(1));
-          else put(i.free, units(1));
-        }
-      }
-    }
-    // A referenced node unreachable from every start node is definitionally skipped, so the
-    // referencing node's start_unmet twin fires and its action fails as n8n would. The gadget
-    // creates `Y/skipped` for every referenced node, so a seeded one always has it.
-    for (const y of this.analysis.seededSkipped) {
-      const skipped = this.netMap.node(y).skipped;
-      if (skipped === null) throw new InternalCompilerError(`internal: referenced node '${y}' has no skipped place to seed`);
-      put(skipped, units(1));
-    }
-    return marking;
-  }
-
-  initialMarking(triggerItems: unknown): Map<Place<unknown>, Token<unknown>[]> {
-    const marking = this.sharedMarking();
-    const g = this.netMap.node(this.startNode);
-    // A tool node has no input side of its own — an agent's `A_dispatch` writes its `T/in_tool`
-    // — so there is nowhere to put the trigger data. Seeding nothing would leave a net that
-    // quiesces immediately and looks like a workflow that did nothing; say so instead. A resumed
-    // execution reaches a tool through `decodeExecutionData`, never through here.
-    if (g.form === 'tool') {
-      throw new CompileError('tool-start-node',
-        `compile: start node '${g.node}' is an ai_tool node; a tool is reached only by its ` +
-        "agent's dispatch, so it cannot be where an execution starts", g.node);
-    }
-    if (g.form === 'direct') {
-      marking.set(g.in, [tokenOf<unknown>(triggerItems)]);
-    } else if (g.form === 'or') {
-      // The trigger payload is one data arrival.
-      marking.set(g.inputs[0].hasdata, [tokenOf<unknown>(triggerItems)]);
-    } else {
-      g.inputs.forEach((i, k) => {
-        // The start node's own activation pre-fills every slot, withholding free_i and
-        // replacing the empty a seeded (unreachable-producer) input would otherwise carry.
-        marking.delete(i.free);
-        for (const p of readyPlacesOf(i)) marking.delete(p);
-        if (k === 0) {
-          // n8n hands `nodeExecutionStack[0].data.main[0]` to the first input.
-          marking.set(readySlot(g, i, 'data'), [tokenOf<unknown>(triggerItems)]);
-          if (g.form === 'join') marking.set(g.hasdata, units(1));
-        } else {
-          // The other inputs of the start node are present but carry no items (n8n passes
-          // only main[0]); they take the `data` slot so X_start fires, as n8n runs
-          // nodeExecutionStack[0] unconditionally. The generic join's ready_i is the same
-          // place for both variants; hasdata comes from the first input.
-          marking.set(readySlot(g, i, 'data'), units(1));
-        }
-      });
-    }
-    return marking;
-  }
-
-  withActions(binder: ActionBinder): CompiledWorkflow {
-    const rebound = this.net.bindActionsWithResolver((name) => {
-      const info = this.netMap.transition(name);
-      if (info === undefined) throw new InternalCompilerError(`internal: binding an unmapped transition '${name}'`);
-      return binder(info, this.netMap);
-    });
-    return new CompiledWorkflowImpl(
-      rebound, this.netMap.rebind(rebound), this.analysis, this.structuralHash,
-      this.requestedBudget, this.effectiveBudget, this.budgetRestriction, this.derived);
-  }
 }

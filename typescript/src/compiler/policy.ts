@@ -26,9 +26,20 @@
  * on an older one. A *malformed* value at a known `v` is an error, because it changes the net
  * that runs and a silently dropped policy is a workflow behaving differently from its
  * declaration.
+ *
+ * The field parsers live in `policy/` — the value checks (`values.ts`), the failure-action
+ * vocabulary (`failure-action.ts`), the `onFailure` chain (`on-failure.ts`) and the admission
+ * fields (`admission.ts`) — and accumulate onto the lists this module turns into one
+ * {@link PolicyError}.
  */
 
-import { assertNever } from '../internal/assert.js';
+import { parseConcurrency, parseRate } from './policy/admission.js';
+import { parseOnFailure } from './policy/on-failure.js';
+import { isRecord, positiveInt } from './policy/values.js';
+
+// Published from here, where every importer has always found them.
+export { isFailureAction, isTerminalAction } from './policy/failure-action.js';
+export { nonNegativeInt, positiveInt } from './policy/values.js';
 
 /** The schema version this build understands. Versions the policy, never the engine. */
 export const POLICY_SCHEMA_VERSION = 1;
@@ -65,11 +76,6 @@ export type FailureStep =
     readonly waitMs?: number;
   }
   | { readonly action: 'stop' | 'continue' };
-
-/** `retry` continues the chain; everything else ends the activation. */
-export function isTerminalAction(action: FailureAction): boolean {
-  return action !== 'retry';
-}
 
 /** A node's declared behaviour, merged from node, group and workflow scope. */
 export interface ExecutionPolicy {
@@ -115,13 +121,6 @@ export interface PolicyParse {
 
 // ==================== parsing (layer 1 -> layer 2) ====================
 
-const FAILURE_ACTIONS: readonly FailureAction[] = ['retry', 'route', 'stop', 'continue'];
-
-/** Whether `v` names a {@link FailureAction}; the one place a raw string becomes one. */
-export function isFailureAction(v: unknown): v is FailureAction {
-  return FAILURE_ACTIONS.some((action) => action === v);
-}
-
 /** Keys a known `v` defines. Anything else is a diagnostic, never an error. */
 const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'v', 'timeoutMs', 'onFailure', 'concurrency', 'rate', 'maxRuns', 'maxToolCalls', 'maxRounds',
@@ -133,97 +132,6 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   // which was the opposite of what happened.
   'groups',
 ]);
-const KNOWN_STEP_KEYS: ReadonlySet<string> = new Set(['waitMs', 'action', 'output']);
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-/**
- * A positive integer, or `undefined`. Anything else is a problem the caller records. The one
- * definition: `analysis/validate.ts` (`raising`) raises the same check at once, over this,
- * where it has no list to accumulate into, and refuses a missing or non-finite count first.
- */
-export function positiveInt(v: unknown, what: string, problems: string[]): number | undefined {
-  if (v === undefined) return undefined;
-  if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
-    problems.push(`${what} must be a positive integer, got ${JSON.stringify(v)}`);
-    return undefined;
-  }
-  return v;
-}
-
-/** A non-negative integer, or `undefined`. `waitMs: 0` is a legitimate "retry at once". */
-export function nonNegativeInt(v: unknown, what: string, problems: string[]): number | undefined {
-  if (v === undefined) return undefined;
-  if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
-    problems.push(`${what} must be a non-negative integer, got ${JSON.stringify(v)}`);
-    return undefined;
-  }
-  return v;
-}
-
-function parseStep(
-  raw: unknown, index: number, problems: string[], diagnostics: string[], where: string,
-): FailureStep | undefined {
-  const at = `${where}.onFailure[${index}]`;
-  if (!isRecord(raw)) {
-    problems.push(`${at} must be an object`);
-    return undefined;
-  }
-  for (const key of Object.keys(raw)) {
-    if (!KNOWN_STEP_KEYS.has(key)) diagnostics.push(`${at}: unknown key '${key}'; ignored`);
-  }
-
-  const action = raw['action'];
-  if (!isFailureAction(action)) {
-    problems.push(`${at}.action must be one of ${FAILURE_ACTIONS.join(', ')}, got ${JSON.stringify(action)}`);
-    return undefined;
-  }
-
-  const waitMs = nonNegativeInt(raw['waitMs'], `${at}.waitMs`, problems);
-  if (waitMs !== undefined && action !== 'retry') {
-    diagnostics.push(`${at}: waitMs is meaningful only on 'retry'; ignored for '${action}'`);
-  }
-
-  // `output` is required by `route` and rejected elsewhere: a `stop` carrying an output is a
-  // policy whose author expected routing, and honouring the stop silently would hide that.
-  const output = raw['output'];
-  if (action === 'route') {
-    if (typeof output !== 'string' && typeof output !== 'number') {
-      problems.push(`${at}.output is required by action 'route' (an output name or index)`);
-      return undefined;
-    }
-    if (typeof output === 'number' && (!Number.isInteger(output) || output < 0)) {
-      problems.push(`${at}.output must be a non-negative integer index, got ${JSON.stringify(output)}`);
-      return undefined;
-    }
-    return { action, output };
-  }
-  if (output !== undefined) {
-    problems.push(`${at}.output is only valid on action 'route', not '${action}'`);
-    return undefined;
-  }
-
-  switch (action) {
-    case 'retry': return waitMs === undefined ? { action } : { waitMs, action };
-    case 'stop':
-    case 'continue': return { action };
-    default: return assertNever(action, 'failure action');
-  }
-}
-
-function parseGroupRef(
-  raw: Record<string, unknown>, at: string, problems: string[],
-): string | undefined {
-  const group = raw['group'];
-  if (group === undefined) return undefined;
-  if (typeof group !== 'string' || group === '') {
-    problems.push(`${at}.group must be a non-empty string`);
-    return undefined;
-  }
-  return group;
-}
 
 /**
  * One layer-1 policy object into the layer-2 IR.
@@ -255,75 +163,9 @@ export function parseExecutionPolicy(raw: unknown, where: string): PolicyParse {
   const maxRuns = positiveInt(raw['maxRuns'], `${where}.maxRuns`, problems);
   const maxToolCalls = positiveInt(raw['maxToolCalls'], `${where}.maxToolCalls`, problems);
   const maxRounds = positiveInt(raw['maxRounds'], `${where}.maxRounds`, problems);
-
-  let onFailure: FailureStep[] | undefined;
-  const rawSteps = raw['onFailure'];
-  if (rawSteps !== undefined) {
-    if (!Array.isArray(rawSteps)) {
-      problems.push(`${where}.onFailure must be an array of steps`);
-    } else if (rawSteps.length === 0) {
-      problems.push(`${where}.onFailure must name at least one step`);
-    } else {
-      const steps: FailureStep[] = [];
-      rawSteps.forEach((step, i) => {
-        const parsed = parseStep(step, i, problems, diagnostics, where);
-        if (parsed !== undefined) steps.push(parsed);
-      });
-      // The chain runs to its first terminal step. A chain of nothing but `retry` never ends
-      // an activation and would strand the last attempt's failure, so it is an error. Steps
-      // *after* the first terminal are merely unreachable, which is a diagnostic: rejecting
-      // them would refuse a workflow whose author simply listed one escalation too many.
-      const terminal = steps.findIndex((step) => isTerminalAction(step.action));
-      const terminalStep = steps[terminal];
-      if (steps.length === rawSteps.length) {
-        if (terminalStep === undefined) {
-          problems.push(
-            `${where}.onFailure is all 'retry', so the last attempt's failure has nowhere to go; ` +
-            "end the chain with 'route', 'stop' or 'continue'");
-        } else {
-          if (terminal < steps.length - 1) {
-            const first = terminal + 1;
-            const last = steps.length - 1;
-            const which = first === last ? `step ${first}` : `steps ${first}..${last}`;
-            diagnostics.push(
-              `${where}.onFailure: step ${terminal} ('${terminalStep.action}') ends the ` +
-              `activation, so ${which} cannot be reached; ignored`);
-          }
-          onFailure = steps.slice(0, terminal + 1);
-        }
-      }
-    }
-  }
-
-  let concurrency: ExecutionPolicy['concurrency'];
-  const rawConcurrency = raw['concurrency'];
-  if (rawConcurrency !== undefined) {
-    if (!isRecord(rawConcurrency)) {
-      problems.push(`${where}.concurrency must be an object`);
-    } else {
-      const limit = positiveInt(rawConcurrency['limit'], `${where}.concurrency.limit`, problems);
-      const group = parseGroupRef(rawConcurrency, `${where}.concurrency`, problems);
-      if (limit === undefined) problems.push(`${where}.concurrency.limit is required`);
-      else concurrency = { ...(group === undefined ? {} : { group }), limit };
-    }
-  }
-
-  let rate: ExecutionPolicy['rate'];
-  const rawRate = raw['rate'];
-  if (rawRate !== undefined) {
-    if (!isRecord(rawRate)) {
-      problems.push(`${where}.rate must be an object`);
-    } else {
-      const perMs = positiveInt(rawRate['perMs'], `${where}.rate.perMs`, problems);
-      const burst = positiveInt(rawRate['burst'], `${where}.rate.burst`, problems);
-      const group = parseGroupRef(rawRate, `${where}.rate`, problems);
-      if (perMs === undefined || burst === undefined) {
-        problems.push(`${where}.rate requires both perMs and burst`);
-      } else {
-        rate = { ...(group === undefined ? {} : { group }), perMs, burst };
-      }
-    }
-  }
+  const onFailure = parseOnFailure(raw['onFailure'], where, problems, diagnostics);
+  const concurrency = parseConcurrency(raw['concurrency'], where, problems);
+  const rate = parseRate(raw['rate'], where, problems);
 
   if (problems.length > 0) throw new PolicyError(where, problems);
 

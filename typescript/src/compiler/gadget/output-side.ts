@@ -1,17 +1,21 @@
 /**
  * The output side of the gadget (README "Per-node gadget", ADR 0002 / 0004): the edge ports and
- * `nil` places of each connected output, the collapsed or split routing, the outcome branches,
- * `X_run` per attempt, `X_route_o`, `X_done` and the `nil` sinks.
+ * `nil` places of each connected output and the collapsed or split routing. The outcome
+ * branches (`outcome.ts`), `X_run` per attempt (`run.ts`), `X_route_o`, `X_done` and the `nil`
+ * sinks (`routing.ts`) are built beside it and re-exported here.
  */
-import { Transition, and, forwardInput, one, outPlace, place, timeout, xor } from 'libpetri';
-import type { Out, Place } from 'libpetri';
-import { InternalCompilerError } from '../errors.js';
-import { PLACE, TRANSITION, attemptRunOf, edgeOutPortOf, emptyTwinOf, nilOf, okOf, qualified, routedOf, routeOf, sinkOf } from '../names.js';
-import {
-  andOf, xorOf, type GadgetContext, type LocalAgent, type LocalAttempt, type LocalCollapsedOutput, type LocalEdge,
-  type LocalInputSide, type LocalOutput, type LocalRetry, type LocalRouting, type LocalSplitOutput,
-} from './context.js';
-import type { Markers, SharedPorts } from './ports.js';
+import { outPlace } from 'libpetri';
+import type { Out } from 'libpetri';
+import { PLACE, edgeOutPortOf, emptyTwinOf, nilOf, okOf, routedOf } from '../names.js';
+import type { EdgeRef } from '../types.js';
+import { boundPort } from './builder.js';
+import type { GadgetContext } from './context.js';
+import { hostSlotOf } from './facts.js';
+import type { LocalCollapsedOutput, LocalEdge, LocalOutput, LocalRouting, LocalSplitOutput } from './local-shapes.js';
+
+export { buildOutcomeBranches, type OutcomeBranches } from './outcome.js';
+export { buildRouteAndDone, buildSinks } from './routing.js';
+export { buildRun } from './run.js';
 
 /**
  * Nodes with **more** connected outputs than this keep the routing on a transition of its
@@ -73,44 +77,29 @@ export interface OutputSide {
   readonly skipEmpties: readonly Out[];
 }
 
-/** The outcome alternatives an `X_run`, `X_exhausted` or terminal step chooses among. */
-export interface OutcomeBranches {
-  readonly routingOf: (out: LocalOutput) => Out;
-  readonly success: Out;
-  readonly haltBranch: Out;
-  readonly waitingBranch: Out;
-  readonly stoppedBranch: Out;
+/** One outgoing edge as local output ports; the empty port only where this node writes it. */
+function declareOutputEdge(ctx: GadgetContext, e: EdgeRef, writesEmpty: boolean): LocalEdge {
+  const slot = hostSlotOf(ctx, e);
+  const dataPort = edgeOutPortOf(e.id);
+  const data = boundPort(ctx, dataPort, slot.data, 'output');
+  const empty = slot.empty !== null && writesEmpty ? boundPort(ctx, emptyTwinOf(dataPort), slot.empty, 'output') : null;
+  return { edge: e, data, empty, host: slot };
 }
 
 /** Declares every connected output's edge ports and `nil`, and the routing shape. */
 export function buildOutputSide(ctx: GadgetContext, hasSkip: boolean): OutputSide {
-  const { a, edgeSlots, name, cyclic, outgoing, port, internal } = ctx;
+  const { a, cyclic, outgoing, internal } = ctx;
 
   // ---- output side ----
   // The empty place of an outgoing tree edge is written by X_route (acyclic producer) or by
   // X_skip (any producer); a cyclic producer without a skip never writes it and declares no
   // port for it (the consumer still owns the place; its skip is simply unreachable).
+  const writesEmpty = !cyclic || hasSkip;
   const collapsedOutputs: LocalCollapsedOutput[] = [];
   const splitOutputs: LocalSplitOutput[] = [];
-  const connectedOutputs = new Set(outgoing.map((e) => e.outputIndex)).size;
-  const split = connectedOutputs > SPLIT_ROUTING_ABOVE;
+  const split = new Set(outgoing.map((e) => e.outputIndex)).size > SPLIT_ROUTING_ABOVE;
   for (let o = 0; o < a.outputCount; o++) {
-    const edges: LocalEdge[] = [];
-    for (const e of outgoing) {
-      if (e.outputIndex !== o) continue;
-      const slot = edgeSlots.get(e.id);
-      if (slot === undefined) throw new InternalCompilerError(`internal: node '${name}' has no host slot for edge ${e.id}`);
-      const dataPort = edgeOutPortOf(e.id);
-      const data = place<unknown>(dataPort);
-      port(dataPort, data, slot.data, 'output');
-      let empty: Place<unknown> | null = null;
-      if (slot.empty !== null && (!cyclic || hasSkip)) {
-        const emptyPort = emptyTwinOf(dataPort);
-        empty = place<unknown>(emptyPort);
-        port(emptyPort, empty, slot.empty, 'output');
-      }
-      edges.push({ edge: e, data, empty, host: slot });
-    }
+    const edges = outgoing.filter((e) => e.outputIndex === o).map((e) => declareOutputEdge(ctx, e, writesEmpty));
     if (edges.length === 0) continue; // unconnected outputs get no places
     const nil = cyclic ? internal(nilOf(o), 'nil', o) : null;
     if (split) {
@@ -124,170 +113,6 @@ export function buildOutputSide(ctx: GadgetContext, hasSkip: boolean): OutputSid
   const routing: LocalRouting = split
     ? { kind: 'split', outputs: splitOutputs }
     : { kind: 'collapsed', routed: internal(PLACE.routed, 'routed', null), outputs: collapsedOutputs };
-  const outputs: readonly LocalOutput[] = routing.outputs;
-  const skipEmpties: Out[] = [];
-  for (const out of outputs) for (const e of out.edges) if (e.empty !== null) skipEmpties.push(outPlace(e.empty));
-  return { routing, outputs, skipEmpties };
-}
-
-/** The success branch and the halt / waiting / stopped branches of the outcome. */
-export function buildOutcomeBranches(
-  ctx: GadgetContext,
-  shared: SharedPorts,
-  markers: Markers,
-  side: LocalInputSide,
-  routing: LocalRouting,
-  agentResponsePorts: readonly Place<unknown>[],
-): OutcomeBranches {
-  const { name } = ctx;
-  const { budget, halt, pause } = shared;
-  const { waiting, stopped } = markers;
-
-  // ---- Out spec builders ----
-  const routingOf = (out: LocalOutput): Out => xor(
-    andOf(out.edges.map((e) => outPlace(e.data))),
-    // An acyclic producer's edges are all tree edges, so each has its empty place: a cycle
-    // edge would put both ends in one SCC and give the producer `nil` instead.
-    out.nil !== null ? outPlace(out.nil) : andOf(out.edges.map((e) => outPlace(e.empty!))),
-  );
-  // The success branch. Collapsed: the per-output routing plus `X/routed`, which `X_done`
-  // consumes one cycle later — an inner `xor` left unwritten on a sibling branch of the
-  // enclosing `xor` is fine, IO-015 searches for an exact explanation
-  // (`tests/spikes/out-spec.test.ts`, `tests/spikes/collapsed-outcome.test.ts`). Split: one
-  // `X/ok_o` per output, each routed by its own `X_route_o`.
-  // A tool's output is not a main edge: it is its agent's `A/response`. Several agents can
-  // share one tool, so the branch is an `xor` over them and the action picks the agent the
-  // dispatch token names. `X/routed` still marks the outcome for `X_done` to refund the budget
-  // one cycle later, so the phase and the P-semiflow are the ordinary ones (ADR 0004).
-  const success: Out = (() => {
-    if (side.form === 'tool') {
-      if (routing.kind === 'split') throw new InternalCompilerError(`internal: tool '${name}' routes per output`);
-      return and(xorOf(agentResponsePorts.map((r) => outPlace(r))), outPlace(routing.routed));
-    }
-    return routing.kind === 'split'
-      ? andOf(routing.outputs.map((o) => outPlace(o.ok)))
-      : andOf([...routing.outputs.map(routingOf), outPlace(routing.routed)]);
-  })();
-  const haltBranch = and(outPlace(halt), outPlace(budget));
-  // The two pause outcomes: the budget is refunded here since nothing routes afterwards.
-  const waitingBranch = and(outPlace(waiting), outPlace(pause), outPlace(budget));
-  const stoppedBranch = and(outPlace(stopped), outPlace(pause), outPlace(budget));
-  return { routingOf, success, haltBranch, waitingBranch, stoppedBranch };
-}
-
-/** `X_run`, or one `X_run_i` per attempt of an `onFailure` chain. */
-export function buildRun(
-  ctx: GadgetContext,
-  markers: Markers,
-  branches: OutcomeBranches,
-  retry: LocalRetry | null,
-  chain: { readonly attempts: readonly LocalAttempt[]; readonly chainTimeoutMs: number | null },
-  agent: LocalAgent | null,
-): { readonly runName: string; readonly attemptRunNames: readonly string[] } {
-  const { id, depth, body, tinfo, stopWorkflow } = ctx;
-  const { idle, running } = markers;
-  const { success, haltBranch, waitingBranch, stoppedBranch } = branches;
-  const { attempts, chainTimeoutMs } = chain;
-
-  // ---- X_run: the outcome ----
-  // An agent has one more: the node returned an `EngineRequest` instead of data. It is phased
-  // like the success outcome — `A/routed_req` here, the budget refunded by `A_done_req` one
-  // cycle later — so `_budget + Σ(running + retry + routed) = k` still holds with `routed_req`
-  // counted among the in-flight markers.
-  const requestBranch = agent === null ? [] : [outPlace(agent.routedRequest)];
-  /**
-   * The outcome of one attempt. Without a policy this is the historical shape and `failure` is
-   * `null`; with one, the retry alternative is that attempt's own `X/failed_i` — a chain
-   * position rather than a counter decrement.
-   */
-  const outcomeOf = (failure: Place<unknown> | null): Out => xorOf([
-    success,
-    ...(failure !== null ? [outPlace(failure)] : retry !== null ? [outPlace(retry.retry)] : []),
-    ...(stopWorkflow ? [haltBranch] : []),
-    waitingBranch,
-    stoppedBranch,
-    ...requestBranch,
-  ]);
-
-  const attemptRunNames: string[] = [];
-  const runName = qualified(id, TRANSITION.run);
-  if (attempts.length === 0) {
-    body.push(Transition.builder(TRANSITION.run)
-      .inputs(one(running))
-      .outputs(and(outcomeOf(null), outPlace(idle)))
-      .priority(depth + 1).build());
-    tinfo(TRANSITION.run, { role: 'run', attempt: 1 });
-  } else {
-    for (const att of attempts) {
-      // Attempt 1 keeps the name `run`, so every consumer that addresses a node's run
-      // transition by name — the scheduler's binder, `NetMap`, the differ — is unchanged.
-      const local = attemptRunOf(att.index);
-      const normal = and(outcomeOf(att.failed), outPlace(idle));
-      // IO-013's timeout child is an `Xor` sibling of the normal spec, and IO-015 needs
-      // exactly one assignment to explain a write. It therefore has to claim a place the
-      // normal branches do not, or every failing firing would be ambiguous — hence the
-      // separate `timedout_i`, funnelled into `failed_i` below.
-      body.push(Transition.builder(local)
-        .inputs(one(att.running))
-        .outputs(att.timedOut === null || chainTimeoutMs === null
-          ? normal
-          // `forwardInput`, not `outPlace`: IO-013 AC3 gives the timeout child *sentinel*
-          // tokens, so a plain output would land a `null` on `timedout_i` and the step would
-          // have no `executionData` to act on. IO-014 forwards the very token the firing
-          // consumed from `X/running_i` — the run payload — which is what "this enables retry
-          // patterns without losing tokens" means.
-          : xor(normal, timeout(chainTimeoutMs,
-              and(forwardInput(att.running, att.timedOut), outPlace(idle)))))
-        .priority(depth + 1).build());
-      attemptRunNames.push(tinfo(local, { role: 'run', attempt: att.index }));
-    }
-  }
-  return { runName, attemptRunNames };
-}
-
-/** `X_route_o` per connected output under the split shape, and `X_done`. */
-export function buildRouteAndDone(
-  ctx: GadgetContext,
-  shared: SharedPorts,
-  markers: Markers,
-  routing: LocalRouting,
-  routingOf: (out: LocalOutput) => Out,
-): { readonly routeNames: readonly string[]; readonly doneName: string } {
-  const { depth, body, tinfo } = ctx;
-  const { budget } = shared;
-  const { done } = markers;
-
-  // ---- X_route_o (split shape only) and X_done: the budget refund, one cycle later ----
-  const routeNames: string[] = [];
-  if (routing.kind === 'split') {
-    for (const out of routing.outputs) {
-      const local = routeOf(out.index);
-      body.push(Transition.builder(local)
-        .inputs(one(out.ok))
-        .outputs(and(routingOf(out), outPlace(out.routed)))
-        .priority(depth + 1).build());
-      routeNames.push(tinfo(local, { role: 'route', port: out.index }));
-    }
-  }
-  body.push(Transition.builder(TRANSITION.done)
-    .inputs(...(routing.kind === 'split' ? routing.outputs.map((o) => one(o.routed)) : [one(routing.routed)]))
-    .outputs(and(outPlace(budget), outPlace(done)))
-    .priority(depth + 1).build());
-  const doneName = tinfo(TRANSITION.done, { role: 'done' });
-  return { routeNames, doneName };
-}
-
-/** One sink per `nil` place. */
-export function buildSinks(ctx: GadgetContext, outputs: readonly LocalOutput[]): readonly string[] {
-  const { depth, body, tinfo } = ctx;
-
-  // ---- nil sinks (CORE-043 AC4: genuine sinks carry no Out spec) ----
-  const sinkNames: string[] = [];
-  for (const out of outputs) {
-    if (out.nil === null) continue;
-    const local = sinkOf(out.index);
-    body.push(Transition.builder(local).inputs(one(out.nil)).priority(depth).build());
-    sinkNames.push(tinfo(local, { role: 'sink' }));
-  }
-  return sinkNames;
+  const skipEmpties = routing.outputs.flatMap((out) => out.edges.flatMap((e) => (e.empty !== null ? [outPlace(e.empty)] : [])));
+  return { routing, outputs: routing.outputs, skipEmpties };
 }
