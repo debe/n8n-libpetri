@@ -134,7 +134,9 @@ describe('the same net at k = 1 and at k > 1 (the M3 exit criterion)', () => {
         .toBe(`${l.fixture}@k=${l.budget}: equal=false`);
       expect(comparison.unattributed).toBe(0);
       for (const d of comparison.differences) {
-        expect(d.attribution).toEqual({ kind: 'divergence', row: HALTS[l.fixture], why: expect.any(String) });
+        expect(d.attribution).toEqual({
+          kind: 'divergence', row: HALTS[l.fixture], mechanism: expect.any(String), novel: false, why: expect.any(String),
+        });
         // Every path is either a node that ran only above k = 1, or the pending stack the
         // codec wrote back — never a field inside a run both budgets produced.
         expect(d.path).toMatch(/^(runData\.[^.[]+|executionData\.nodeExecutionStack(\.length|\[\d+\]))$/);

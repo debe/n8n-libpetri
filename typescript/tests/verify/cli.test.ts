@@ -5,8 +5,8 @@
  * z3-gated. The exit code is the contract a CI job would use: 0 when nothing came back
  * `violated`, 1 when something did, 2 on a usage or input error.
  */
-import { parseArgs, runCli, USAGE } from '../../src/verify/index.js';
-import type { CliIo } from '../../src/verify/index.js';
+import { parseArgs, runCli, USAGE } from '../../src/verify/cli.js';
+import type { CliIo } from '../../src/verify/cli.js';
 import { CASE_TIMEOUT_MS, describeZ3 } from './support.js';
 
 /** A trigger, an If, two branches and a Merge — the export shape n8n writes. */

@@ -10,7 +10,7 @@
  */
 import { StateClassGraph } from 'libpetri/verification';
 import { compile } from '../../src/compiler/index.js';
-import { markingStateOf } from '../../src/verify/verify.js';
+import { markingStateOf } from '../../src/verify/index.js';
 import { linear, diamond, agentTwoTools } from '../fixtures/workflows.js';
 
 for (const [label, wf] of [['linear', linear], ['diamond', diamond], ['agentTwoTools (maxToolCalls 6)', { ...agentTwoTools, nodes: agentTwoTools.nodes.map((n) => (n.name === 'Agent' ? { ...n, maxToolCalls: 6 } : n)) }]] as const) {

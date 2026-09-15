@@ -142,7 +142,7 @@ describe('verify report rendering', () => {
     }), 1);
     expect(lines[0]).toContain('1. [proper-completion]');
     expect(lines[1]).toBe('     node path: Trigger -> A -> Merge');
-    expect(lines[2]).toContain('Merge port 0 ready (id:Merge/ready_0)');
+    expect(lines[2]).toContain('Merge input 0 ready (id:Merge/ready_0)');
   });
 
   it('an unordered witness says so', () => {

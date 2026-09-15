@@ -638,10 +638,11 @@ describe('runDifferCli', () => {
     expect(await runDifferCli([], i)).toBe(2);
   });
 
-  it('rejects a fixtures module that exports no fixture array', async () => {
+  it('exits 2 on a fixtures module that exports no fixture array, naming the module', async () => {
     const i = io();
-    await expect(runDifferCli(['m'], { ...i, load: async () => await Promise.resolve({}) }))
-      .rejects.toThrow('array of DifferFixture');
+    expect(await runDifferCli(['m'], { ...i, load: async () => await Promise.resolve({}) })).toBe(2);
+    expect(i.err.join('')).toContain('m: ');
+    expect(i.err.join('')).toContain('array of DifferFixture');
   });
 
   it('accepts either the default export or DIFFER_FIXTURES', () => {

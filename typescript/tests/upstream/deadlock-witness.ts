@@ -13,9 +13,8 @@
  */
 import { SmtVerifier, deadlockFree } from 'libpetri/verification';
 import { compile } from '../../src/compiler/index.js';
-import { markingStateOf } from '../../src/verify/verify.js';
-import { REST_ROLES, PAUSE_REST_ROLES, HALT_REST_ROLES } from '../../src/verify/state-class.js';
-import type { PlaceRole } from '../../src/compiler/types.js';
+import { markingStateOf, REST_ROLES, PAUSE_REST_ROLES, HALT_REST_ROLES } from '../../src/verify/index.js';
+import type { PlaceRole } from '../../src/compiler/index.js';
 import { fanOut, agentTwoTools } from '../fixtures/workflows.js';
 
 const timeoutMs = Number(process.argv[2] ?? 120_000);

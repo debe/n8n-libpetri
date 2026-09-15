@@ -29,10 +29,9 @@ import {
 } from 'libpetri/verification';
 import type { Place, Token } from 'libpetri';
 import { compile } from '../../src/compiler/index.js';
-import type { CompiledWorkflow, WorkflowDescription } from '../../src/compiler/index.js';
+import type { CompiledWorkflow, PlaceRole, WorkflowDescription } from '../../src/compiler/index.js';
 import { diamond, multiProducer } from '../fixtures/workflows.js';
 import { HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES } from '../../src/verify/index.js';
-import type { PlaceRole } from '../../src/compiler/types.js';
 import { generateWorkflow, liveSampleNode, orphanBranch } from './support.js';
 
 interface Sample {

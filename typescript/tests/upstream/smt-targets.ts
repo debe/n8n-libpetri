@@ -8,7 +8,7 @@
  */
 import { SmtVerifier, unreachable } from 'libpetri/verification';
 import { compile } from '../../src/compiler/index.js';
-import { markingStateOf } from '../../src/verify/verify.js';
+import { markingStateOf } from '../../src/verify/index.js';
 import { node, conn, workflow } from '../fixtures/workflows.js';
 const depthNet = (dA: number, dB: number) => {
   const nodes = [node('T', 'trigger', [0, 0]), node('IF', 'if', [200, 0])];

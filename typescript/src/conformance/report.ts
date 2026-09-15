@@ -5,10 +5,9 @@
  * are listed so the reviewer sees exactly which cases the headline counts.
  */
 import { LOOP_DRIVING_PATTERNS } from './classify.js';
+import { table } from './markdown.js';
 import { EMPTY_TALLY, type ConformanceMatrix, type MatrixRow, type Tally } from './matrix.js';
 
-/** Text as a Markdown table cell: a `|` would end the cell and a newline would end the row. */
-export const cell = (s: string): string => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 const ratio = (t: Tally): string => `${t.passed}/${t.total}`;
 
 function outcomeNote(t: Tally): string {
@@ -19,17 +18,13 @@ function outcomeNote(t: Tally): string {
   return parts.length ? ` (${parts.join(', ')})` : '';
 }
 
-function table(rows: readonly MatrixRow[], m: ConformanceMatrix, withPattern: boolean): string[] {
+/** The cases with their outcome under each engine; `withPattern` adds the loop-driving pattern. */
+function caseTable(rows: readonly MatrixRow[], m: ConformanceMatrix, withPattern: boolean): string[] {
   const head = withPattern ? ['pattern', 'file', 'case'] : ['file', 'case'];
-  const lines = [
-    `| ${[...head, m.baselineLabel, m.candidateLabel].join(' | ')} |`,
-    `|${head.map(() => '---').join('|')}|---|---|`,
-  ];
-  for (const r of rows) {
-    const cols = withPattern ? [r.classification.pattern ?? '', r.file, r.name] : [r.file, r.name];
-    lines.push(`| ${[...cols.map(cell), r.baseline, r.candidate].join(' | ')} |`);
-  }
-  return lines;
+  return table(
+    [...head, m.baselineLabel, m.candidateLabel],
+    rows.map((r) => [...(withPattern ? [r.classification.pattern ?? ''] : []), r.file, r.name, r.baseline, r.candidate]),
+  );
 }
 
 /** Render the matrix as Markdown. */
@@ -56,15 +51,15 @@ export function renderMatrix(m: ConformanceMatrix): string {
     '',
   ];
   if (m.regressions.length) {
-    out.push('## Regressions', '', ...table(m.regressions, m, false), '');
+    out.push('## Regressions', '', ...caseTable(m.regressions, m, false), '');
   }
   if (m.fixed.length) {
-    out.push('## Fixed', '', ...table(m.fixed, m, false), '');
+    out.push('## Fixed', '', ...caseTable(m.fixed, m, false), '');
   }
   if (m.added.length) {
-    out.push('## New in candidate', '', ...table(m.added, m, false), '');
+    out.push('## New in candidate', '', ...caseTable(m.added, m, false), '');
   }
   const loopRows = m.rows.filter((r) => r.classification.loopDriving);
-  out.push('## Loop-driving cases', '', ...table(loopRows, m, true), '');
+  out.push('## Loop-driving cases', '', ...caseTable(loopRows, m, true), '');
   return out.join('\n');
 }

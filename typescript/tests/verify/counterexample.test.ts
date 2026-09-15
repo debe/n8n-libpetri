@@ -96,7 +96,7 @@ describe('counterexample decoding', () => {
     const ready = decoded.find((p) => p.role === 'ready')!;
     expect(ready.node).toBe('Merge');
     expect(ready.port).toBe(0);
-    expect(renderMarkedPlace(ready)).toContain('Merge port 0 ready');
+    expect(renderMarkedPlace(ready)).toContain('Merge input 0 ready');
     const budget = decoded.find((p) => p.place === '_budget')!;
     expect(budget.node).toBeNull();
     expect(renderMarkedPlace(budget)).toBe('_budget x2');

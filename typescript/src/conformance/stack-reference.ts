@@ -23,7 +23,8 @@ import type {
   IRunExecutionData, IRunNodeResponse, ITaskDataConnections, ITaskMetadata, Workflow,
 } from 'n8n-workflow';
 import type { SchedulerHooks, SchedulerHost, WorkflowScheduler } from '../n8n/host.js';
-import { FakeHost, sleep } from './harness.js';
+import { FakeHost } from './harness/fake-host.js';
+import { sleep } from './harness/scripts.js';
 
 /** `makeEngineResponse()` (`requests-response.ts:296`). */
 function makeEngineResponse(): EngineResponse {

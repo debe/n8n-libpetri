@@ -10,7 +10,6 @@
  * and what libpetri answered, so the inversion is never hidden.
  */
 import type { BudgetRestriction, PlaceRole, TransitionRole, Variant } from '../compiler/index.js';
-import type { AgentBudget, TruncationCause } from './state-class.js';
 
 /** The property families {@link verify} can ask about. CLI `--property` takes these names. */
 export type PropertyName =
@@ -102,6 +101,60 @@ export interface Counterexample {
   readonly stuckMarking: readonly MarkedPlace[];
   readonly confirmed: boolean | null;
   readonly ordered: boolean;
+}
+
+/**
+ * The solver-free route's vocabulary (`state-class.ts`). It lives here rather than beside
+ * {@link StateSpaceSummary}'s producer so that this module imports nothing from the verifier:
+ * `state-class.ts` reads these shapes and this module reports them, and a type import in each
+ * direction was a cycle.
+ */
+
+/** Which designed terminal a quiescent class holds — and so which codec mode encodes it. */
+export type TerminalKind = 'none' | 'pause' | 'halt';
+
+/**
+ * Why the enumeration stopped short, reported as **measured** rather than inferred:
+ *
+ * - `'cycle'` — the workflow has one, so its reachable state space is unbounded and no class
+ *   cap can close it (NU-053). This is the shape the `bounded` verdict exists for;
+ * - `'tool-calls'` — the workflow has an agent, and the graph explores every round size up to
+ *   its tool-call budget. The one cause with a knob: a smaller declared `options.maxToolCalls`;
+ * - `'parallelism'` — no cycle, and the workflow has a node with two or more distinct
+ *   successors, so independent branches interleave combinatorially (NU-053: the graph has no
+ *   partial-order reduction). Raising the cap may still close a borderline case;
+ * - `'cap'` — no cycle and no branching either, so nothing about the *shape* explains it:
+ *   the cap was simply set below what this workflow needs. Raise it;
+ * - `'off'` — the caller passed `maxClasses <= 0`, which turns the solver-free route off
+ *   (the M4 surface). Not a limit of anything.
+ */
+export type TruncationCause = 'cycle' | 'tool-calls' | 'parallelism' | 'cap' | 'off';
+
+/** An agent and its tool-call budget, declared on the workflow or assumed from the scheduler default. */
+export interface AgentBudget {
+  readonly node: string;
+  readonly tools: number;
+  readonly maxToolCalls: number;
+  readonly assumed: boolean;
+}
+
+/** One state class, decoded into workflow terms: how it is reached and what it holds. */
+export interface Witness {
+  /** The marking of the class. */
+  readonly marking: readonly MarkedPlace[];
+  /** A firing sequence from the initial class to this one. Empty only if the BFS lost it. */
+  readonly path: readonly CounterexampleStep[];
+}
+
+/** A quiescent class that leaves pending work behind. */
+export interface Stranding extends Witness {
+  /** The pending-work places only: what was left behind. */
+  readonly stranded: readonly MarkedPlace[];
+  /**
+   * Which designed terminal the class is, and so which rest set classified it. Anything but
+   * `'none'` is a paused or halted run that *also* holds work.
+   */
+  readonly terminal: TerminalKind;
 }
 
 /**

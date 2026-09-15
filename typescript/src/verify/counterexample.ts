@@ -12,7 +12,7 @@
  * (`counterexampleConfirmed === true`). Otherwise the decoded states are an order-free set
  * walked in derivation-tree traversal order, and {@link Counterexample.ordered} says so.
  */
-import type { NetMapView } from '../compiler/index.js';
+import type { NetMapView, PlaceRole } from '../compiler/index.js';
 import type { MarkingState, SmtVerificationResult } from 'libpetri/verification';
 import type { Counterexample, CounterexampleStep, MarkedPlace } from './types.js';
 
@@ -92,10 +92,28 @@ export function renderNodePath(cex: Counterexample): string {
   return cex.nodePath.join(cex.ordered ? ' -> ' : ', ');
 }
 
-/** `Merge input 0 (id:Merge/ready_0) x1` per marked place, for the report's stuck-marking list. */
+/**
+ * Roles whose `PlaceInfo.port` is an **input** index; every other ported role (`ok`,
+ * `routed`, `nil`) carries an output index (`compiler/types.ts`). Getting this wrong would
+ * print "Switch input 3" for a token on the fourth *output*, which is the kind of wrong that
+ * sends a reader to the wrong end of the node.
+ */
+const INPUT_SIDE_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
+  'in-data', 'in-empty', 'edge-data', 'edge-empty', 'ready', 'hasdata', 'ran', 'free',
+]);
+
+/**
+ * One marked place in workflow terms — `Merge input 0 ready (id:Merge/ready_0)`,
+ * `Switch output 3 ok (id:Switch/ok_3)`, `_budget x2` — and the only renderer a report uses
+ * for one: the stuck marking of a finding and the stranded places of the whole-net row's
+ * explanation both go through here. The port is named by the side of the node it is on, so a
+ * join input reads the same wherever the page mentions it.
+ */
 export function renderMarkedPlace(p: MarkedPlace): string {
-  const where = p.node === null
-    ? p.place
-    : `${p.node}${p.port === null ? '' : ` port ${p.port}`} ${p.role ?? 'place'} (${p.place})`;
-  return p.tokens === 1 ? where : `${where} x${p.tokens}`;
+  const count = p.tokens === 1 ? '' : ` x${p.tokens}`;
+  if (p.node === null) return `${p.place}${count}`;
+  const port = p.port === null
+    ? ''
+    : p.role !== null && INPUT_SIDE_ROLES.has(p.role) ? ` input ${p.port}` : ` output ${p.port}`;
+  return `${p.node}${port} ${p.role ?? 'place'} (${p.place})${count}`;
 }

@@ -103,9 +103,11 @@ import { getHeapStatistics } from 'node:v8';
 import type { Place, PetriNet, Transition } from 'libpetri';
 import { StateClassGraph } from 'libpetri/verification';
 import type { MarkingState, StateClass } from 'libpetri/verification';
-import type { CompiledWorkflow, NetMapView, PlaceRole } from '../compiler/index.js';
+import { InternalCompilerError, type CompiledWorkflow, type NetMapView, type PlaceRole } from '../compiler/index.js';
 import { decodeMarking, decodeStep } from './counterexample.js';
-import type { Counterexample, CounterexampleStep, MarkedPlace } from './types.js';
+import type {
+  AgentBudget, Counterexample, CounterexampleStep, Stranding, TerminalKind, TruncationCause, Witness,
+} from './types.js';
 
 /**
  * Class cap for {@link StateSpace.explore}. The graph must never run unbounded: a workflow
@@ -185,20 +187,19 @@ export const REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
  * version does not have presents itself, so that instance would turn a version skew into a
  * silently weaker suite (`tasks/todo.md`).
  *
- * `TypeError` and `ReferenceError` are never verdicts. `RangeError` is deliberately excluded:
- * a stack overflow on a deep net is a capacity limit, which is what "undecided" is for.
+ * `TypeError` and `ReferenceError` are never verdicts, and neither is an
+ * `InternalCompilerError`: it is the compiler saying one of its own invariants broke, which is
+ * a bug in this codebase by definition. `RangeError` is deliberately excluded: a stack overflow
+ * on a deep net is a capacity limit, which is what "undecided" is for.
  */
 export function rethrowIfBug(e: unknown): void {
-  if (e instanceof TypeError || e instanceof ReferenceError) throw e;
+  if (e instanceof TypeError || e instanceof ReferenceError || e instanceof InternalCompilerError) throw e;
 }
 
 /** A marking holding one of these is a *designed* terminal: a paused or halted run. */
 export const TERMINAL_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
   'pause', 'halt', 'waiting', 'stopped',
 ]);
-
-/** Which designed terminal a quiescent class holds — and so which codec mode encodes it. */
-export type TerminalKind = 'none' | 'pause' | 'halt';
 
 /**
  * The rest set inside a **paused** class (`_pause`, `X/waiting`, `X/stopped`): the pending
@@ -266,21 +267,6 @@ export function terminalKindOf(roles: Iterable<PlaceRole | null>): TerminalKind 
   return kind;
 }
 
-/**
- * Why the enumeration stopped short, reported as **measured** rather than inferred:
- *
- * - `'cycle'` — the workflow has one, so its reachable state space is unbounded and no class
- *   cap can close it (NU-053). This is the shape the `bounded` verdict exists for;
- * - `'parallelism'` — no cycle, and the workflow has a node with two or more distinct
- *   successors, so independent branches interleave combinatorially (NU-053: the graph has no
- *   partial-order reduction). Raising the cap may still close a borderline case;
- * - `'cap'` — no cycle and no branching either, so nothing about the *shape* explains it:
- *   the cap was simply set below what this workflow needs. Raise it;
- * - `'off'` — the caller passed `maxClasses <= 0`, which turns the solver-free route off
- *   (the M4 surface). Not a limit of anything.
- */
-export type TruncationCause = 'cycle' | 'tool-calls' | 'parallelism' | 'cap' | 'off';
-
 /** What the *workflow* looks like, for {@link StateSpace.truncationCause}. */
 export interface TruncationShape {
   /** `analysis.hasCycle`. */
@@ -298,13 +284,6 @@ export interface TruncationShape {
   readonly agents: readonly AgentBudget[];
 }
 
-export interface AgentBudget {
-  readonly node: string;
-  readonly tools: number;
-  readonly maxToolCalls: number;
-  readonly assumed: boolean;
-}
-
 /**
  * The transitions a **cyclic-node run** is counted in: the `run` transition of every node
  * that lies on a cycle of the workflow's main-connection graph (`analysis.cyclic`, a
@@ -318,31 +297,17 @@ export interface AgentBudget {
  * exactly the node runs a user would count on the canvas.
  */
 export function loopTransitions(compiled: CompiledWorkflow): Set<string> {
-  const cyclic = compiled.analysis.cyclic;
   const names = new Set<string>();
-  for (const t of compiled.netMap.transitions) {
-    if (t.node !== null && t.role === 'run' && cyclic.has(t.node)) names.add(t.name);
+  // Through `NetMap`'s per-node index rather than a scan of every transition. Not
+  // `transitionFor(node, 'run')`, which returns the first match only: a node with an
+  // `onFailure` chain has one `run` per attempt (`run`, `run_2`, …, `compiler/gadget.ts`), and
+  // every one of them is a run of that node.
+  for (const node of compiled.analysis.cyclic) {
+    for (const t of compiled.netMap.transitionsOf(node)) {
+      if (t.role === 'run') names.add(t.name);
+    }
   }
   return names;
-}
-
-/** One state class, decoded into workflow terms: how it is reached and what it holds. */
-export interface Witness {
-  /** The marking of the class. */
-  readonly marking: readonly MarkedPlace[];
-  /** A firing sequence from the initial class to this one. Empty only if the BFS lost it. */
-  readonly path: readonly CounterexampleStep[];
-}
-
-/** A quiescent class that leaves pending work behind. */
-export interface Stranding extends Witness {
-  /** The pending-work places only: what was left behind. */
-  readonly stranded: readonly MarkedPlace[];
-  /**
-   * Which designed terminal the class is, and so which rest set classified it. Anything but
-   * `'none'` is a paused or halted run that *also* holds work.
-   */
-  readonly terminal: TerminalKind;
 }
 
 /** A {@link Witness} in the shape the report already renders. */

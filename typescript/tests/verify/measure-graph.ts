@@ -34,8 +34,7 @@ import {
   multiProducer, switch20, userCycle,
 } from '../fixtures/workflows.js';
 import { HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES, markingStateOf, verify } from '../../src/verify/index.js';
-import type { PlaceRole } from '../../src/compiler/types.js';
-import type { CompiledWorkflow } from '../../src/compiler/index.js';
+import type { CompiledWorkflow, PlaceRole } from '../../src/compiler/index.js';
 import type { VerificationReport } from '../../src/verify/index.js';
 import { generateChain, generateFanOut } from './support.js';
 

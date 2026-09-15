@@ -114,7 +114,7 @@ describe('renderDiffReport (defect 3)', () => {
   function result(differences: number): DiffResult {
     const d = (i: number) => ({
       path: `runData.A|B[${i}].data`, n8n: `{"a|b":${i}}`, libpetri: '<missing>',
-      attribution: { kind: 'unattributed' as const },
+      attribution: { kind: 'unattributed' as const, why: 'w' },
     });
     return {
       fixture: 'x|y', requestedBudget: 1, effectiveBudget: 1, budgetRestriction: null,

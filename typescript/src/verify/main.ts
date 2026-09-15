@@ -7,13 +7,12 @@
  * module body moves into a shared chunk, `import.meta.url` becomes the chunk's URL, and the
  * guard is never true — a CLI that silently prints nothing. A dedicated entry whose whole
  * body is the invocation has nothing to guard.
+ *
+ * The guard cannot be moved into a shared helper either: it compares the *calling* module's
+ * `import.meta.url`, which is the chunk's under splitting wherever the comparison is written.
  */
-import { nodeIo, runCli } from './cli.js';
+import { exitWith } from '../cli/exit.js';
+import { nodeIo } from '../cli/io.js';
+import { runCli } from './cli.js';
 
-runCli(process.argv.slice(2), nodeIo).then(
-  (code) => { process.exitCode = code; },
-  (e: unknown) => {
-    process.stderr.write(`${e instanceof Error ? e.stack ?? e.message : String(e)}\n`);
-    process.exitCode = 2;
-  },
-);
+exitWith(() => runCli(process.argv.slice(2), nodeIo));

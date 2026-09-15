@@ -5,21 +5,22 @@
  * Prints the Markdown matrix (or writes it to `--out`) and exits 0 when the candidate has
  * no regression against the baseline — with `--require-identical`, only when the case set
  * and every outcome are the same, which is what a pure refactor of the loop must produce.
- * Exit 1 otherwise, 2 on a usage error. `scripts/run-conformance.sh` drives it.
+ * Exit 1 otherwise, 2 on a usage or input error (bad flag, unreadable report, a report that
+ * is not JUnit XML). `scripts/run-conformance.sh` drives it.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
+import { exitWith } from '../cli/exit.js';
+import { parseFlags, UsageError } from '../cli/flags.js';
+import { nodeIo } from '../cli/io.js';
+import type { CliIo } from '../cli/io.js';
+import { messageOf } from '../internal/errors.js';
 import { parseJunit } from './junit.js';
+import type { JunitReport } from './junit.js';
 import { buildMatrix } from './matrix.js';
 import { renderMatrix } from './report.js';
 
-export interface CliIo {
-  readonly readFile: (path: string) => string;
-  readonly writeFile: (path: string, content: string) => void;
-  readonly stdout: (text: string) => void;
-  readonly stderr: (text: string) => void;
-}
+export type { CliIo } from '../cli/io.js';
 
 export const USAGE =
   'usage: conformance <baseline.junit.xml> <candidate.junit.xml> ' +
@@ -32,35 +33,42 @@ export function runCli(argv: readonly string[], io: CliIo): number {
   let candidateLabel: string | undefined;
   let out: string | undefined;
   let requireIdentical = false;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    const value = (): string => {
-      const v = argv[++i];
-      if (v === undefined) throw new Error(`${arg} needs a value`);
-      return v;
-    };
-    try {
-      if (arg === '--baseline-label') baselineLabel = value();
-      else if (arg === '--candidate-label') candidateLabel = value();
-      else if (arg === '--out') out = value();
-      else if (arg === '--require-identical') requireIdentical = true;
-      else if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`);
-      else files.push(arg);
-    } catch (e) {
-      io.stderr(`${(e as Error).message}\n${USAGE}\n`);
-      return 2;
-    }
+  try {
+    parseFlags(argv, {
+      values: {
+        '--baseline-label': (v) => { baselineLabel = v; },
+        '--candidate-label': (v) => { candidateLabel = v; },
+        '--out': (v) => { out = v; },
+      },
+      switches: { '--require-identical': () => { requireIdentical = true; } },
+      positional: (word) => { files.push(word); },
+    });
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    io.stderr(`${e.message}\n${USAGE}\n`);
+    return 2;
   }
   if (files.length !== 2) {
     io.stderr(`${USAGE}\n`);
     return 2;
   }
   const [baselinePath, candidatePath] = files as [string, string];
-  const matrix = buildMatrix(
-    parseJunit(io.readFile(baselinePath)),
-    parseJunit(io.readFile(candidatePath)),
-    { baselineLabel, candidateLabel },
-  );
+
+  // Reading or parsing a report is an input error: exit 2 naming the file, like
+  // `n8n-libpetri verify`, not an exception the script turns into exit 1 — which the
+  // conformance run could not tell apart from a regression.
+  const reports: JunitReport[] = [];
+  for (const path of [baselinePath, candidatePath]) {
+    try {
+      reports.push(parseJunit(io.readFile(path)));
+    } catch (e) {
+      io.stderr(`${path}: ${messageOf(e)}\n`);
+      return 2;
+    }
+  }
+  const [baseline, candidate] = reports as [JunitReport, JunitReport];
+
+  const matrix = buildMatrix(baseline, candidate, { baselineLabel, candidateLabel });
   const report = renderMatrix(matrix);
   if (out) io.writeFile(out, report);
   else io.stdout(report);
@@ -74,13 +82,8 @@ export function runCli(argv: readonly string[], io: CliIo): number {
   return ok ? 0 : 1;
 }
 
-const nodeIo: CliIo = {
-  readFile: (p) => readFileSync(p, 'utf8'),
-  writeFile: (p, c) => writeFileSync(p, c),
-  stdout: (t) => process.stdout.write(t),
-  stderr: (t) => process.stderr.write(t),
-};
-
+// Not a tsup entry, and must not become one as is: under code splitting this guard compares
+// a chunk's URL and is never true (see `src/verify/main.ts`) — give it a thin main first.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.exitCode = runCli(process.argv.slice(2), nodeIo);
+  exitWith(() => runCli(process.argv.slice(2), nodeIo));
 }

@@ -14,7 +14,7 @@
  */
 import { flatten, IncidenceMatrix, computePInvariants, computePSemiflows, strengthenWithSemiflows, canonicalInvariantOrder, ignore, encode, resolveZ3, runZ3Text, unreachable } from 'libpetri/verification';
 import { compile } from '../../src/compiler/index.js';
-import { markingStateOf } from '../../src/verify/verify.js';
+import { markingStateOf } from '../../src/verify/index.js';
 import { node, conn, workflow } from '../fixtures/workflows.js';
 const depthNet = (d: number) => {
   const nodes = [node('T', 'trigger', [0, 0]), node('IF', 'if', [200, 0])];

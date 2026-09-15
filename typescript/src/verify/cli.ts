@@ -50,8 +50,8 @@
  * **aborts the process** rather than returning a verdict, so `auto` refuses to start it and
  * reports `unknown` with the ceiling instead. `force` runs it anyway; `off` never runs it.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
-
+import { parseFlags, UsageError } from '../cli/flags.js';
+import type { CliIo } from '../cli/io.js';
 import { messageOf } from '../internal/errors.js';
 import { renderReport, renderSubject } from './report.js';
 import { rethrowIfBug } from './state-class.js';
@@ -61,12 +61,11 @@ import { verify } from './verify.js';
 import { parseNodeTypesFile, parseWorkflowJson } from './workflow-json.js';
 import type { NodeTypesFile, WorkflowJsonResult } from './workflow-json.js';
 
-export interface CliIo {
-  readonly readFile: (path: string) => string;
-  readonly writeFile: (path: string, content: string) => void;
-  readonly stdout: (text: string) => void;
-  readonly stderr: (text: string) => void;
-}
+// The command-line kernel every CLI here shares; re-exported so `n8n-libpetri/verify/cli`
+// keeps its surface. `main.ts` runs `runCli` against `nodeIo`.
+export { UsageError } from '../cli/flags.js';
+export { nodeIo } from '../cli/io.js';
+export type { CliIo } from '../cli/io.js';
 
 export const USAGE =
   'usage: n8n-libpetri verify <workflow.json> [--budget k] [--property NAME]... [--timeout ms]\n' +
@@ -88,14 +87,6 @@ export interface ParsedArgs {
   readonly strict: boolean;
 }
 
-/** A bad flag or a missing value: exit 2, with the usage line. */
-export class UsageError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UsageError';
-  }
-}
-
 /** Parses `argv` (without `node` and the script). Throws {@link UsageError} on a bad flag. */
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const args = argv[0] === 'verify' ? argv.slice(1) : argv;
@@ -115,68 +106,54 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   let quiet = false;
   let strict = false;
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!;
-    const value = (): string => {
-      const v = args[++i];
-      if (v === undefined) throw new UsageError(`${arg} needs a value`);
-      return v;
-    };
-    switch (arg) {
-      case '--budget': {
-        budget = Number(value());
+  parseFlags(args, {
+    values: {
+      '--budget': (v) => {
+        budget = Number(v);
         if (!Number.isInteger(budget) || budget < 1) throw new UsageError('--budget must be a positive integer');
-        break;
-      }
-      case '--timeout': {
-        timeoutMs = Number(value());
+      },
+      '--timeout': (v) => {
+        timeoutMs = Number(v);
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new UsageError('--timeout must be a positive number of ms');
-        break;
-      }
-      case '--property': {
-        const name = value();
+      },
+      '--property': (name) => {
         if (!PROPERTY_NAMES.includes(name as PropertyName)) {
           throw new UsageError(`unknown property '${name}'; one of ${PROPERTY_NAMES.join(', ')}`);
         }
         properties.push(name as PropertyName);
-        break;
-      }
-      case '--max-classes': {
-        maxClasses = Number(value());
+      },
+      '--max-classes': (v) => {
+        maxClasses = Number(v);
         if (!Number.isInteger(maxClasses) || maxClasses < 0) {
           throw new UsageError('--max-classes must be a non-negative integer (0 turns the solver-free route off)');
         }
-        break;
-      }
-      case '--smt-fallback': {
-        const mode = value();
+      },
+      '--smt-fallback': (mode) => {
         if (mode !== 'auto' && mode !== 'off' && mode !== 'force') {
           throw new UsageError("--smt-fallback must be one of auto, off, force");
         }
         smtFallback = mode;
-        break;
-      }
-      case '--node-types': nodeTypesFile = value(); break;
-      case '--start': startNode = value(); break;
-      case '--mutex': {
-        const parts = value().split(',').map((s) => s.trim());
+      },
+      '--node-types': (v) => { nodeTypesFile = v; },
+      '--start': (v) => { startNode = v; },
+      '--mutex': (v) => {
+        const parts = v.split(',').map((s) => s.trim());
         if (parts.length !== 2 || parts[0] === '' || parts[1] === '') {
           throw new UsageError('--mutex takes two comma-separated node names');
         }
         pairs.push([parts[0]!, parts[1]!] as const);
-        break;
-      }
-      case '--all-pairs': allPairs = true; break;
-      case '--no-semiflows': semiflows = false; break;
-      case '--strict': strict = true; break;
-      case '--json': json = true; break;
-      case '--out': out = value(); break;
-      case '--quiet': quiet = true; break;
-      default:
-        if (arg.startsWith('--')) throw new UsageError(`unknown option ${arg}`);
-        files.push(arg);
-    }
-  }
+      },
+      '--out': (v) => { out = v; },
+    },
+    switches: {
+      '--all-pairs': () => { allPairs = true; },
+      '--no-semiflows': () => { semiflows = false; },
+      '--strict': () => { strict = true; },
+      '--json': () => { json = true; },
+      '--quiet': () => { quiet = true; },
+    },
+    positional: (word) => { files.push(word); },
+  });
   if (files.length !== 1) throw new UsageError('exactly one workflow file is required');
 
   const mutualExclusion = allPairs ? 'all-pairs' as const : pairs.length > 0 ? pairs : undefined;
@@ -281,11 +258,3 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
   }
   return 0;
 }
-
-/** Real files and streams. `main.ts` runs {@link runCli} against this. */
-export const nodeIo: CliIo = {
-  readFile: (p) => readFileSync(p, 'utf8'),
-  writeFile: (p, c) => writeFileSync(p, c),
-  stdout: (t) => process.stdout.write(t),
-  stderr: (t) => process.stderr.write(t),
-};

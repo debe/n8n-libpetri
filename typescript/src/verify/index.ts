@@ -44,34 +44,33 @@
  * establish, and what each one costs, is in `docs/verification.md` and
  * `docs/adr/0007-verification.md`.
  *
+ * The command line is not re-exported here: the `n8n-libpetri/verify/cli` entry (`cli.ts`)
+ * publishes `runCli`, `parseArgs`, `USAGE` and the rest of its surface.
+ *
  * Milestones M4 (the surface) and M5 (the solver-free route).
  */
-export {
-  verify, verifyCompiled, assertLibpetriSurface, DEFAULT_PROPERTIES, DEFAULT_TIMEOUT_MS, SMT_MAX_FLAT_PLACES,
-  SMT_MAX_JOIN_INPUTS, alternativeEntryReach, budgetSemiflowOf, exclusionPairs, invariantTerms,
-  markingStateOf, producersOf, renderInvariant, resolveSolver, selectProperties, smtRefusalFor,
-  truncationShapeOf,
-} from './verify.js';
+export { verify, verifyCompiled, assertLibpetriSurface, markingStateOf, resolveSolver } from './verify.js';
+export { SMT_MAX_FLAT_PLACES, SMT_MAX_JOIN_INPUTS, smtRefusalFor } from './route.js';
+export { alternativeEntryReach, producersOf } from './shape.js';
 export {
   decodeCounterexample, decodeMarking, decodeStep, renderMarkedPlace, renderNodePath, stripBranch,
 } from './counterexample.js';
-export { renderFinding, renderHeader, renderReport, renderSubject, renderTable } from './report.js';
 export {
-  CoMarkings, StateSpace, DEFAULT_MAX_CLASSES, HALT_REST_ROLES, MAX_WITNESSES, PAUSE_REST_ROLES,
-  REST_ROLES, TERMINAL_ROLES, effectiveMaxClasses, loopTransitions, restRolesFor, terminalKindOf,
-  witnessCounterexample,
+  renderFinding, renderHeader, renderReport, renderStateSpace, renderSubject, renderTable,
+} from './report.js';
+export {
+  StateSpace, DEFAULT_MAX_CLASSES, HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES, TERMINAL_ROLES,
+  effectiveMaxClasses, loopTransitions, restRolesFor, terminalKindOf,
 } from './state-class.js';
-export type { Stranding, TerminalKind, TruncationCause, TruncationShape, Witness } from './state-class.js';
+export type { TruncationShape } from './state-class.js';
 export { PROPERTY_NAMES } from './types.js';
 export type {
   CheckRoute, CheckSubject, CheckVerdict, Counterexample, CounterexampleStep, InvariantSummary,
   MarkedPlace, MutualExclusionRequest, NetSize, PropertyCheck, PropertyName, QueryRecord,
-  SmtFallbackMode, SolverInfo, StateSpaceSummary, VerificationReport, VerifyOptions,
+  SmtFallbackMode, SolverInfo, StateSpaceSummary, Stranding, TerminalKind, TruncationCause,
+  VerificationReport, VerifyOptions, Witness,
 } from './types.js';
 export {
-  BUILT_IN_SHAPES, connectionsOf, describeWorkflowJson, looksLikeTrigger, parseNodeTypesFile, parseWorkflowJson,
-  pickStartNode, shapeOf,
+  BUILT_IN_SHAPES, connectionsOf, describeWorkflowJson, looksLikeTrigger, parseWorkflowJson, pickStartNode,
 } from './workflow-json.js';
 export type { NodeTypesFile, WorkflowJsonOptions, WorkflowJsonResult } from './workflow-json.js';
-export { USAGE, UsageError, nodeIo, parseArgs, runCli } from './cli.js';
-export type { CliIo, ParsedArgs } from './cli.js';

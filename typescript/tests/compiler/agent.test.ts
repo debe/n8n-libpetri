@@ -6,13 +6,9 @@
  * round budget is seeded from the node's own `options.maxIterations`, a tool is reachable only
  * through its agent, and the cross-node ports bind so that one flat net comes out.
  */
-import { compile, analyse } from '../../src/compiler/index.js';
-import { structuralHash } from '../../src/compiler/hash.js';
+import { compile, analyse, structuralHash } from '../../src/compiler/index.js';
 import { enumerateBranches } from 'libpetri';
-import { verify } from '../../src/verify/index.js';
-import { renderStateSpace } from '../../src/verify/report.js';
-import { StateSpace } from '../../src/verify/state-class.js';
-import { markingStateOf } from '../../src/verify/verify.js';
+import { StateSpace, markingStateOf, renderStateSpace, verify } from '../../src/verify/index.js';
 import type { NodeDescription } from '../../src/compiler/index.js';
 import {
   agentAssumedRounds, agentNested, agentOneTool, agentSharedTool, agentTwoTools, conn, linear, node,
