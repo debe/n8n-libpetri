@@ -8,33 +8,16 @@
  * The timeouts here are deliberately short. `docs/verification.md` measures what each
  * property costs; the tests only need the queries that close in well under a second to
  * close, and a short per-query timeout is what keeps the suite's runtime bounded when a
- * query is one of the ones that does not close at all.
+ * query is one of the ones that does not close at all. The gate and the timeouts are shared
+ * with the spikes (`tests/support/z3.ts`) and re-exported here.
  */
-import { z3Available } from 'libpetri/verification';
 import { conn, node, workflow } from '../fixtures/workflows.js';
 import type {
   MainConnection, NetMapView, NodeDescription, NodeGadget, NodeTypeShape, WorkflowDescription,
 } from '../../src/compiler/index.js';
 import type { PropertyCheck, VerificationReport } from '../../src/verify/index.js';
 
-/** Whether a usable `z3` resolves (`LIBPETRI_Z3` or `PATH`, >= 4.8.0; VER-013). */
-export const Z3_AVAILABLE = z3Available();
-
-/** `describe` for suites that run the solver. */
-export function describeZ3(name: string, fn: () => void): void {
-  if (Z3_AVAILABLE) describe(name, fn);
-  else describe.skip(`${name} [skipped: no usable z3 >= 4.8.0 on PATH or LIBPETRI_Z3]`, fn);
-}
-
-/**
- * Per-query timeout for the suite. Every query the tests assert a verdict on returns in
- * < 1 s (measured in `docs/verification.md`); the ones that do not close are asserted only
- * as "not violated", so a short timeout keeps the file fast without weakening anything.
- */
-export const TEST_TIMEOUT_MS = 5_000;
-
-/** vitest per-case budget: a handful of queries plus the invariant computation. */
-export const CASE_TIMEOUT_MS = 180_000;
+export { CASE_TIMEOUT_MS, TEST_TIMEOUT_MS, Z3_AVAILABLE, describeZ3 } from '../support/z3.js';
 
 export function checksOf(report: VerificationReport, property: string): PropertyCheck[] {
   return report.checks.filter((c) => c.property === property);

@@ -5,6 +5,9 @@
  * imported (n8n-workflow is not a runtime dependency), so these mirror the enumerable
  * fields `ExecutionBaseError` carries: `name`, `description`, `context`, `timestamp`,
  * `functionality`, `level`, plus `node` for the node-scoped one.
+ *
+ * {@link InternalSchedulerError} is the exception: it is the scheduler's own invariant broken,
+ * not something a node did, so it carries none of those fields.
  */
 import type { ExecutionBaseError, INode } from 'n8n-workflow';
 
@@ -129,4 +132,17 @@ export function attemptDeadlineExceeded(node: INode, timeoutMs: number, attempt:
     'Raise executionPolicy.timeoutMs on this node, or give it an onFailure step that retries. ' +
     'The node\'s own work is not cancelled: only its result is discarded.',
   );
+}
+
+/**
+ * A broken invariant of the scheduler itself (the `internal:` family): the compiled net, the
+ * payloads the actions write and the actions that read them disagree. Never the workflow's
+ * fault, so it has no code to act on; the message — the text it always was — says which
+ * invariant failed. The scheduler's twin of the compiler's `InternalCompilerError`.
+ */
+export class InternalSchedulerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InternalSchedulerError';
+  }
 }

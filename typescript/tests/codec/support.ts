@@ -18,6 +18,7 @@ import {
   type EdgePayload, type EntryPayload, type RetryPayload, type StoppedPayload, type WaitingPayload,
 } from '../../src/scheduler/index.js';
 import { items } from '../scheduler/support.js';
+import { gadget } from '../support/netmap.js';
 
 export type MarkingMap = Map<Place<unknown>, Token<unknown>[]>;
 export type SlotMain = Array<INodeExecutionData[] | null>;
@@ -57,27 +58,9 @@ export function values(m: MarkingMap, place: Place<unknown>): unknown[] {
   return (m.get(place) ?? []).map((t) => t.value);
 }
 
-export function gadget(c: CompiledWorkflow, name: string): NodeGadget {
-  return c.netMap.node(name);
-}
-
-export function placeNamed(c: CompiledWorkflow, name: string): Place<unknown> {
-  const p = c.netMap.place(name);
-  if (p === undefined) throw new Error(`no place '${name}'`);
-  return p.place;
-}
-
-/** The consumer-owned data place of the connection `from.outputIndex -> to.inputIndex`. */
-export function edgeData(c: CompiledWorkflow, from: string, outputIndex: number, to: string, inputIndex: number): Place<unknown> {
-  const g = gadget(c, to);
-  if (g.form === 'direct') return g.in!;
-  for (const i of g.inputs) {
-    for (const e of i.edges) {
-      if (e.edge.from === from && e.edge.outputIndex === outputIndex && e.edge.inputIndex === inputIndex) return e.data;
-    }
-  }
-  throw new Error(`no edge ${from}.${outputIndex} -> ${to}.${inputIndex}`);
-}
+// `gadget`, `placeNamed` and `edgeData` (the data place of one connection's slot) are the
+// compiler suite's `NetMap` helpers, shared from `tests/support/netmap.ts`.
+export { edgeData, gadget, placeNamed } from '../support/netmap.js';
 
 // ==================== n8n state ====================
 

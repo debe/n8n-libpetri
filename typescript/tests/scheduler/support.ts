@@ -16,6 +16,7 @@ import {
 } from '../../src/conformance/harness.js';
 import type { SchedulerHooks, WorkflowScheduler } from '../../src/n8n/host.js';
 import { PetriScheduler, type PetriSchedulerOptions } from '../../src/scheduler/index.js';
+import { startNodeOf } from '../support/workflow.js';
 
 export * from '../../src/conformance/harness.js';
 
@@ -56,14 +57,18 @@ export interface Execution {
   readonly error: unknown;
 }
 
-/** Runs `desc` on a fresh `PetriScheduler` with the given node scripts. */
+/**
+ * Runs `desc` on a fresh `PetriScheduler` with the given node scripts. A fixture that names no
+ * start node, or one it does not have, is refused before anything runs (`startNodeOf`,
+ * `tests/support/workflow.ts`) instead of putting `node: undefined` on the start stack entry.
+ */
 export async function execute(
   desc: WorkflowDescription,
   scripts: Readonly<Record<string, NodeScript>> = {},
   options: ExecuteOptions = {},
 ): Promise<Execution> {
+  const startName = startNodeOf(desc);
   const workflow = fakeWorkflow(desc, options);
-  const startName = desc.startNodes?.[0] ?? desc.startNode!;
   const runExecutionData = newRunExecutionData(workflow.nodes[startName]!, options);
   const host = options.host === undefined
     ? new FakeHost(workflow, runExecutionData, scripts, options)
@@ -168,28 +173,7 @@ export function withoutStackMachinery(calls: readonly string[]): string[] {
   return calls.filter((c) => !c.startsWith('isExecutionStackNotEmpty') && !c.startsWith('popExecutionStack'));
 }
 
-export function transitionsStarted(store: InMemoryEventStore, filter?: (name: string) => boolean): string[] {
-  const names: string[] = [];
-  for (const e of store.events()) {
-    if (e.type === 'transition-started' && (filter === undefined || filter(e.transitionName))) names.push(e.transitionName);
-  }
-  return names;
-}
-
-/**
- * Tokens the run left on `place`: `token-added` minus `token-removed`. The halted-run
- * assertions use it on `_halt`, which nothing consumes (`compiler/compile.ts`), in place of
- * the `_halt_reap` firing they used to count.
- */
-export function tokensResting(store: InMemoryEventStore, place: string): number {
-  let n = 0;
-  for (const e of store.events()) {
-    if (e.type === 'token-added' && e.placeName === place) n += 1;
-    if (e.type === 'token-removed' && e.placeName === place) n -= 1;
-  }
-  return n;
-}
-
-export function transitionsFailed(store: InMemoryEventStore): string[] {
-  return store.events().filter((e) => e.type === 'transition-failed').map((e) => `${(e as { transitionName: string }).transitionName}: ${(e as { errorMessage: string }).errorMessage}`);
-}
+// The event-store readers are shared with the spike and compiler suites (`tests/support/events.ts`):
+// `transitionsStarted` is their `started`. Read `tokensResting`'s doc before using it on a
+// seeded place such as `_budget`: it counts events, so the seed is not in it.
+export { started as transitionsStarted, tokensResting, transitionsFailed } from '../support/events.js';

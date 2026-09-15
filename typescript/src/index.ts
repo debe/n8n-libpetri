@@ -19,7 +19,7 @@
  */
 export const VERSION = '0.1.0';
 
-export { PetriScheduler, registerPetriScheduler, CompiledWorkflowCache, schedulerActions, ENGINE_ENTERED_DIAGNOSTIC, ENV_KEY } from './scheduler/index.js';
+export { PetriScheduler, registerPetriScheduler, CompiledWorkflowCache, schedulerActions, ENGINE_ENTERED_DIAGNOSTIC } from './scheduler/index.js';
 export type {
   PetriSchedulerOptions, SchedulerOutcome, RegisterPetriSchedulerOptions, PetriSchedulerRegistration, ExecutionEnv,
   SchedulerState,

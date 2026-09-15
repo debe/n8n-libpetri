@@ -250,15 +250,23 @@ describe('OR-form nodes', () => {
 });
 
 describe('direct-form waiting slots (foreign: n8n never writes them, the stranded encoder does)', () => {
-  it('items → X/in as an edge payload, [] → X/in_empty, [] where no empty place exists is dropped with a diagnostic', () => {
+  it('items → X/in as an edge payload, [] → X/in_empty', () => {
     const c = compile(linear);
     const diags: string[] = [];
     const a = items(1);
-    const m = decodeExecutionData(c, stateOf([], { A: { 0: { main: [a] } }, B: { 0: { main: [[]] } }, Trigger: { 0: { main: [[]] } } }), { onDiagnostic: (d) => diags.push(d) });
+    const m = decodeExecutionData(c, stateOf([], { A: { 0: { main: [a] } }, B: { 0: { main: [[]] } } }), { onDiagnostic: (d) => diags.push(d) });
     expect((values(m, inOf(gadget(c, 'A')))[0] as EdgePayload).items).toBe(a);
     expect(named(m)['id:B/in_empty']).toBe(1);
-    expect(named(m)['id:Trigger/in']).toBeUndefined();
-    expect(diags).toEqual([expect.stringContaining("node 'Trigger'")]);
+    expect(diags).toEqual([]);
+  });
+
+  it('[] where the input has no empty place is a CodecError naming node and place, as it is for a join input', () => {
+    // Trigger's `in` is synthetic: nothing can deliver an empty to it, so the row and the net
+    // disagree — the same impossibility `slotPlace` refuses for a join input.
+    const c = compile(linear);
+    const decode = (): unknown => decodeExecutionData(c, stateOf([], { Trigger: { 0: { main: [[]] } } }));
+    expect(decode).toThrow(CodecError);
+    expect(decode).toThrow(/node 'Trigger'.*'id:Trigger\/in'/);
   });
 });
 

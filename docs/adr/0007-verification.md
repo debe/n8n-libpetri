@@ -154,7 +154,7 @@ break.
 A violation's flat transition names (`id:<uuid>/route_1_b0`) are stripped of the flattener's
 `_b<k>` XOR-branch suffix and looked up in `NetMap`, which yields the owning node, the role,
 the port and the arm variant. The report prints the node path and the violating marking in
-node terms (`Merge port 0 ready (id:Merge/ready_0)`), never place names alone.
+node terms (`Merge input 0 ready (id:Merge/ready_0)`), never place names alone.
 `Counterexample.ordered` is true only when libpetri's abstract replay confirmed a firing
 sequence; otherwise the steps are an order-free derivation set and the renderer says so
 rather than implying a sequence that was never established.
@@ -247,7 +247,7 @@ condition is *quiescent ∧ some marked place is not a declared sink*, and the d
 exactly the structural rest set. So one reachable quiescent marking outside that set — a paused
 run holding an arrival, which is every workflow with a second branch in flight — makes the
 query **false on that net**, and its `proven` unreachable however long z3 runs. The graph
-counts those classes (`StateSpace.outsideSinkClasses`) and, where the count is non-zero, the
+counts those classes (`StateSpace.outsideSinkClasses`, since removed) and, where the count is non-zero, the
 query is skipped with that as the reason. It is not a blanket "never ask": on `switch20`, whose
 six quiescent classes are all inside the rest set, the question is genuinely open and the query
 runs. Skipping can only weaken a verdict (`unknown` or `bounded` instead of a `violated` the
@@ -519,8 +519,9 @@ those produces `_pause` beside it and nothing ever consumes `_pause` (`compiler/
 halt-over-pause precedence. Three things follow:
 
 - **The gate is retired**, with the reason it gave. The query is asked wherever the graph did not
-  close, and `StateSpace.outsideSinkClasses` becomes a statistic — how many quiescent classes the
-  unwidened question would have called strandings — rather than the condition it used to be.
+  close. The count the gate read (`StateSpace.outsideSinkClasses`, how many quiescent classes the
+  unwidened question would have called strandings) was kept as a statistic for a while; nothing
+  reported it, and the 2026-09 TypeScript refactor removed it.
 - **The designed-terminal downgrade becomes a tripwire.** A witness that is a paused or halted
   run can no longer be the solver being right about the wrong question; it would mean the SMT
   declaration and the graph's classification disagree on a role, and it is reported as that,

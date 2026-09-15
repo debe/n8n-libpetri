@@ -13,33 +13,23 @@
  * actually emits validates, and `collapsed-outcome.test.ts` fires every branch of it over
  * 58 shapes. Nothing here should be read as the shipped gadget; `src/compiler/gadget.ts`
  * is that.
+ *
+ * The z3 gating, `sleep` and the event-store readers live in `tests/support/`, where the
+ * other suites share them; they are re-exported here under the names the spikes import.
  */
 import {
   InMemoryEventStore, PrecompiledNet, PrecompiledNetExecutor, Transition, tokenOf,
   and, delayed, one, outPlace, place, xor,
-  type Marking, type NetEvent, type Out, type PetriNet, type Place, type Token, type TransitionFailed,
+  type Marking, type Out, type PetriNet, type Place, type Token,
 } from 'libpetri';
-import { z3Available } from 'libpetri/verification';
 
-// ==================== z3 gating ====================
-
-/** Whether a usable `z3` resolves (`LIBPETRI_Z3` or `PATH`, >= 4.8.0; VER-013). */
-export const Z3_AVAILABLE = z3Available();
-
-/**
- * `describe` for suites that run the solver. Without z3 the suite is skipped with the
- * reason in its name; `tests/z3-gate.test.ts` turns that skip into a failure under `CI`.
- */
-export function describeZ3(name: string, fn: () => void): void {
-  if (Z3_AVAILABLE) describe(name, fn);
-  else describe.skip(`${name} [skipped: no usable z3 >= 4.8.0 on PATH or LIBPETRI_Z3]`, fn);
-}
+export { Z3_AVAILABLE, describeZ3 } from '../support/z3.js';
+export { sleep } from '../support/sleep.js';
+export {
+  failed, isCompletionOf, isStartOf, maxSimultaneous, nthIndex, started,
+} from '../support/events.js';
 
 // ==================== Running ====================
-
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /** `n` unit tokens (the value of a marker / budget / free-slot token is irrelevant). */
 export function units(n = 1): Token<null>[] {
@@ -78,60 +68,6 @@ export async function runNet(net: PetriNet, initial: Initial, program?: Precompi
   const t0 = performance.now();
   const m = await executor.run();
   return { marking: m, store, elapsedMs: performance.now() - t0 };
-}
-
-// ==================== Observation ====================
-
-/** Transition names in `transition-started` order (EVT-006), optionally filtered. */
-export function started(store: InMemoryEventStore, filter?: (name: string) => boolean): string[] {
-  const names: string[] = [];
-  for (const e of store.events()) {
-    if (e.type === 'transition-started' && (filter === undefined || filter(e.transitionName))) {
-      names.push(e.transitionName);
-    }
-  }
-  return names;
-}
-
-/** Every `transition-failed` event (EVT-008). */
-export function failed(store: InMemoryEventStore): TransitionFailed[] {
-  return store.events().filter((e): e is TransitionFailed => e.type === 'transition-failed');
-}
-
-/** Index of the n-th (1-based) event satisfying `pred`, or -1. */
-export function nthIndex(store: InMemoryEventStore, pred: (e: NetEvent) => boolean, n: number): number {
-  let seen = 0;
-  const events = store.events();
-  for (let i = 0; i < events.length; i++) {
-    if (pred(events[i]!)) {
-      seen++;
-      if (seen === n) return i;
-    }
-  }
-  return -1;
-}
-
-export function isStartOf(name: string): (e: NetEvent) => boolean {
-  return (e) => e.type === 'transition-started' && e.transitionName === name;
-}
-
-export function isCompletionOf(name: string): (e: NetEvent) => boolean {
-  return (e) => e.type === 'transition-completed' && e.transitionName === name;
-}
-
-/**
- * Highest number of tokens a place held at any one moment, replayed from the
- * `token-added` / `token-removed` stream on top of `initialCount`.
- */
-export function maxSimultaneous(store: InMemoryEventStore, placeName: string, initialCount = 0): number {
-  let now = initialCount;
-  let max = initialCount;
-  for (const e of store.events()) {
-    if (e.type === 'token-added' && e.placeName === placeName) now++;
-    else if (e.type === 'token-removed' && e.placeName === placeName) now--;
-    if (now > max) max = now;
-  }
-  return max;
 }
 
 // ==================== The per-node gadget ====================

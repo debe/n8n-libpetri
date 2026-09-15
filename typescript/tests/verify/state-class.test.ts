@@ -51,14 +51,22 @@ function completion(report: VerificationReport): { whole: PropertyCheck; all: Pr
  * Proper completion only, with the solver *fallback* effectively disabled (1 ms): every
  * verdict this file asserts has to come from the graph, so a slow or missing z3 can never
  * change one.
+ *
+ * `timeoutMs: 1` bounds each z3 query; it does not switch the fallback off. In one full-suite
+ * run a join slot's arrival-bound row on `loopOverItems` came back `proven` from it anyway,
+ * which failed a test asserting that nothing in the family is proven. A test that asserts
+ * that passes `smtFallback: 'off'` (`VerifyOptions.smtFallback`), which never starts the SMT
+ * route, so every row it reads was decided by the graph or left to the bound.
  */
 async function completionOf(
   workflow: Parameters<typeof verify>[0], maxClasses?: number,
+  smtFallback?: NonNullable<Parameters<typeof verify>[1]>['smtFallback'],
 ): Promise<VerificationReport> {
   return verify(workflow, {
     properties: ['proper-completion'],
     timeoutMs: 1,
     ...(maxClasses === undefined ? {} : { maxClasses }),
+    ...(smtFallback === undefined ? {} : { smtFallback }),
   });
 }
 
@@ -376,7 +384,9 @@ describe('the solver-free route (VER-010)', () => {
     it('loopOverItems is `bounded`, and the bound grows with the cap', { timeout: CASE_TIMEOUT_MS }, async () => {
       const bounds: number[] = [];
       for (const cap of [2_000, 20_000]) {
-        const report = await completionOf(loopOverItems, cap);
+        // SMT fallback off, not just starved: "nothing in the family is proven" is a claim
+        // about the state-class route, and a 1 ms query that closes would make it about z3.
+        const report = await completionOf(loopOverItems, cap, 'off');
         expect(report.stateSpace.complete).toBe(false);
         expect(report.stateSpace.truncation).toBe('cycle');
         expect(report.stateSpace.loopSteps, 'Loop and Body are the cyclic nodes').toBe(2);

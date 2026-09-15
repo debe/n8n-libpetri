@@ -429,7 +429,7 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       gadget already has the `all()` arc that produced the one drop above).
 
       **Recommended, in order**: turn the union off, or make it conditional as above; then delete `SMT_MAX_JOIN_INPUTS` (12) and
-      `SMT_MAX_FLAT_PLACES` (450) at `src/verify/verify.ts:321`, whose sole justification
+      `SMT_MAX_FLAT_PLACES` (450) in `src/verify/route.ts`, whose sole justification
       (ADR 0007 §12) was an uncatchable abort that no longer exists and that the union caused
       rather than net size — today they refuse a sound answer the pipeline would give in about
       two seconds. Keeping the union instead is defensible; then the ceiling stays but belongs
@@ -498,7 +498,7 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       enumerates classes and **classifies** each quiescent one as resting / a designed terminal /
       a stranding (ADR 0007 §10), which is what produces the node-and-path report. There is no
       surface that hands back the ν quotient as a `ClassView` to classify, so a ν net can only be
-      asked yes/no questions — which is why `state-class.ts:588-593` refuses one outright rather
+      asked yes/no questions — which is why `state-class.ts`'s `matchSpec` guard refuses one outright rather
       than answering quiescence off the match-blind over-approximation (`nu-nets.md` §8: "a
       `Proven` on a quiescence property never comes from the fallback"). **The ask: expose the
       Route B quotient the way `verifyViaStateClassGraph` exposes the plain graph.** This is the
