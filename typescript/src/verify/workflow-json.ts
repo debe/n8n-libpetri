@@ -41,23 +41,29 @@
  *
  * The start node is the first node with no incoming main connection, preferring one whose
  * type looks like a trigger, in canvas order; `--start` overrides it.
+ *
+ * The parts live under `workflow-json/`: the `--node-types` file, node entries, connections,
+ * shapes and the start node. This module assembles the description and re-exports them.
  */
-import {
-  LOOP_NODE_TYPES, isSchedulerNode, nodePrefixOf, parseWorkflowPolicy, readPositiveIntOption, recordOf,
-  recordedShapeOf, resolveNodePolicy, scanExpressionReferences, subNodeSourcesIn,
-} from '../n8n/adapter.js';
-import type {
-  ExecutionPolicy, MainConnection, NodeDescription, NodeTypeShape, OnError, ToolConnection,
-  WorkflowDescription,
-} from '../compiler/index.js';
+import type { ExecutionPolicy, NodeTypeShape, WorkflowDescription } from '../compiler/index.js';
+import { scheduledNodesOf } from '../n8n/adapter/graph.js';
+import { parseWorkflowPolicy, policyFieldsOf, resolveNodePolicy } from '../n8n/adapter/policy.js';
+import { recordOf } from '../n8n/adapter/readers.js';
+import { scanExpressionReferences } from '../n8n/adapter/references.js';
+import { recordedLookups } from '../n8n/adapter/shape.js';
+import { asRecord } from './workflow-json/checked.js';
+import { connectionsOf } from './workflow-json/connections.js';
+import type { NodeTypesFile } from './workflow-json/node-types-file.js';
+import { nodesOf } from './workflow-json/nodes.js';
+import type { JsonNodes } from './workflow-json/nodes.js';
+import { shapeOf } from './workflow-json/shapes.js';
+import { startNodeOf } from './workflow-json/start-node.js';
 
-/** The node-type shapes a `--node-types` file may carry. Both maps are optional. */
-export interface NodeTypesFile {
-  /** Keyed by `type@typeVersion` or bare `type`. */
-  readonly types?: Readonly<Record<string, NodeTypeShape>>;
-  /** Keyed by node name; wins over `types`. */
-  readonly nodes?: Readonly<Record<string, NodeTypeShape>>;
-}
+export { parseNodeTypesFile } from './workflow-json/node-types-file.js';
+export type { NodeTypesFile } from './workflow-json/node-types-file.js';
+export { connectionsOf } from './workflow-json/connections.js';
+export { BUILT_IN_SHAPES, shapeOf } from './workflow-json/shapes.js';
+export { looksLikeTrigger, pickStartNode } from './workflow-json/start-node.js';
 
 export interface WorkflowJsonResult {
   readonly description: WorkflowDescription;
@@ -70,402 +76,79 @@ export interface WorkflowJsonResult {
   readonly warnings: readonly string[];
 }
 
-/**
- * A `--node-types` file, checked rather than cast: an array, a scalar, or a map whose entries
- * are not shapes used to be accepted as `{}` — "no shapes" — and the run then guessed every
- * port count exactly as a run without the flag would, with nothing said.
- */
-export function parseNodeTypesFile(raw: unknown): NodeTypesFile {
-  const root = asRecord(raw, 'node-types file');
-  const shapesOf = (key: 'types' | 'nodes'): Readonly<Record<string, NodeTypeShape>> | undefined => {
-    const map = root[key];
-    if (map === undefined) return undefined;
-    const entries = asRecord(map, `node-types file: "${key}"`);
-    for (const [name, shape] of Object.entries(entries)) {
-      const s = asRecord(shape, `node-types file: "${key}"["${name}"]`);
-      for (const count of ['inputCount', 'outputCount'] as const) {
-        const v = s[count];
-        if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
-          throw new Error(`node-types file: "${key}"["${name}"].${count} must be a non-negative integer`);
-        }
-      }
-    }
-    return entries as Readonly<Record<string, NodeTypeShape>>;
-  };
-  const types = shapesOf('types');
-  const nodes = shapesOf('nodes');
-  return { ...(types === undefined ? {} : { types }), ...(nodes === undefined ? {} : { nodes }) };
-}
-
-/**
- * Core node types whose port counts a JSON export cannot reveal and whose miscount would
- * change the compiled model. Deliberately short: everything else is better served by
- * `--node-types` than by a guess this file cannot keep in step with n8n.
- */
-export const BUILT_IN_SHAPES: Readonly<Record<string, (parameters: Record<string, unknown>) => NodeTypeShape>> = {
-  'n8n-nodes-base.if': () => ({ inputCount: 1, outputCount: 2, outputNames: ['true', 'false'] }),
-  'n8n-nodes-base.filter': () => ({ inputCount: 1, outputCount: 1 }),
-  'n8n-nodes-base.splitInBatches': () => ({
-    inputCount: 1, outputCount: 2, loopNode: true, outputNames: ['done', 'loop'],
-  }),
-  'n8n-nodes-base.compareDatasets': () => ({ inputCount: 2, outputCount: 4 }),
-  'n8n-nodes-base.merge': (parameters) => {
-    const declared = parameters['numberInputs'];
-    const inputCount = typeof declared === 'number' && Number.isInteger(declared) && declared >= 2 ? declared : 2;
-    // Merge's own `requiredInputs` expression is `mode === 'chooseBranch' ? [0, 1] : …`
-    // (n8n `Merge.node.ts`); nothing else in it is readable from an export.
-    const chooseBranch = parameters['mode'] === 'chooseBranch';
-    return { inputCount, outputCount: 1, ...(chooseBranch ? { requiredInputs: [0, 1] } : {}) };
-  },
-};
-
-/** n8n's own convention: a trigger type ends in `Trigger`, plus the fixed legacy names. */
-const TRIGGER_TYPES: ReadonlySet<string> = new Set([
-  'n8n-nodes-base.start',
-  'n8n-nodes-base.manualTrigger',
-  'n8n-nodes-base.webhook',
-  'n8n-nodes-base.cron',
-  'n8n-nodes-base.interval',
-  'n8n-nodes-base.executeWorkflowTrigger',
-  'n8n-nodes-base.errorTrigger',
-  'n8n-nodes-base.formTrigger',
-]);
-
-export function looksLikeTrigger(type: string): boolean {
-  return TRIGGER_TYPES.has(type) || /trigger$/i.test(type);
-}
-
-// ==================== parsing ====================
-
-interface RawNode {
-  readonly id?: unknown;
-  readonly name?: unknown;
-  readonly type?: unknown;
-  readonly typeVersion?: unknown;
-  readonly position?: unknown;
-  readonly disabled?: unknown;
-  readonly onError?: unknown;
-  readonly retryOnFail?: unknown;
-  readonly maxTries?: unknown;
-  readonly waitBetweenTries?: unknown;
-  readonly parameters?: unknown;
-  /** The layer-1 policy carrier (ADR 0009). Top-level on the node, never inside `parameters`. */
-  readonly executionPolicy?: unknown;
-}
-
-const ON_ERROR: ReadonlySet<string> = new Set(['stopWorkflow', 'continueRegularOutput', 'continueErrorOutput']);
-
-function asRecord(v: unknown, what: string): Record<string, unknown> {
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new Error(`${what} must be an object`);
-  return v as Record<string, unknown>;
-}
-
-/**
- * `connections` in n8n's export shape: `{ "<from>": { "main": [ [ {node,type,index} ] ] } }`.
- *
- * Also reads the `ai_tool` key, which n8n stores on the same map keyed *from the tool into the
- * agent*. It has to: the compiled net gives an agent a dispatch arm per `ai_tool` connection,
- * so a verifier that read only `main` would analyse a net without the agent's round — a
- * different net from the one the scheduler runs, reported with the same confidence. One net
- * serves execution and verification, and that includes this path.
- *
- * A connection that names a node the export does not contain is dropped with a *diagnostic*,
- * not a shape warning: the live adapter drops it silently (n8n throws only when the producer
- * runs), and it is not a guess about a port count.
- */
-export function connectionsOf(raw: unknown, names: ReadonlySet<string>): {
-  connections: MainConnection[]; toolConnections: ToolConnection[]; diagnostics: string[];
-  /** Nodes that are the source of an `ai_*` connection other than `ai_tool` (see below). */
-  subNodeSources: Set<string>;
-} {
-  const connections: MainConnection[] = [];
-  const toolConnections: ToolConnection[] = [];
-  const diagnostics: string[] = [];
-  if (raw === undefined || raw === null) {
-    return { connections, toolConnections, diagnostics, subNodeSources: new Set() };
-  }
-  const byNode = asRecord(raw, 'connections');
-  for (const [from, value] of Object.entries(byNode)) {
-    if (!names.has(from)) {
-      diagnostics.push(`connections list '${from}', which is not a node of this workflow; dropped`);
-      continue;
-    }
-    const byType = asRecord(value ?? {}, `connections['${from}']`);
-    const main = byType['main'];
-    if (Array.isArray(main)) main.forEach((targets, outputIndex) => {
-      if (!Array.isArray(targets)) return;
-      for (const t of targets) {
-        if (typeof t !== 'object' || t === null) continue;
-        const target = t as Record<string, unknown>;
-        if (target['type'] !== undefined && target['type'] !== 'main') continue;
-        const to = target['node'];
-        if (typeof to !== 'string' || !names.has(to)) {
-          diagnostics.push(`connection ${from}.${outputIndex} -> '${String(to)}' names an unknown node; dropped`);
-          continue;
-        }
-        const index = target['index'];
-        connections.push({
-          from, outputIndex, to, inputIndex: typeof index === 'number' ? index : 0,
-        });
-      }
-    });
-    // `ai_tool`: the same map, but n8n keys it from the tool node into the agent, so `from` is
-    // the tool here. Every other `ai_*` type is resolved by `supplyData` inside `runNode` and
-    // never reaches a scheduler, so it is right to ignore them here; `subNodeSourcesIn` below
-    // records their sources so the caller can drop a node that is *only* reachable that way.
-    const aiTool = byType['ai_tool'];
-    if (!Array.isArray(aiTool)) continue;
-    for (const targets of aiTool) {
-      if (!Array.isArray(targets)) continue;
-      for (const t of targets) {
-        if (typeof t !== 'object' || t === null) continue;
-        const target = t as Record<string, unknown>;
-        if (target['type'] !== undefined && target['type'] !== 'ai_tool') continue;
-        const agent = target['node'];
-        if (typeof agent !== 'string' || !names.has(agent)) {
-          diagnostics.push(`ai_tool connection ${from} -> '${String(agent)}' names an unknown node; dropped`);
-          continue;
-        }
-        toolConnections.push({ agent, tool: from });
-      }
-    }
-  }
-  // The same reading the live adapter makes of `connectionsBySourceNode`: a language model, a
-  // memory, an output parser is `supplyData`'s, and compiling it would report a dead node.
-  return { connections, toolConnections, diagnostics, subNodeSources: subNodeSourcesIn(byNode) };
-}
-
-function nodeDescriptionOf(raw: RawNode, index: number, used: Set<string>): NodeDescription {
-  const name = raw.name;
-  if (typeof name !== 'string' || name === '') throw new Error(`nodes[${index}] has no name`);
-  const type = typeof raw.type === 'string' ? raw.type : 'unknown';
-  const position = Array.isArray(raw.position) && raw.position.length >= 2
-    ? [Number(raw.position[0]) || 0, Number(raw.position[1]) || 0] as const
-    : [0, index * 100] as const;
-  // MOD-010 reserves `/` in a prefix, and the prefix must be unique: the adapter's rule.
-  const id = nodePrefixOf(raw.id, index, used);
-  const onError = typeof raw.onError === 'string' && ON_ERROR.has(raw.onError) ? raw.onError as OnError : undefined;
-  return {
-    id,
-    name,
-    type,
-    typeVersion: typeof raw.typeVersion === 'number' ? raw.typeVersion : 1,
-    position: [position[0], position[1]],
-    ...(raw.disabled === true ? { disabled: true } : {}),
-    ...(onError === undefined ? {} : { onError }),
-    ...(raw.retryOnFail === true ? { retryOnFail: true } : {}),
-    ...(typeof raw.maxTries === 'number' ? { maxTries: raw.maxTries } : {}),
-    ...(typeof raw.waitBetweenTries === 'number' ? { waitBetweenTries: raw.waitBetweenTries } : {}),
-  };
-}
-
-// ==================== shapes ====================
-
-interface PortUse {
-  readonly maxInput: number;
-  readonly maxOutput: number;
-  readonly hasIncoming: boolean;
-}
-
-function portUse(node: string, connections: readonly MainConnection[]): PortUse {
-  let maxInput = -1;
-  let maxOutput = -1;
-  let hasIncoming = false;
-  for (const c of connections) {
-    if (c.to === node) {
-      hasIncoming = true;
-      if (c.inputIndex > maxInput) maxInput = c.inputIndex;
-    }
-    if (c.from === node && c.outputIndex > maxOutput) maxOutput = c.outputIndex;
-  }
-  return { maxInput, maxOutput, hasIncoming };
-}
-
-/** Resolution order 1–4 of the module doc. Pushes a warning whenever it reaches step 4. */
-export function shapeOf(
-  node: NodeDescription,
-  parameters: Record<string, unknown>,
-  connections: readonly MainConnection[],
-  types: NodeTypesFile,
-  warnings: string[],
-): NodeTypeShape {
-  // `loopNode` is a property of the *type*, not of the ports, and a supplied shape has no
-  // reason to restate it — so it is applied on every path here rather than only on the two
-  // that used to have it. A shape that sets it explicitly still wins, in either direction.
-  const withLoop = (shape: NodeTypeShape): NodeTypeShape => (
-    shape.loopNode !== undefined || !LOOP_NODE_TYPES.has(node.type)
-      ? shape
-      : { ...shape, loopNode: true }
-  );
-  /**
-   * A supplied shape is authoritative for the *counts* — it is n8n's own number and it is
-   * per-version, where a built-in is one hand-written guess for every version. But n8n's
-   * generated type file lists a port as the bare string `"main"`, so it carries no names at
-   * all, and a catalogue built from it would silently erase the `outputNames` that let a
-   * `route` step say `'true'` instead of `1`. So the built-in fills what the supplied shape
-   * leaves out, and only while the two agree on how many ports there are.
-   */
-  const named = (shape: NodeTypeShape): NodeTypeShape => {
-    const builtInFor = BUILT_IN_SHAPES[node.type];
-    if (builtInFor === undefined) return shape;
-    const known = builtInFor(parameters);
-    if (known.inputCount !== shape.inputCount || known.outputCount !== shape.outputCount) return shape;
-    return {
-      ...shape,
-      ...(shape.outputNames === undefined && known.outputNames !== undefined
-        ? { outputNames: known.outputNames } : {}),
-      ...(shape.requiredInputs === undefined && known.requiredInputs !== undefined
-        ? { requiredInputs: known.requiredInputs } : {}),
-    };
-  };
-  const byName = types.nodes?.[node.name];
-  if (byName !== undefined) return withLoop(named(byName));
-  const byVersion = types.types?.[`${node.type}@${node.typeVersion}`] ?? types.types?.[node.type];
-  if (byVersion !== undefined) return withLoop(named(byVersion));
-  const builtIn = BUILT_IN_SHAPES[node.type];
-  if (builtIn !== undefined) return withLoop(builtIn(parameters));
-  const use = portUse(node.name, connections);
-  const inputCount = use.maxInput >= 0
-    ? use.maxInput + 1
-    : looksLikeTrigger(node.type) ? 0 : 1;
-  const connectedOutputs = use.maxOutput + 1;
-  // The compiler appends the error output at index `outputCount`, so a node that has one
-  // must not count it among its declared outputs: the highest connected index is it.
-  const errorOutput = node.onError === 'continueErrorOutput' ? 1 : 0;
-  const outputCount = Math.max(1, connectedOutputs - errorOutput);
-  warnings.push(
-    `${node.name} (${node.type}): no node-type shape supplied, guessed ${inputCount} input(s) / ` +
-    `${outputCount} output(s) from the connections` +
-    (errorOutput === 1 ? ' (highest connected output taken to be the error output)' : ''),
-  );
-  return {
-    inputCount,
-    outputCount,
-    ...(LOOP_NODE_TYPES.has(node.type) ? { loopNode: true } : {}),
-  };
-}
-
-// ==================== entry point ====================
-
 export interface WorkflowJsonOptions {
   readonly nodeTypes?: NodeTypesFile;
   /** Overrides the start-node choice. */
   readonly startNode?: string;
 }
 
-/** The first node with no incoming connection, triggers first, in canvas (y, x) order. */
-export function pickStartNode(
-  nodes: readonly NodeDescription[], connections: readonly MainConnection[],
-): string {
-  const fed = new Set(connections.map((c) => c.to));
-  const ordered = [...nodes].sort((a, b) =>
-    a.position[1] - b.position[1] || a.position[0] - b.position[0] || a.name.localeCompare(b.name));
-  const roots = ordered.filter((n) => !fed.has(n.name) && n.disabled !== true);
-  const trigger = roots.find((n) => looksLikeTrigger(n.type));
-  const start = trigger ?? roots[0] ?? ordered[0];
-  if (start === undefined) throw new Error('workflow has no nodes');
-  return start.name;
+/**
+ * Every node's resolved policy, by name — the dropped nodes' included.
+ *
+ * The same carrier, the same non-inheritance rule and the same precedence the live adapter
+ * uses — `parseWorkflowPolicy` and `resolveNodePolicy` *are* the adapter's, handed the raw
+ * JSON. One net serves execution and verification, and a CLI that read the policy
+ * differently — or not at all — would analyse a different net and report it with the same
+ * confidence.
+ */
+function policiesOf(settings: unknown, { nodes, records }: JsonNodes, diagnostics: string[]): Map<string, ExecutionPolicy> {
+  const workflowPolicy = parseWorkflowPolicy(settings, diagnostics);
+  const policies = new Map<string, ExecutionPolicy>();
+  nodes.forEach((node, i) => {
+    const merged = resolveNodePolicy(records[i]!['executionPolicy'], node.name, settings, workflowPolicy, diagnostics);
+    if (merged !== undefined) policies.set(node.name, merged);
+  });
+  return policies;
 }
 
 /** Parses an n8n workflow JSON export (the object, not the text). */
 export function describeWorkflowJson(raw: unknown, options: WorkflowJsonOptions = {}): WorkflowJsonResult {
   const root = asRecord(raw, 'workflow');
-  const rawNodes = root['nodes'];
-  if (!Array.isArray(rawNodes)) throw new Error('workflow has no `nodes` array');
-  const warnings: string[] = [];
-  const used = new Set<string>();
-  const nodes = rawNodes.map((n, i) => nodeDescriptionOf(asRecord(n, `nodes[${i}]`) as RawNode, i, used));
-  const names = new Set(nodes.map((n) => n.name));
-  if (names.size !== nodes.length) throw new Error('workflow has two nodes of the same name');
-
+  const json = nodesOf(root);
+  const { names } = json;
   const parsed = connectionsOf(root['connections'], names);
   const connections = parsed.connections;
 
   // The scheduler's graph, not the canvas's — the same rule `n8n/adapter.ts` applies to a live
   // `Workflow`, because one net serves execution and verification and a CLI that analysed a
   // different set of nodes would report about a different net.
-  const wiredMain = new Set(connections.flatMap((c) => [c.from, c.to]));
-  const wiredTool = new Set(parsed.toolConnections.flatMap((c) => [c.agent, c.tool]));
-  const scheduled = nodes.filter((n) => isSchedulerNode(
-    n.name, n.type, (x) => wiredMain.has(x), (x) => wiredTool.has(x), (x) => parsed.subNodeSources.has(x)));
-  const droppedCount = nodes.length - scheduled.length;
-  const dropped: string[] = droppedCount === 0 ? [] : [
-    `${droppedCount} node(s) are not part of the scheduler's graph (annotations, or sub-nodes ` +
-    'resolved by supplyData inside runNode) and are not compiled',
-  ];
+  const { scheduled, diagnostics: dropped } = scheduledNodesOf(
+    json.nodes, connections, parsed.toolConnections, parsed.subNodeSources);
 
-  // Keyed by name off the **unfiltered** list: `rawNodes` and `nodes` are index-aligned, and
+  // Keyed by name off the **unfiltered** list: the records and `nodes` are index-aligned, and
   // dropping entries from `nodes` first would desynchronise them.
-  const parametersOf = new Map<string, Record<string, unknown>>();
-  rawNodes.forEach((n, i) => {
-    parametersOf.set(nodes[i]!.name, recordOf(asRecord(n, `nodes[${i}]`)['parameters']) ?? {});
-  });
+  const parametersOf = new Map<string, Record<string, unknown>>(
+    json.nodes.map((n, i) => [n.name, recordOf(json.records[i]!['parameters']) ?? {}]));
 
-  const shapes = new Map<string, NodeTypeShape>();
-  for (const node of scheduled) {
-    shapes.set(node.name, shapeOf(node, parametersOf.get(node.name) ?? {}, connections, options.nodeTypes ?? {}, warnings));
-  }
+  const warnings: string[] = [];
+  const shapes = new Map<string, NodeTypeShape>(scheduled.map((node) => [
+    node.name, shapeOf(node, parametersOf.get(node.name) ?? {}, connections, options.nodeTypes ?? {}, warnings)]));
 
-  // The same carrier, the same non-inheritance rule and the same precedence the live adapter
-  // uses — `parseWorkflowPolicy` and `resolveNodePolicy` *are* the adapter's, handed the raw
-  // JSON. One net serves execution and verification, and a CLI that read the policy
-  // differently — or not at all — would analyse a different net and report it with the same
-  // confidence.
-  //
   // Policy notes and dropped connections are *diagnostics*, not shape guesses: `warnings` is
   // the CLI's "the compiled net may differ from the workflow" list, and a policy this build
   // chose to ignore is a different kind of statement. They ride the description's own channel.
-  const settings = root['settings'];
   const policyDiagnostics: string[] = [...parsed.diagnostics];
-  const workflowPolicy = parseWorkflowPolicy(settings, policyDiagnostics);
-  const policies = new Map<string, ExecutionPolicy>();
-  rawNodes.forEach((n, i) => {
-    const name = nodes[i]!.name;
-    const merged = resolveNodePolicy(
-      asRecord(n, `nodes[${i}]`)['executionPolicy'], name, settings, workflowPolicy, policyDiagnostics);
-    if (merged !== undefined) policies.set(name, merged);
-  });
+  const policies = policiesOf(root['settings'], json, policyDiagnostics);
 
-  // `--start` names a node the scheduler runs: an annotation or a `supplyData` sub-node has no
-  // gadget to seed, and the compiler would refuse the start node it was handed.
-  const startNode = options.startNode ?? pickStartNode(scheduled, connections);
-  if (!names.has(startNode)) throw new Error(`start node '${startNode}' is not a node of this workflow`);
-  if (!scheduled.some((n) => n.name === startNode)) {
-    throw new Error(
-      `start node '${startNode}' is not a node the scheduler runs (an annotation, or a sub-node resolved by supplyData)`);
-  }
+  const startNode = startNodeOf(options.startNode, scheduled, names, connections);
 
-  const references = new Map<string, string[]>();
-  for (const node of scheduled) {
-    references.set(node.name, scanExpressionReferences(parametersOf.get(node.name) ?? {}, names));
-  }
+  const references = new Map<string, string[]>(scheduled.map((node) => [
+    node.name, scanExpressionReferences(parametersOf.get(node.name) ?? {}, names)]));
 
+  const diagnostics = [...dropped, ...policyDiagnostics];
   const name = root['name'];
   const id = root['id'];
   const description: WorkflowDescription = {
-    ...(policyDiagnostics.length === 0 && dropped.length === 0
-      ? {} : { diagnostics: [...dropped, ...policyDiagnostics] }),
+    ...(diagnostics.length === 0 ? {} : { diagnostics }),
     ...(typeof id === 'string' ? { id } : {}),
     ...(typeof name === 'string' ? { name } : {}),
-    nodes: scheduled.map((n) => {
-      // The agent's round budget, where n8n keeps it, read by the adapter's own reader: only a
-      // literal counts, and the policy's `maxToolCalls` wins over the `options` path.
-      const parameters = parametersOf.get(n.name);
-      const policy = policies.get(n.name);
-      const maxRounds = readPositiveIntOption(parameters, 'maxIterations');
-      const maxToolCalls = policy?.maxToolCalls ?? readPositiveIntOption(parameters, 'maxToolCalls');
-      return {
-        ...n,
-        ...(maxRounds === undefined ? {} : { maxRounds }),
-        ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
-        ...(policy === undefined ? {} : { executionPolicy: policy }),
-      };
-    }),
+    // The agent's round budget, where n8n keeps it, read by the adapter's own reader: only a
+    // literal counts, and the policy's `maxToolCalls` wins over the `options` path.
+    nodes: scheduled.map((n) => ({ ...n, ...policyFieldsOf(parametersOf.get(n.name), policies.get(n.name)) })),
     connections,
     toolConnections: parsed.toolConnections,
     startNode,
-    nodeTypes: (n) => recordedShapeOf(shapes, n.name),
-    expressionReferences: (n) => references.get(n.name) ?? [],
+    ...recordedLookups(shapes, references),
   };
   return { description, warnings };
 }

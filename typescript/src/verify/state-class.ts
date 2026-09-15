@@ -99,258 +99,28 @@
  * route; `docs/verification.md` states it as such.
  */
 import { performance } from 'node:perf_hooks';
-import { getHeapStatistics } from 'node:v8';
-import type { Place, PetriNet, Transition } from 'libpetri';
-import { StateClassGraph } from 'libpetri/verification';
-import type { MarkingState, StateClass } from 'libpetri/verification';
-import { InternalCompilerError, type CompiledWorkflow, type NetMapView, type PlaceRole } from '../compiler/index.js';
-import { decodeMarking, decodeStep } from './counterexample.js';
-import type {
-  AgentBudget, Counterexample, CounterexampleStep, Stranding, TerminalKind, TruncationCause, Witness,
-} from './types.js';
+import type { PetriNet } from 'libpetri';
+import type { MarkingState, StateClassGraph } from 'libpetri/verification';
+import type { NetMapView } from '../compiler/index.js';
+import { messageOf } from '../internal/errors.js';
+import { rethrowIfBug } from './rethrow-if-bug.js';
+import { buildStateClassGraph } from './state-space/build.js';
+import { DEFAULT_MAX_CLASSES, effectiveMaxClasses } from './state-space/cap.js';
+import { closedCyclicRuns } from './state-space/cyclic-runs.js';
+import { ExploredClasses } from './state-space/explored-classes.js';
+import { truncationCauseOf, type TruncationShape } from './state-space/truncation.js';
+import type { TruncationCause } from './types.js';
 
-/**
- * Class cap for {@link StateSpace.explore}. The graph must never run unbounded: a workflow
- * with a cycle has an unbounded state space, and one with heavy independent parallelism has
- * a combinatorial one (NU-053: the graph has no partial-order reduction), so the cap is what
- * turns "hangs" into "reports truncation".
- *
- * 200 000 comes from the measurement in `docs/verification.md`: every acyclic fixture
- * without independent parallelism closes three orders of magnitude below it (1967 classes
- * for a 41-node chain, 5894 for an 8-wide fan-out), and the two shapes that do truncate cost
- * 4.1 s (a loop) and 36 s (a 20-way switch) to reach it — the same order as the 60 s the SMT
- * route spends per *query*, and paid once for the whole report rather than once per place.
- */
-export const DEFAULT_MAX_CLASSES = 200_000;
-
-/**
- * The worst **per class** cost measured, in bytes of peak RSS: `switch20` reaches its
- * 200 003 classes at 2.48 GB. The other two shapes measured are cheaper per class rather
- * than proportional to the net — `loopOverItems` (42 places) costs 4.4 kB a class and the
- * 49-node generated workflow (526 flat places) 12.1 kB — so the class count, not the net size, is
- * what bounds the enumeration's memory. `docs/verification.md` has the table.
- */
-const BYTES_PER_CLASS = 12_500;
-
-/** How much of the V8 heap limit the enumeration may plan to spend. */
-const HEAP_SHARE = 0.75;
-
-/**
- * The cap the enumeration actually runs with: the caller's, lowered to what the heap can
- * hold.
- *
- * A class cap bounds the class count; only this bounds the **memory**, and the difference
- * matters because a V8 heap exhaustion aborts the process — it is not an exception
- * {@link StateSpace.explore} could catch and turn into a truncation. At this machine's
- * default 4.4 GB heap limit nothing is lowered (0.75 x 4.4 GB / 12.5 kB = 264 000 > the
- * 200 000 default); under a container's 1 GB it becomes ~70 000, and a truncation is
- * reported instead of an abort.
- *
- * `requested <= 0` is passed through untouched: that is "turn the route off", not a cap.
- */
-export function effectiveMaxClasses(
-  requested: number, heapLimitBytes: number = getHeapStatistics().heap_size_limit,
-): number {
-  if (requested <= 0) return requested;
-  const affordable = Math.floor((heapLimitBytes * HEAP_SHARE) / BYTES_PER_CLASS);
-  return Math.max(1, Math.min(requested, affordable));
-}
-
-/** How many stuck markings a report keeps. One witness per stranded place is kept anyway. */
-export const MAX_WITNESSES = 8;
-
-/**
- * Places where a token at rest is legitimate residue of a finished run, never pending work.
- *
- * `idle` / `free` / `tries` / `budget` are the gadget's own resources handed back;
- * `done` / `skipped` / `ran` are markers nothing consumes; `nil` is drained by a genuine
- * sink (CORE-043 AC4); `halt` / `pause` / `waiting` / `stopped` are the designed terminals —
- * `_halt` is never consumed, it *is* the halted run's terminal marker (`compiler/compile.ts`).
- */
-export const REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
-  'idle', 'done', 'skipped', 'free', 'tries', 'budget', 'halt', 'pause', 'waiting', 'stopped', 'ran', 'nil',
-  // `rounds` and `calls` are budgets, the agent's `tries`: an execution that finishes without
-  // spending every round or every tool call it was allowed leaves the rest there, and that is
-  // a completed run, not a stranding. Every other agent-round place is pending work — a round
-  // in flight — and widens only inside a designed terminal, where the codec writes it back.
-  'rounds', 'calls',
-]);
-
-/**
- * Re-throws a **programming** error rather than letting it become a weaker verdict.
- *
- * The catches in this surface convert a failure into "undecided" — the route could not answer,
- * the solver died, the graph could not be built. That is right for a real condition and wrong
- * for a bug in this codebase or a mismatch with libpetri, and once both arrive as "undecided"
- * they are indistinguishable: the report stays well-formed, the proofs quietly disappear, and
- * nothing fails. A `TypeError` is how a library method this code calls but the installed
- * version does not have presents itself, so that instance would turn a version skew into a
- * silently weaker suite (`tasks/todo.md`).
- *
- * `TypeError` and `ReferenceError` are never verdicts, and neither is an
- * `InternalCompilerError`: it is the compiler saying one of its own invariants broke, which is
- * a bug in this codebase by definition. `RangeError` is deliberately excluded: a stack overflow
- * on a deep net is a capacity limit, which is what "undecided" is for.
- */
-export function rethrowIfBug(e: unknown): void {
-  if (e instanceof TypeError || e instanceof ReferenceError || e instanceof InternalCompilerError) throw e;
-}
-
-/** A marking holding one of these is a *designed* terminal: a paused or halted run. */
-export const TERMINAL_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
-  'pause', 'halt', 'waiting', 'stopped',
-]);
-
-/**
- * The rest set inside a **paused** class (`_pause`, `X/waiting`, `X/stopped`): the pending
- * work `encodeMarking` in mode `pause` writes back into n8n's `nodeExecutionStack` and
- * `waitingExecution` (`codec.ts`; ADR 0005). `retry` is in it because `X_retry_wait`
- * inhibits on `_pause` (`gadget.ts`), so its unit rests there by design and the codec pushes
- * the entry back.
- *
- * `in-empty` and the `edge` roles are deliberately **absent**, and that is the half of this
- * set that had to be measured rather than assumed: `X_skip` and the `arm` transitions are
- * *not* pause-inhibited, so those places drain on their own under a pause and a token at
- * rest on one is real pending work — and `encodeMarking` in mode `pause` throws a
- * `CodecError` on `X/in_empty` and on an OR input's edge places rather than writing them
- * `halt` is absent too, and for a different reason: `_halt` at rest is the *halted*
- * terminal, so a marking holding it is classified against {@link HALT_REST_ROLES} instead.
- */
-export const PAUSE_REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
-  // `failed` is `retry`'s analogue for an `onFailure` chain (ADR 0009): an attempt that failed
-  // and whose step has not acted. Pending work, so it is *not* in `REST_ROLES` — a quiescent
-  // marking holding one outside a designed terminal is a stranding and is reported as one —
-  // but inside a pause or a halt the codec writes it back, exactly as it does `retry`.
-  ...REST_ROLES, 'in-data', 'ready', 'hasdata', 'retry', 'failed',
-  // An agent round the pause caught mid-flight: the tool calls not yet dispatched (`queue`) or
-  // the mark that there are none (`drained`), the one dispatched but not yet started
-  // (`in-tool`), the ones still out (`outstanding`) and the agent's own re-entry
-  // (`dispatched`). `encodeMarking` writes every one of them back onto `nodeExecutionStack` in
-  // n8n's own shape, so they rest by design — exactly the argument `retry` is in this set for.
-  'in-tool', 'queue', 'drained', 'outstanding', 'dispatched',
-]);
-
-/**
- * The rest set inside a **halted** class (`_halt`): {@link PAUSE_REST_ROLES} plus the places
- * a halt stops draining and the codec handles in mode `cancelled` — the one mode that
- * legitimately sees an undrained marking (`codec.ts`; the scheduler encodes a halted run
- * with it, `petri-scheduler.ts`). `X_skip` and the arms inhibit on `_halt`, so `X/in_empty`
- * and the `edge` places come to rest; `cancelled` mode drops the empty with a diagnostic
- * ("n8n never enqueues an empty", which is right for a run that is over) and writes the edge
- * arrivals back through `joinQueue`. Every one of these is where a pending activation was
- * *delivered*: since there is no reap, that is exactly where the halted run leaves it.
- */
-export const HALT_REST_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
-  ...PAUSE_REST_ROLES, 'in-empty', 'edge-data', 'edge-empty',
-]);
-
-/** The rest set a class of this kind is classified against. */
-export function restRolesFor(kind: TerminalKind): ReadonlySet<PlaceRole> {
-  switch (kind) {
-    case 'halt': return HALT_REST_ROLES;
-    case 'pause': return PAUSE_REST_ROLES;
-    case 'none': return REST_ROLES;
-  }
-}
-
-/**
- * Which terminal a marking is: `'halt'` wins over `'pause'`, because a marking holding both
- * is encoded on the halt path (`petri-scheduler.ts` checks `_halt` first).
- */
-export function terminalKindOf(roles: Iterable<PlaceRole | null>): TerminalKind {
-  let kind: TerminalKind = 'none';
-  for (const role of roles) {
-    if (role === null) continue;
-    if (role === 'halt') return 'halt';
-    if (TERMINAL_ROLES.has(role)) kind = 'pause';
-  }
-  return kind;
-}
-
-/** What the *workflow* looks like, for {@link StateSpace.truncationCause}. */
-export interface TruncationShape {
-  /** `analysis.hasCycle`. */
-  readonly hasCycle: boolean;
-  /** Some node has two or more distinct successors: branches that interleave. */
-  readonly independentBranches: boolean;
-  /**
-   * Every agent, with its tool-call budget. The graph explores every round size up to the
-   * budget — a product of per-tool and per-round counters, polynomial in K and in the tool
-   * count — so this is the one truncation cause with
-   * a knob the user can turn: a declared `options.maxToolCalls` is both the runtime cap and the
-   * width of the claim, and an assumed one is the scheduler's runtime default, sized for
-   * production and far too wide for a graph.
-   */
-  readonly agents: readonly AgentBudget[];
-}
-
-/**
- * The transitions a **cyclic-node run** is counted in: the `run` transition of every node
- * that lies on a cycle of the workflow's main-connection graph (`analysis.cyclic`, a
- * non-trivial SCC or a self-loop).
- *
- * That is the unit {@link StateSpace.boundedCyclicRuns} quantifies over, and it is
- * deliberately *not* "one iteration of the loop": on a two-node cycle (`Loop -> Body ->
- * Loop`) one pass of the body fires two of these transitions, so a bound of `k` guarantees
- * `floor(k / size)` complete passes and nothing may report it as `k` iterations. A node's
- * `X_run` is the transition whose action is the node's own execution, so what is counted is
- * exactly the node runs a user would count on the canvas.
- */
-export function loopTransitions(compiled: CompiledWorkflow): Set<string> {
-  const names = new Set<string>();
-  // Through `NetMap`'s per-node index rather than a scan of every transition. Not
-  // `transitionFor(node, 'run')`, which returns the first match only: a node with an
-  // `onFailure` chain has one `run` per attempt (`run`, `run_2`, …, `compiler/gadget.ts`), and
-  // every one of them is a run of that node.
-  for (const node of compiled.analysis.cyclic) {
-    for (const t of compiled.netMap.transitionsOf(node)) {
-      if (t.role === 'run') names.add(t.name);
-    }
-  }
-  return names;
-}
-
-/** A {@link Witness} in the shape the report already renders. */
-export function witnessCounterexample(witness: Witness): Counterexample {
-  const nodePath: string[] = [];
-  for (const step of witness.path) {
-    if (step.node !== null && !nodePath.includes(step.node)) nodePath.push(step.node);
-  }
-  return {
-    nodePath,
-    steps: witness.path,
-    stuckMarking: witness.marking,
-    // A path in the state-class graph *is* a firing sequence of the timed net
-    // (Berthomieu-Diaz), so unlike an SMT derivation set it needs no replay to be ordered.
-    confirmed: true,
-    ordered: true,
-  };
-}
-
-/**
- * Which of a set of places some class marks **together**, with the class that does it.
- * Produced by {@link StateSpace.coMarkings} in one pass, so `'all-pairs'` mutual exclusion
- * costs the same as a single pair.
- */
-export class CoMarkings {
-  private readonly pairs: ReadonlyMap<string, StateClass>;
-  private readonly decode: (sc: StateClass) => Witness;
-
-  /** @internal Built by {@link StateSpace.coMarkings}. */
-  constructor(pairs: ReadonlyMap<string, StateClass>, decode: (sc: StateClass) => Witness) {
-    this.pairs = pairs;
-    this.decode = decode;
-  }
-
-  /**
-   * A class marking `a` and `b` together, decoded; `null` when none does. The pair is stored
-   * once, in the order the pass met the two places, so both orders are probed here.
-   */
-  witness(a: Place<unknown>, b: Place<unknown>): Witness | null {
-    const sc = this.pairs.get(`${a.name} ${b.name}`) ?? this.pairs.get(`${b.name} ${a.name}`);
-    return sc === undefined ? null : this.decode(sc);
-  }
-}
+export { rethrowIfBug } from './rethrow-if-bug.js';
+export { DEFAULT_MAX_CLASSES, effectiveMaxClasses } from './state-space/cap.js';
+export { MAX_WITNESSES } from './state-space/classify.js';
+export { CoMarkings } from './state-space/co-markings.js';
+export { loopTransitions } from './state-space/cyclic-runs.js';
+export { witnessCounterexample } from './state-space/decode.js';
+export {
+  HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES, TERMINAL_ROLES, restRolesFor, terminalKindOf,
+} from './state-space/roles.js';
+export type { TruncationShape } from './state-space/truncation.js';
 
 /**
  * One exploration of the compiled net's state-class graph, and every question this route can
@@ -360,6 +130,9 @@ export class CoMarkings {
  *
  * Construction never throws: a rejected net (CORE-043) or any other build failure leaves
  * {@link error} set and {@link usable} false, so every caller falls back to the SMT route.
+ *
+ * What the classes say — peaks, co-markings, strandings — is {@link ExploredClasses}
+ * (`state-space/explored-classes.ts`); this class adds how the exploration ran.
  *
  * ## The expanded prefix, and why it is tracked
  *
@@ -388,15 +161,7 @@ export class CoMarkings {
  * module leans on: every reachable *quiescent* class is represented, and a class's
  * `enabledTransitions` is the real enabled set of its marking.
  */
-export class StateSpace {
-  private readonly graph: StateClassGraph | null;
-  private readonly map: NetMapView;
-  private readonly peakTokens = new Map<string, number>();
-  private readonly peakClass = new Map<string, StateClass>();
-  private readonly strandedBy = new Map<string, StateClass>();
-  private readonly strandingClasses: StateClass[] = [];
-  private parents: Map<StateClass, { readonly from: StateClass; readonly transition: Transition }> | null = null;
-
+export class StateSpace extends ExploredClasses {
   /** The cap the enumeration ran with: {@link effectiveMaxClasses} of the requested one. */
   readonly maxClasses: number;
   /** What the caller asked for. Above {@link maxClasses} when the heap could not hold it. */
@@ -405,12 +170,6 @@ export class StateSpace {
   readonly complete: boolean;
   readonly elapsedMs: number;
   readonly error: string | null;
-  /** Classes with nothing enabled, plus the time-dead ones inside the expanded prefix. */
-  readonly quiescentClasses: number;
-  /** Quiescent classes that are designed terminals (paused / halted). */
-  readonly terminalClasses: number;
-  /** How many classes the BFS expanded: the prefix a bounded claim may be made over. */
-  readonly expandedClasses: number;
   /**
    * How many transitions a cyclic-node run is counted over ({@link loopTransitions}) — the
    * divisor between {@link boundedCyclicRuns} and complete passes of the loop body.
@@ -424,8 +183,8 @@ export class StateSpace {
    * to bound), or when not even one whole cyclic-node run is closed.
    *
    * This is what turns a truncated cyclic graph from "nothing can be said" into a **bounded**
-   * verdict — sound, and clearly not a proof. See {@link StateSpace.boundedCyclicRuns} for
-   * the closure argument.
+   * verdict — sound, and clearly not a proof. See `state-space/cyclic-runs.ts`
+   * `closedCyclicRuns` for the closure argument.
    */
   readonly boundedCyclicRuns: number | null;
 
@@ -438,8 +197,7 @@ export class StateSpace {
     error: string | null,
     loops: ReadonlySet<string>,
   ) {
-    this.graph = graph;
-    this.map = map;
+    super(graph, map);
     this.maxClasses = maxClasses;
     this.requestedMaxClasses = requestedMaxClasses;
     this.elapsedMs = elapsedMs;
@@ -447,55 +205,13 @@ export class StateSpace {
     this.classes = graph === null ? 0 : graph.size();
     this.complete = graph !== null && graph.isComplete();
     this.loopSteps = loops.size;
-
-    let quiescent = 0;
-    let terminal = 0;
-    if (graph === null) {
-      this.expandedClasses = 0;
-      this.quiescentClasses = 0;
-      this.terminalClasses = 0;
-      this.boundedCyclicRuns = null;
-      return;
-    }
-
-    const classes = graph.stateClasses();
-    // One past the last class that recorded an outgoing edge. Everything before it was
-    // popped and expanded (FIFO order); everything after it either has nothing enabled — so
-    // it needs no expansion — or is frontier.
-    let lastExpanded = 0;
-    for (let i = 0; i < classes.length; i++) {
-      if (graph.outgoingBranchEdges(classes[i]!).size > 0) lastExpanded = i + 1;
-    }
-    this.expandedClasses = this.complete ? classes.length : lastExpanded;
-
-    for (let i = 0; i < classes.length; i++) {
-      const sc = classes[i]!;
-      const marked = sc.marking.placesWithTokens();
-      for (const place of marked) {
-        const count = sc.marking.tokens(place);
-        if (count > (this.peakTokens.get(place.name) ?? 0)) {
-          this.peakTokens.set(place.name, count);
-          this.peakClass.set(place.name, sc);
-        }
-      }
-      if (!this.isQuiescent(graph, sc, this.wasExpanded(i, sc))) continue;
-      quiescent++;
-      const kind = terminalKindOf(marked.map((p) => this.roleOf(p)));
-      if (kind !== 'none') terminal++;
-      const rest = restRolesFor(kind);
-      const pending = marked.filter((p) => !rest.has(this.roleOf(p)));
-      if (pending.length === 0) continue;
-      if (this.strandingClasses.length < MAX_WITNESSES) this.strandingClasses.push(sc);
-      for (const p of pending) if (!this.strandedBy.has(p.name)) this.strandedBy.set(p.name, sc);
-    }
-    this.quiescentClasses = quiescent;
-    this.terminalClasses = terminal;
-    this.boundedCyclicRuns = this.closedCyclicRuns(graph, loops);
+    this.boundedCyclicRuns = graph === null ? null : closedCyclicRuns(graph, loops, this.expandedClasses);
   }
 
   /**
    * Builds the graph, bounded by `maxClasses`. Timed, and never throws. **The single seam
-   * where the graph is constructed** — see the class note on swapping in a reduced builder.
+   * where the graph is constructed** (`state-space/build.ts`) — see the class note on swapping
+   * in a reduced builder.
    *
    * The environment-place arguments are deliberately omitted, and that is a soundness
    * argument rather than a convenience: `ignore()` models an environment place as one that
@@ -520,247 +236,27 @@ export class StateSpace {
     // The cap the caller asked for, lowered to what the heap can hold: a class cap bounds
     // the class count, and only this bounds the memory (see {@link effectiveMaxClasses}).
     const cap = effectiveMaxClasses(maxClasses);
+    const space = (graph: StateClassGraph | null, error: string | null): StateSpace =>
+      new StateSpace(graph, map, cap, maxClasses, performance.now() - started, error, loops);
     try {
-      // `StateClassGraph` never reads a transition's `matchSpec`: its enablement is the
-      // structural token counts, so it explores a ν-join as an uncorrelated one. That is
-      // libpetri's **over-approximation fallback**, and the fallback is sound for reachability
-      // safety but *not* for quiescence — "a `Proven` on a quiescence property never comes from
-      // the fallback" (`nu-nets.md` §8). `SmtVerifier` routes around this; building the graph
-      // directly, as this module does, does not. Nothing here compiles a `matchSpec` today
-      // (ADR 0008 records why the agent round does not use one), so this is a tripwire for
-      // whoever adds the first: it must not silently start answering with a coarser abstraction.
-      for (const t of net.transitions) {
-        if ((t as { matchSpec?: unknown }).matchSpec != null) {
-          throw new Error(
-            `transition '${t.name}' carries a ν-net matchSpec; the state-class graph is match-blind, ` +
-            'so its quiescence verdicts would come from an over-approximation that is not sound for ' +
-            'them (nu-nets.md §8). Route this net through SmtVerifier with budgetPlaces declared.');
-        }
-      }
-      const graph = StateClassGraph.build(net, initialMarking, cap);
-      return new StateSpace(graph, map, cap, maxClasses, performance.now() - started, null, loops);
+      return space(buildStateClassGraph(net, initialMarking, cap), null);
     } catch (e) {
       // A graph that could not be built is a route that cannot answer, and every family falls
       // back — which is right for "the net is outside the fragment" or "the build ran out of
       // room", and wrong for a defect in this module, where it would delete the solver-free
       // route from every report while leaving the report well-formed and merely weaker.
       rethrowIfBug(e);
-      const message = e instanceof Error ? e.message : String(e);
-      return new StateSpace(null, map, cap, maxClasses, performance.now() - started, message, loops);
+      return space(null, messageOf(e));
     }
-  }
-
-  /** Whether the route produced a graph at all. `false` means every caller must fall back. */
-  get usable(): boolean {
-    return this.graph !== null;
   }
 
   /**
    * Why the enumeration stopped, from evidence rather than from a default: see
-   * {@link TruncationCause}. `null` when the graph is complete or unusable.
-   *
-   * The `'parallelism'` arm used to be the catch-all, which reported "independent parallel
-   * branches (NU-053)" for a four-node chain whose only problem was a cap set below 50.
+   * {@link TruncationCause} and `state-space/truncation.ts`. `null` when the graph is
+   * complete or unusable.
    */
   truncationCause(shape: TruncationShape): TruncationCause | null {
     if (this.complete || this.graph === null) return null;
-    if (this.maxClasses <= 0) return 'off';
-    if (shape.hasCycle) return 'cycle';
-    // An agent's budget is named before parallelism because it is the cause with a knob: the
-    // branching an agent workflow shows is its own round, and lowering `maxToolCalls` is what
-    // closes the graph, where nothing closes an independent fan-out but a reduction libpetri
-    // does not have (NU-053).
-    if (shape.agents.length > 0) return 'tool-calls';
-    return shape.independentBranches ? 'parallelism' : 'cap';
-  }
-
-  /** The largest token count any explored class puts on `place`. */
-  peak(place: Place<unknown>): number {
-    return this.peakTokens.get(place.name) ?? 0;
-  }
-
-  /** Whether any explored class marks `place`. */
-  everMarked(place: Place<unknown>): boolean {
-    return this.peak(place) > 0;
-  }
-
-  /** The class achieving {@link peak} on `place`, decoded; `null` when the place never marks. */
-  peakWitness(place: Place<unknown>): Witness | null {
-    const sc = this.peakClass.get(place.name);
-    return sc === undefined ? null : this.decode(sc);
-  }
-
-  /** Which of `places` some explored class marks together. One pass over the classes. */
-  coMarkings(places: readonly Place<unknown>[]): CoMarkings {
-    const wanted = new Set(places.map((p) => p.name));
-    const pairs = new Map<string, StateClass>();
-    if (this.graph !== null) {
-      for (const sc of this.graph.stateClasses()) {
-        const marked = sc.marking.placesWithTokens().map((p) => p.name).filter((n) => wanted.has(n));
-        // One key per unordered pair: `witness` probes both orders.
-        for (let i = 0; i < marked.length; i++) {
-          for (let j = i + 1; j < marked.length; j++) {
-            const key = `${marked[i]} ${marked[j]}`;
-            if (!pairs.has(key)) pairs.set(key, sc);
-          }
-        }
-      }
-    }
-    return new CoMarkings(pairs, (sc) => this.decode(sc));
-  }
-
-  /** The first stranding that leaves work on `place`, decoded; `null` when none does. */
-  strandedAt(place: Place<unknown>): Stranding | null {
-    const sc = this.strandedBy.get(place.name);
-    return sc === undefined ? null : this.decode(sc);
-  }
-
-  /** Every place some stranding leaves work on, in first-seen order. */
-  strandedPlaces(): readonly string[] {
-    return [...this.strandedBy.keys()];
-  }
-
-  /** The strandings found, capped at {@link MAX_WITNESSES}, decoded on demand. */
-  strandings(): readonly Stranding[] {
-    return this.strandingClasses.map((sc) => this.decode(sc));
-  }
-
-  // ==================== internals ====================
-
-  private roleOf(place: Place<unknown>): PlaceRole {
-    // A place NetMap does not know cannot be classified as rest, so it counts as pending
-    // work: the unsound direction would be calling work "residue", never the other way.
-    return this.map.place(place.name)?.role ?? 'running';
-  }
-
-  /**
-   * Whether the BFS computed this class's successors. Inside the prefix it did; outside it,
-   * only a class with nothing enabled is settled — it has no successors to compute.
-   */
-  private wasExpanded(index: number, sc: StateClass): boolean {
-    return index < this.expandedClasses || sc.enabledTransitions.length === 0;
-  }
-
-  /**
-   * A class nothing can fire from. `enabledTransitions.length === 0` is decisive whatever
-   * the BFS did. A class with enabled transitions and no successors is a **time-dead**
-   * deadlock — every successor's firing domain was empty — but only where the BFS actually
-   * tried; on the frontier the same shape is an unexplored class and evidence of nothing.
-   */
-  private isQuiescent(graph: StateClassGraph, sc: StateClass, expanded: boolean): boolean {
-    if (sc.enabledTransitions.length === 0) return true;
-    return expanded && graph.successors(sc).size === 0;
-  }
-
-  /**
-   * The largest `k >= 1` such that every class reachable by a run firing at most `k` loop
-   * transitions lies in the expanded prefix.
-   *
-   * The argument, which is the whole soundness of the bounded verdict. Let `A` be the
-   * expanded prefix and `B` the rest, and let `iter(C)` be the fewest loop firings on any
-   * path to `C` **through recorded edges**. Every class in `A` had all its successors
-   * recorded, so a run that stays inside `A` is fully represented. Take
-   * `k = min{ iter(C) : C in B } - 1` and induct on run length: a run firing at most `k`
-   * loop transitions reaches only classes whose `iter` is at most `k`, each is therefore not
-   * in `B`, so it is in `A` and its successors are recorded. Hence every run within the
-   * bound — and every marking it comes to rest in — was enumerated and classified, and
-   * "nothing bad happens within `k` iterations" is a fact rather than an extrapolation.
-   *
-   * `iter` is a shortest path with weights 1 (a loop transition) and 0 (everything else), so
-   * it is computed by Dial's algorithm: one bucket per distance, and 0-weight successors
-   * appended to the bucket being drained.
-   */
-  private closedCyclicRuns(graph: StateClassGraph, loops: ReadonlySet<string>): number | null {
-    if (graph.isComplete() || loops.size === 0) return null;
-    const classes = graph.stateClasses();
-    const index = new Map<StateClass, number>();
-    for (let i = 0; i < classes.length; i++) index.set(classes[i]!, i);
-    const start = index.get(graph.initialClass);
-    if (start === undefined) return null;
-
-    const UNREACHED = -1;
-    const iter = new Int32Array(classes.length).fill(UNREACHED);
-    iter[start] = 0;
-    const buckets: number[][] = [[start]];
-    for (let d = 0; d < buckets.length; d++) {
-      const bucket = buckets[d];
-      if (bucket === undefined) continue;
-      // `bucket` grows while it is drained: a 0-weight successor belongs to this very
-      // distance, and appending it here is what makes Dial's algorithm exact for 0/1 weights.
-      for (let b = 0; b < bucket.length; b++) {
-        const i = bucket[b]!;
-        if (iter[i] !== d) continue;
-        for (const [transition, edges] of graph.outgoingBranchEdges(classes[i]!)) {
-          const step = loops.has(transition.name) ? 1 : 0;
-          for (const edge of edges) {
-            const j = index.get(edge.target);
-            if (j === undefined) continue;
-            const next = d + step;
-            if (iter[j] === UNREACHED || next < iter[j]!) {
-              iter[j] = next;
-              (buckets[next] ??= []).push(j);
-            }
-          }
-        }
-      }
-    }
-
-    let frontier = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < classes.length; i++) {
-      if (this.wasExpanded(i, classes[i]!)) continue;
-      const d = iter[i]!;
-      // An unexpanded class the recorded edges do not reach cannot bound anything: no run
-      // through recorded edges gets there, so it constrains no `k`.
-      if (d !== UNREACHED && d < frontier) frontier = d;
-    }
-    if (!Number.isFinite(frontier)) return null;
-    const k = frontier - 1;
-    // `k = 0` would only say "nothing goes wrong in runs where the loop never runs", which
-    // is not a statement about the loop at all. One cyclic-node run is the floor.
-    return k >= 1 ? k : null;
-  }
-
-  /** BFS parents from the initial class, built once, for the firing paths. */
-  private buildParents(graph: StateClassGraph): Map<StateClass, { from: StateClass; transition: Transition }> {
-    const parents = new Map<StateClass, { from: StateClass; transition: Transition }>();
-    const seen = new Set<StateClass>([graph.initialClass]);
-    // An index cursor rather than `shift()`: the graph can hold `maxClasses` entries, and a
-    // shifting queue over 200 000 of them is a needless O(n^2) risk.
-    const queue: StateClass[] = [graph.initialClass];
-    for (let head = 0; head < queue.length; head++) {
-      const current = queue[head]!;
-      for (const [transition, edges] of graph.outgoingBranchEdges(current)) {
-        for (const edge of edges) {
-          if (seen.has(edge.target)) continue;
-          seen.add(edge.target);
-          parents.set(edge.target, { from: current, transition });
-          queue.push(edge.target);
-        }
-      }
-    }
-    return parents;
-  }
-
-  private decode(sc: StateClass): Stranding {
-    const graph = this.graph!;
-    this.parents ??= this.buildParents(graph);
-    const steps: CounterexampleStep[] = [];
-    let cursor: StateClass | undefined = sc;
-    while (cursor !== undefined && cursor !== graph.initialClass) {
-      const parent: { from: StateClass; transition: Transition } | undefined = this.parents.get(cursor);
-      if (parent === undefined) break;
-      steps.push(decodeStep(parent.transition.name, this.map));
-      cursor = parent.from;
-    }
-    steps.reverse();
-    const marking = decodeMarking(sc.marking, this.map);
-    const kind = terminalKindOf(marking.map((p) => p.role));
-    const rest = restRolesFor(kind);
-    return {
-      stranded: marking.filter((p) => p.role === null || !rest.has(p.role)),
-      marking,
-      path: steps,
-      terminal: kind,
-    };
+    return truncationCauseOf(this.maxClasses, shape);
   }
 }
