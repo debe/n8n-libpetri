@@ -112,7 +112,7 @@ import { truncationCauseOf, type TruncationShape } from './state-space/truncatio
 import type { TruncationCause } from './types.js';
 
 export { rethrowIfBug } from './rethrow-if-bug.js';
-export { DEFAULT_MAX_CLASSES, effectiveMaxClasses } from './state-space/cap.js';
+export { DEFAULT_MAX_CLASSES, FIRST_PASS_MAX_CLASSES, effectiveMaxClasses } from './state-space/cap.js';
 export { MAX_WITNESSES } from './state-space/classify.js';
 export { CoMarkings } from './state-space/co-markings.js';
 export { loopTransitions } from './state-space/cyclic-runs.js';

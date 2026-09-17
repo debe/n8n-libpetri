@@ -32,6 +32,33 @@ const EXPORT = {
 };
 
 describe('workflow JSON adapter', () => {
+  it('drops sticky notes, name or no name, and keeps every other node', () => {
+    // A published export may omit `name` on an annotation: `5385.json` in the template corpus
+    // carries four nameless sticky notes among nineteen nodes, and requiring a name before
+    // the type check rejected the whole workflow. The live adapter has always dropped them
+    // (`NON_EXECUTABLE_TYPES`), so a workflow the scheduler runs must not be one the CLI
+    // refuses. They are unwired by construction — `connections` is keyed by name.
+    const withNotes = {
+      ...EXPORT,
+      nodes: [
+        { id: 'sticky-1', type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [0, -200], parameters: {} },
+        ...EXPORT.nodes,
+        { id: 'sticky-2', name: 'Note', type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [0, 200], parameters: {} },
+      ],
+    };
+    const { description } = describeWorkflowJson(withNotes);
+    expect(description.nodes.map((n) => n.name)).toEqual(['Webhook', 'If', 'Left', 'Right', 'Merge']);
+    expect(description.startNode).toBe('Webhook');
+    // The kept nodes' ids do not move when an annotation is dropped from in front of them.
+    const plain = describeWorkflowJson(EXPORT).description;
+    expect(description.nodes.map((n) => n.id)).toEqual(plain.nodes.map((n) => n.id));
+  });
+
+  it('still rejects a nameless node that is not an annotation', () => {
+    const broken = { ...EXPORT, nodes: [{ id: 'x', type: 'n8n-nodes-base.set', typeVersion: 3, position: [0, 0] }, ...EXPORT.nodes] };
+    expect(() => describeWorkflowJson(broken)).toThrow(/has no name/);
+  });
+
   it('reads nodes, main connections and the start node', () => {
     const { description, warnings } = describeWorkflowJson(EXPORT);
     expect(description.name).toBe('diamond-export');

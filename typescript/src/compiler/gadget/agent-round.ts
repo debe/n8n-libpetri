@@ -106,7 +106,12 @@ export function buildAgentRound(
   const callsOutName = emit(Transition.builder(TRANSITION.callsOut)
     .inputs(one(agent.dispatched), one(agent.queue), one(idle), one(budget))
     .inhibitors(agent.calls, agent.outstanding, halt, pause)
-    .outputs(outPlace(running))
+    // The re-entry lands on `A/running_failed`, a running place only this transition writes and
+    // only `A_run_failed` consumes, so the primary run is unreachable from here: the activation
+    // fails with `toolCallBudgetExceeded` before `runNode` and never opens another round. That
+    // is what removes the `calls_out → run → done_req → calls_out` lasso the executor never
+    // runs — structurally, not with an inhibitor, so a linear ranking can still bound the round.
+    .outputs(outPlace(agent.runningFailed))
     .priority(depth - 1).build(), { role: 'calls-out' });
 
   // `A_rounds_out`: the round budget is spent and a round is still open, so the agent can

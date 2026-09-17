@@ -170,6 +170,30 @@ describe('verify report rendering', () => {
     expect(text).toContain('Unproven (1)');
     expect(text).toContain('a check: Z3 answered unknown');
     expect(text).toContain('1 proven, 1 violated, 0 bounded, 1 unknown');
+    // A `dead-nodes` violation is the *unreachable* direction — the proof direction — so it is
+    // a finding outright and must not carry the proper-completion candidate note.
+    expect(text).not.toContain('priority-blind');
+  });
+
+  it('a proper-completion violation prints as a candidate, not a defect', () => {
+    // Both routes explore a priority-blind abstraction (VER-004), so a stranding may be an
+    // interleaving the executor never takes. Measured: the OR round overflow, where a stranding
+    // the closed graph reports is reached by no run of either engine at k = 1, 4 or 8
+    // (`docs/verification.md`, "That caveat has teeth"). Printing it as a defect is how a user
+    // stops believing the ones that are real.
+    const text = renderReport(report({
+      checks: [
+        check({
+          property: 'proper-completion', verdict: 'violated',
+          explanation: 'Collector input 0 can be left stranded',
+          subject: { kind: 'join-input', node: 'Collector', inputIndex: 0, place: 'p' },
+        }),
+      ],
+    }));
+    expect(text).toContain('Findings (1)');
+    expect(text).toContain('1 of these are proper-completion candidates');
+    expect(text).toContain('priority-blind');
+    expect(text).toContain('Replay one against the executor');
   });
 
   it('a `bounded` verdict gets its own section and is never counted among the proofs', () => {

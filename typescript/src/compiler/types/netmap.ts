@@ -24,7 +24,7 @@ import type { Place } from 'libpetri';
  *   ordinary failure (`X/failed_i`), so one step answers both.
  */
 export type TransitionRole =
-  | 'start' | 'start-unmet' | 'run' | 'route' | 'done' | 'skip' | 'arm' | 'clear' | 'retry' | 'exhausted'
+  | 'start' | 'start-unmet' | 'run' | 'run-failed' | 'route' | 'done' | 'skip' | 'arm' | 'clear' | 'retry' | 'exhausted'
   | 'sink' | 'attempt' | 'deadline'
   | 'done-request' | 'dispatch' | 'collect' | 'resume' | 'rounds-out' | 'calls-out';
 
@@ -55,7 +55,7 @@ export type PlaceRole =
   | 'idle' | 'running' | 'ok' | 'routed' | 'done' | 'skipped' | 'retry' | 'tries' | 'waiting' | 'stopped'
   | 'budget' | 'halt' | 'pause' | 'failed'
   | 'in-tool' | 'routed-request' | 'queue' | 'drained' | 'outstanding' | 'response'
-  | 'dispatched' | 'rounds' | 'calls';
+  | 'dispatched' | 'rounds' | 'calls' | 'running-failed';
 
 /** `tree`: the two ends are in different SCCs; `cycle`: both ends share one SCC. */
 export type EdgeKind = 'tree' | 'cycle';
@@ -99,6 +99,16 @@ export interface RunTransition extends TransitionInfoCommon {
    * its first attempt; `X_run_i` of an `onFailure` chain carries its own *i*.
    */
   readonly attempt: number;
+}
+
+export interface RunFailedTransition extends TransitionInfoCommon {
+  /**
+   * `A_run_failed`: an agent's budget-exceeded re-entry (ADR 0008). It runs the node off
+   * `A/running_failed`, which only `A_calls_out` writes, so the primary run is structurally
+   * unreachable from `A_calls_out` — no inhibitor, so a linear ranking can bound the round.
+   * Its out spec is the non-agent outcome, with no request branch.
+   */
+  readonly role: 'run-failed';
 }
 
 export interface RouteTransition extends TransitionInfoCommon {
@@ -184,7 +194,7 @@ export interface CallsOutTransition extends TransitionInfoCommon {
 
 /** One transition of the flat net, discriminated on {@link TransitionRole}. */
 export type TransitionInfo =
-  | StartTransition | StartUnmetTransition | RunTransition | RouteTransition | DoneTransition | SkipTransition
+  | StartTransition | StartUnmetTransition | RunTransition | RunFailedTransition | RouteTransition | DoneTransition | SkipTransition
   | ArmTransition | ClearTransition | RetryTransition | ExhaustedTransition | SinkTransition
   | AttemptTransition | DeadlineTransition
   | DoneRequestTransition | DispatchTransition | CollectTransition | ResumeTransition | RoundsOutTransition

@@ -37,3 +37,8 @@ conformance-results/
 
 # Working notes kept out of the repository (see tasks/todo.md §4b)
 notes/
+.code-graph/
+
+# `code-graph-mcp adopt` writes a copy of its own instructions wherever it is run; the root
+# CLAUDE.md already carries that section.
+typescript/CLAUDE.md

@@ -59,6 +59,7 @@ export function agentGadgetOf(c: Canon, agent: LocalAgent | null): AgentGadget |
   return agent === null ? null : {
     routedRequest: fin(agent.routedRequest), queue: fin(agent.queue), calls: fin(agent.calls), drained: fin(agent.drained),
     outstanding: fin(agent.outstanding), response: fin(agent.response), dispatched: fin(agent.dispatched), rounds: fin(agent.rounds),
+    runningFailed: fin(agent.runningFailed),
     tools: agent.tools, maxRounds: agent.maxRounds, roundsAssumed: agent.roundsAssumed,
     maxToolCalls: agent.maxToolCalls, toolCallsAssumed: agent.toolCallsAssumed,
   };

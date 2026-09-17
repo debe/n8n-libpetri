@@ -176,11 +176,12 @@ describe('join gadget (ADR 0003)', () => {
     expect(inhibitorNames(start)).toEqual(['_halt', '_pause']);
   });
 
-  it('X_skip needs every ready_i under inhibitor(hasdata) and the halt inhibitors; emits empties, skipped, free_*', () => {
+  it('X_skip needs every ready_i under inhibitor(hasdata) and the halt inhibitors; emits skipped and free_*', () => {
     const skip = transitionOf(c, 'Merge', 'skip');
     expect(inputNames(skip)).toEqual(['id:Merge/ready_0', 'id:Merge/ready_1']);
     expect(inhibitorNames(skip)).toEqual(['_halt', 'id:Merge/hasdata']);
-    expect(outputNames(skip)).toEqual(['id:End/in_empty', 'id:Merge/free_0', 'id:Merge/free_1', 'id:Merge/skipped']);
+    // No `End/in_empty`: nothing past the join reads a skip, so the skip ends here (ADR 0002).
+    expect(outputNames(skip)).toEqual(['id:Merge/free_0', 'id:Merge/free_1', 'id:Merge/skipped']);
   });
 
   it('NetMap: place <-> (node, port) for the join input places', () => {
@@ -227,7 +228,8 @@ describe('Merge chooseBranch: all inputs required, combinations enumerated', () 
       ['id:Merge/skip_ee', ['empty', 'empty']],
     ]);
     expect(inputNames(c.netMap.transitionObject('id:Merge/skip_de'))).toEqual(['id:Merge/ready_0_data', 'id:Merge/ready_1_empty']);
-    expect(outputNames(c.netMap.transitionObject('id:Merge/skip_ee'))).toEqual(['id:End/in_empty', 'id:Merge/free_0', 'id:Merge/free_1', 'id:Merge/skipped']);
+    // No `End/in_empty`: nothing past the join reads a skip, so the skip ends here (ADR 0002).
+    expect(outputNames(c.netMap.transitionObject('id:Merge/skip_ee'))).toEqual(['id:Merge/free_0', 'id:Merge/free_1', 'id:Merge/skipped']);
   });
 
   it('arms route into the data / empty ready variant', () => {

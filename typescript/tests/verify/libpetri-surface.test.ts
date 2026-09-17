@@ -1,9 +1,9 @@
 /**
  * The install this project cannot run on, refused with a message that says so (`tasks/todo.md`).
  *
- * The range asked for `libpetri@^5.0.0` until 5.1.0 shipped, and a registry install satisfied it
- * with a package predating VER-014 / VER-016 / VER-017. The floor is right now, so this guards a
- * downgrade or a stale lock rather than the default configuration. Every SMT query would then throw — loudly
+ * The range once asked for `libpetri@^5.0.0` while a registry install could satisfy it with a
+ * package predating VER-014 / VER-016 / VER-017. The floor is `^6.0.0` and right, so this guards
+ * a downgrade or a stale lock rather than the default configuration. Every SMT query would then throw — loudly
  * since `rethrowIfBug`, but from several frames inside a query, reading as a bug in this
  * project rather than as an install that predates the API. This check names the gap instead.
  */
@@ -24,12 +24,34 @@ describe('the libpetri surface this verifier requires', () => {
     delete proto['stateEquation'];
     try {
       expect(() => assertLibpetriSurface()).toThrow(/sinkPlacesWhen, stateEquation/);
-      expect(() => assertLibpetriSurface()).toThrow(/libpetri 5\.1\.0/);
+      expect(() => assertLibpetriSurface()).toThrow(/libpetri 6\.0\.0/);
       // Not a verdict and not a warning: an install this verifier cannot report honestly on.
-      expect(() => assertLibpetriSurface()).toThrow(/every proof missing/);
+      expect(() => assertLibpetriSurface()).toThrow(/proofs quietly missing/);
+      // And it says how to get back to a usable install rather than leaving the reader to guess.
+      expect(() => assertLibpetriSurface()).toThrow(/npm install libpetri@\^6\.0\.0/);
     } finally {
       proto['sinkPlacesWhen'] = saved.sinkPlacesWhen;
       proto['stateEquation'] = saved.stateEquation;
+    }
+  });
+
+  /**
+   * The half of the floor nothing in this project calls (VER-018 / VER-019).
+   *
+   * They are default-on in libpetri, so an install without them does not fail — it stops
+   * proving things. Measured 2026-09-16: every fallback proof on every fixture carried method
+   * `state-equation`, and without the phases `switch20` and `chain40` return nothing above
+   * k = 2. So the guard has to name them, and this pins that it does.
+   */
+  it('refuses a tree that predates the state-equation phase, which nothing here calls', () => {
+    const proto = SmtVerifier.prototype as unknown as Record<string, unknown>;
+    const saved = proto['stateEquationPhase'];
+    delete proto['stateEquationPhase'];
+    try {
+      expect(() => assertLibpetriSurface()).toThrow(/stateEquationPhase/);
+      expect(() => assertLibpetriSurface()).toThrow(/VER-018/);
+    } finally {
+      proto['stateEquationPhase'] = saved;
     }
   });
 

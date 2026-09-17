@@ -274,6 +274,14 @@ export interface AgentGadget {
   readonly dispatched: Place<unknown>;
   /** `A/rounds`: the round budget, seeded with `maxRounds` units and consumed one per `A_resume`. */
   readonly rounds: Place<unknown>;
+  /**
+   * `A/running_failed`: the running place `A_calls_out`'s re-entry lands on, consumed only by
+   * `A_run_failed`. The primary run is therefore structurally unreachable from `A_calls_out` —
+   * no inhibitor, so a linear ranking can bound the round — and the value-blind
+   * `calls_out → run → done_req → calls_out` lasso, which the executor never runs, has no edge.
+   * Carries the re-entry unit for one step and never rests.
+   */
+  readonly runningFailed: Place<unknown>;
   /** Tool nodes this agent may dispatch, in `A_dispatch`'s `xor` branch order. At least one: that is what makes it an agent. */
   readonly tools: readonly [string, ...string[]];
   /** `maxRounds` as compiled: the seed of `A/rounds`. */
@@ -316,6 +324,12 @@ export interface NodeGadgetCommon {
   readonly done: Place<unknown>;
   /** Present iff the node has a skip transition or is referenced (the reference twin reads it). */
   readonly skipped: Place<unknown> | null;
+  /**
+   * `X_skip` deposits the empty of every outgoing tree edge. False when no successor reads a
+   * skip or feeds a node that does — a join or OR slot, a `$('X')` reference, a cycle or a
+   * loop — so the skip ends at this node (ADR 0002, `analysis/skip-observers.ts`).
+   */
+  readonly skipForwards: boolean;
   /**
    * The `onFailure` chain, one entry per attempt, ascending (ADR 0009). Empty when the node
    * declares no policy, in which case {@link NodeGadgetCommon.retry} carries n8n's own

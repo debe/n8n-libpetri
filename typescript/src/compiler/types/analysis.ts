@@ -180,6 +180,13 @@ export interface WorkflowAnalysis {
   readonly referenced: ReadonlySet<string>;
   /** Referenced nodes unreachable from every start node: `Y/skipped` is seeded. */
   readonly seededSkipped: ReadonlySet<string>;
+  /**
+   * Nodes that must hear of an upstream skip: those that read one — a join or OR slot, a
+   * `$('X')` reference, a cycle or a loop — and every node that feeds one
+   * (`analysis/skip-observers.ts`). A skipped node forwards `empty` on its outgoing tree edges
+   * only when one of its successors is in this set (ADR 0002).
+   */
+  readonly skipObservable: ReadonlySet<string>;
   /** Deduplicated `ai_tool` connections in canonical order (agent canvas index, then tool). */
   readonly toolConnections: readonly ToolConnection[];
   /** Agents that may dispatch each tool node. Only tool-form nodes appear. */

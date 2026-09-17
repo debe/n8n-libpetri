@@ -14,8 +14,12 @@ export function skipAction(g: NodeGadget): TransitionAction {
   const { skipped } = g;
   if (skipped === null) throw new InternalCompilerError(`internal: node '${g.node}' has a skip transition but no skipped place`);
   const refunds = g.form === 'join' || g.form === 'choose-branch' ? g.inputs.map((i) => i.free) : [];
+  // Exactly the empties `X_skip`'s Out spec names: none past the last node that reads a skip.
+  const empties = g.skipForwards
+    ? g.outputs.flatMap((out) => out.edges.flatMap((e) => (e.empty !== null ? [e.empty] : [])))
+    : [];
   return async (ctx) => {
-    for (const out of g.outputs) for (const e of out.edges) if (e.empty !== null) ctx.output(e.empty, null);
+    for (const empty of empties) ctx.output(empty, null);
     ctx.output(skipped, null);
     for (const free of refunds) ctx.output(free, null);
   };

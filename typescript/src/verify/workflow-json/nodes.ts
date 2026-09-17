@@ -1,5 +1,6 @@
 /** A workflow export's `nodes` array → the compiler's {@link NodeDescription}s. */
 import type { NodeDescription, OnError } from '../../compiler/index.js';
+import { NON_EXECUTABLE_TYPES } from '../../n8n/adapter/graph.js';
 import { nodePrefixOf } from '../../n8n/adapter/node.js';
 import { asRecord } from './checked.js';
 
@@ -65,13 +66,32 @@ export interface JsonNodes {
   readonly names: ReadonlySet<string>;
 }
 
-/** `root.nodes`, every entry an object with a name no other entry has. */
+/**
+ * `root.nodes`, every entry an object with a name no other entry has — annotations dropped.
+ *
+ * The drop is {@link NON_EXECUTABLE_TYPES}, the live adapter's own set, because one net serves
+ * execution and verification: a workflow the scheduler runs must not be one the CLI refuses.
+ * It has to happen *before* the name check, since an export may omit `name` on exactly these
+ * nodes — measured on the template corpus, `5385.json` carries four nameless sticky notes among
+ * nineteen nodes, and requiring a name first rejected all nineteen. They are unwired by
+ * construction (`connections` is keyed by name), so dropping them changes no edge.
+ *
+ * Kept nodes keep their **original** index, so an id prefix and a fallback position do not move
+ * when an annotation is removed from in front of them.
+ */
 export function nodesOf(root: Record<string, unknown>): JsonNodes {
   const rawNodes = root['nodes'];
   if (!Array.isArray(rawNodes)) throw new Error('workflow has no `nodes` array');
+  const kept: { raw: Record<string, unknown>; index: number }[] = [];
+  rawNodes.forEach((n, i) => {
+    const raw = asRecord(n, `nodes[${i}]`);
+    const type = raw['type'];
+    if (typeof type === 'string' && NON_EXECUTABLE_TYPES.has(type)) return;
+    kept.push({ raw, index: i });
+  });
   const used = new Set<string>();
-  const nodes = rawNodes.map((n, i) => nodeDescriptionOf(asRecord(n, `nodes[${i}]`) as RawNode, i, used));
+  const nodes = kept.map(({ raw, index }) => nodeDescriptionOf(raw as RawNode, index, used));
   const names = new Set(nodes.map((n) => n.name));
   if (names.size !== nodes.length) throw new Error('workflow has two nodes of the same name');
-  return { nodes, records: rawNodes.map((n, i) => asRecord(n, `nodes[${i}]`)), names };
+  return { nodes, records: kept.map((k) => k.raw), names };
 }

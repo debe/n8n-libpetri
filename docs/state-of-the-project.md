@@ -150,7 +150,10 @@ fixtures whose branches interleave: `diamond` **306**, `multiProducer` **211**,
 `ifBothOutputs` **697**; `linear`, `fanOut`, `chain40` and `wide8` are unchanged. And
 `loopOverItems` is `bounded` **on the graph route**, which is what this table measures; the SMT
 fallback proves it outright in 0.5 s since the same day, so a full report on it reads `proven`
-(ADR 0007 §13).
+(ADR 0007 §13). On 2026-09-15 a skip stopped being forwarded past the last node that reads it
+(ADR 0002, amendment), which lowered every fixture with a skip nothing downstream observed:
+`linear` **37**, `diamond` **295**, `chooseBranch` **73**, `ifBothOutputs` **695**, `chain40`
+**407**; the join-heavy `fanOut`, `multiProducer` and `wide8` did not move, and no verdict did.
 
 ## Compatibility boundary
 

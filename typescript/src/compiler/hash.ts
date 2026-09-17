@@ -29,8 +29,16 @@ export function structuralHash(analysis: WorkflowAnalysis): string {
     // their tool wiring would otherwise share a cached net and an agent would dispatch through
     // the wrong one; 9: the tool-call budget `A/calls` replaces the `A/pending` count, and its
     // seed `maxToolCalls` is part of the marking; 10: the resolved `onFailure` chain and its
-    // per-attempt deadline, which decide how many `running` / `failed` places the node has
-    v: 10,
+    // per-attempt deadline, which decide how many `running` / `failed` places the node has;
+    // 11: a skip forwards its empties only where something downstream reads them
+    // (`analysis/skip-observers.ts`), so `X_skip` of a node past the last observer writes none;
+    // 12: an agent's budget-exceeded re-entry (`A_calls_out`) runs `A_run_failed`, a run with no
+    // request branch, so the value-blind graph no longer explores the
+    // `calls_out → run → done_req → calls_out` lasso the executor never runs (ADR 0008);
+    // 13: that re-entry lands on its own place `A/running_failed` (consumed only by
+    // `A_run_failed`) instead of `A/running` guarded by an inhibitor, so the primary run is
+    // structurally unreachable from `A_calls_out` and a linear ranking can bound the round
+    v: 13,
     start: analysis.startNode,
     starts: [...analysis.startNodes],
     nodes: analysis.nodes.map((a) => ({

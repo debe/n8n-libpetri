@@ -124,7 +124,7 @@ import { assembleReport } from './report/assemble.js';
 import { completionSinksOf, smtRefusalFor, type Context } from './route.js';
 import { alternativeEntryReach, truncationShapeOf } from './shape.js';
 import { assertLibpetriSurface, resolveSolver } from './solver.js';
-import { DEFAULT_MAX_CLASSES, StateSpace, loopTransitions } from './state-class.js';
+import { DEFAULT_MAX_CLASSES, FIRST_PASS_MAX_CLASSES, StateSpace, loopTransitions } from './state-class.js';
 import type { PropertyName, VerificationReport, VerifyOptions } from './types.js';
 import { PROPERTY_NAMES } from './types.js';
 
@@ -171,14 +171,81 @@ export async function verify(
   return verifyCompiled(compiled, options);
 }
 
-/** Verifies an already compiled workflow (the scheduler's own `CompiledWorkflow`). */
+/**
+ * Verifies an already compiled workflow (the scheduler's own `CompiledWorkflow`).
+ *
+ * ## The staged route, and why the cap is not a constant
+ *
+ * The graph leads (NU-053) because on the nets where it closes it is exact, solver-free, and an
+ * order of magnitude cheaper — it is explored **once** and read by every family, where the SMT
+ * route pays per query. Measured: `fanOut8` at k = 1 decides its whole report from a closed
+ * graph in 135 ms, against 1.4 s through the solver.
+ *
+ * What was wrong was the *cap*. A flat 200 000 meant a net whose graph cannot close discovered
+ * that by burning all of it — 18.5 s on `fanOut8` at k = 4 — before falling through to a route
+ * that answers the same question in under a second and does not move with k. So the first pass
+ * stops at {@link FIRST_PASS_MAX_CLASSES}, and the full cap is spent only when it can still
+ * change an answer:
+ *
+ * 1. **first pass** at the staged cap. Closed ⇒ exact, and nothing more is asked.
+ * 2. truncated but every check `proven` (the SMT route decided them) ⇒ done. This is the case
+ *    the staging exists for.
+ * 3. anything else ⇒ **escalate** to the caller's cap and re-run. A `violated` needs the graph
+ *    for its witness (the solver route is weak there), and a `bounded` is certified over the
+ *    explored prefix, so a bigger prefix is a wider claim.
+ *
+ * Staging is skipped entirely when the caller set `maxClasses` (their number, not ours) and on
+ * a **cyclic** workflow, whose space is unbounded: it always truncates, so a first pass could
+ * only ever narrow its `bounded` verdict and never save a second one.
+ */
 export async function verifyCompiled(
   compiled: CompiledWorkflow, options: VerifyOptions = {},
 ): Promise<VerificationReport> {
   assertLibpetriSurface();
   const started = performance.now();
   const properties = selectProperties(options);
-  const ctx = contextFor(compiled, options);
+  const full = options.maxClasses ?? DEFAULT_MAX_CLASSES;
+  const staged = stagedCap(compiled, options, full);
+
+  const first = await runReport(compiled, options, properties, staged, started);
+  if (staged === full || !worthEscalating(first)) return first;
+  return runReport(compiled, options, properties, full, started);
+}
+
+/**
+ * The first pass's cap.
+ *
+ * `maxClasses` is a **ceiling, not a strategy**: a caller who sets it is saying how much the
+ * enumeration may spend, not that it must spend it before asking anything else. So staging
+ * applies under it too, and is a no-op whenever their ceiling is already at or below the staged
+ * cap — which is why a test asking for 2 000 classes still gets exactly one truncated pass.
+ *
+ * The one exemption is a **cyclic** workflow: its space is unbounded so it truncates at every
+ * cap, and the `bounded` verdict is certified over the prefix explored, so a first pass could
+ * only narrow the claim and could never save a second pass.
+ */
+function stagedCap(compiled: CompiledWorkflow, _options: VerifyOptions, full: number): number {
+  if (compiled.analysis.hasCycle) return full;
+  return Math.min(full, FIRST_PASS_MAX_CLASSES);
+}
+
+/**
+ * Would the caller's full cap still change an answer?
+ *
+ * Only when the first pass truncated *and* left something the bigger graph could decide. A
+ * report that closed is exact, and one whose every check is `proven` has nothing left to gain —
+ * the enumeration would only re-derive what the solver already established.
+ */
+function worthEscalating(first: VerificationReport): boolean {
+  return first.stateSpace.truncation !== null && first.checks.some((c) => c.verdict !== 'proven');
+}
+
+/** One whole report at a given class cap. */
+async function runReport(
+  compiled: CompiledWorkflow, options: VerifyOptions, properties: readonly PropertyName[],
+  maxClasses: number, started: number,
+): Promise<VerificationReport> {
+  const ctx = contextFor(compiled, { ...options, maxClasses });
   await runFamilies(ctx, properties, options);
   return assembleReport(ctx, { properties, shapeWarnings: options.shapeWarnings ?? [], started });
 }

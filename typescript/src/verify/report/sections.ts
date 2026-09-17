@@ -23,11 +23,31 @@ export function renderFinding(check: PropertyCheck, index: number): string[] {
   return lines;
 }
 
-/** Every violated check, numbered, with its finding block. */
+/**
+ * Every violated check, numbered, with its finding block.
+ *
+ * A proper-completion violation is a **candidate**, not a finding, and the section says so.
+ * Both routes explore a priority-blind abstraction (VER-004), a strict superset of what the
+ * executor schedules: that is what makes a `proven` sound, and it is exactly what lets a
+ * `violated` describe an interleaving the executor never takes. Measured 2026-09-16 — the OR
+ * round overflow in `docs/verification.md`, where a stranding the closed graph reports is
+ * reached by no run of either engine at k = 1, 4 or 8. Printing those as findings without the
+ * qualification is how a user loses trust in the ones that are real.
+ *
+ * Scoped to proper completion because that is where the evidence is. `dead-nodes` reports its
+ * `violated` for an *unreachable* node, which is the proof direction and not a candidate.
+ */
 export function findingsSection(checks: readonly PropertyCheck[]): string[] {
   const violated = checks.filter((c) => c.verdict === 'violated');
   if (violated.length === 0) return [];
-  return [`Findings (${violated.length})`, ...violated.flatMap((c, i) => renderFinding(c, i + 1)), ''];
+  const completion = violated.filter((c) => c.property === 'proper-completion').length;
+  const note = completion === 0 ? [] : [
+    `  note: ${completion} of these are proper-completion candidates. Both routes are ` +
+    'priority-blind (VER-004), so a stranding may be an interleaving the executor never takes.',
+    '  Replay one against the executor before treating it as a defect (docs/verification.md, ' +
+    '"That caveat has teeth").',
+  ];
+  return [`Findings (${violated.length})`, ...note, ...violated.flatMap((c, i) => renderFinding(c, i + 1)), ''];
 }
 
 /** The bounded checks, under a title stating the bound they hold within. */

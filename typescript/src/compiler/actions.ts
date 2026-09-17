@@ -22,10 +22,10 @@
  * context resolves them by name (CORE-002), so no MOD-031 alias is involved.
  */
 import { assertNever } from '../internal/assert.js';
-import { dispatchAction, doneRequestAction, reenterAction, roundsOutAction } from './actions/agent-round.js';
+import { callsOutReenterAction, dispatchAction, doneRequestAction, reenterAction, roundsOutAction } from './actions/agent-round.js';
 import { attemptAction, deadlineAction, retryWaitAction } from './actions/failure.js';
 import { armAction, skipAction } from './actions/input-side.js';
-import { doneAction, exhaustedAction, routeAction, runAction } from './actions/outcome.js';
+import { doneAction, exhaustedAction, routeAction, runAction, runFailedAction } from './actions/outcome.js';
 import type { RoutingPolicy } from './actions/routing.js';
 import { startAction, startUnmetAction } from './actions/start.js';
 import type { ActionBinder } from './types.js';
@@ -40,6 +40,7 @@ export function structuralActions(policy: RoutingPolicy): ActionBinder {
       case 'start': return startAction(g);
       case 'start-unmet': return startUnmetAction(g, info);
       case 'run': return runAction(g, policy, map);
+      case 'run-failed': return runFailedAction(g, policy, map);
       case 'route': return routeAction(g, info, policy);
       case 'done': return doneAction(g, map);
       case 'exhausted': return exhaustedAction(g, policy, map);
@@ -51,9 +52,10 @@ export function structuralActions(policy: RoutingPolicy): ActionBinder {
       case 'done-request': return doneRequestAction(g, map);
       case 'dispatch': return dispatchAction(g, map);
       case 'rounds-out': return roundsOutAction(g, map);
-      // `A_resume` and `A_calls_out` both re-enter `X_run` off `A/dispatched`.
-      case 'resume':
-      case 'calls-out': return reenterAction(g);
+      // Both re-enter the round off `A/dispatched`: `A_resume` onto `A/running` (the primary
+      // run), `A_calls_out` onto `A/running_failed` (`A_run_failed`).
+      case 'resume': return reenterAction(g);
+      case 'calls-out': return callsOutReenterAction(g);
       // `sink`, `clear` and `collect` close a round or drain a `nil` and produce nothing:
       // genuine sinks (CORE-043 AC4), so they keep libpetri's passthrough rather than a
       // placeholder that would have to invent an output.

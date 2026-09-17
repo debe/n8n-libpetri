@@ -59,7 +59,7 @@ export {
   renderFinding, renderHeader, renderReport, renderStateSpace, renderSubject, renderTable,
 } from './report.js';
 export {
-  StateSpace, DEFAULT_MAX_CLASSES, HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES, TERMINAL_ROLES,
+  StateSpace, DEFAULT_MAX_CLASSES, FIRST_PASS_MAX_CLASSES, HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES, TERMINAL_ROLES,
   effectiveMaxClasses, loopTransitions, restRolesFor, terminalKindOf,
 } from './state-class.js';
 export type { TruncationShape } from './state-class.js';

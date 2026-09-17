@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **A skip stops at the last node that reads it** (ADR 0002, amendment). A skipped node used to
+  forward `empty` down every outgoing tree edge, so an unselected branch skipped node by node to
+  its end. Only a join or OR slot, a `$('X')` reference, a cycle or a loop reads a skip, so a
+  skipped node now forwards only when a successor must hear of it; otherwise the skip ends there.
+  n8n never runs a skipped node, so run data is unchanged. The chain was bookkeeping, and the
+  state-class graph paid for every order of it against the branch that ran. Measured at k = 1,
+  no verdict moved: `chain40` 1,967 → 407 classes (29,767 → 8,447 at k = 2), `linear` 43 → 37,
+  `diamond` 306 → 295, `chooseBranch` 77 → 73, `ifBothOutputs` 697 → 695. On a 37-node chat-bot
+  shape with three branches, the graph without the agent's tools went from 182,448 classes in
+  12.1 s to 42,112 in 1.9 s. With the tools the graph still truncates, and the SMT fallback now
+  proves proper completion in 226 s where it was `unknown` at the same 300 s budget. The
+  structural hash moves to `v: 11`.
+
 - **Every demo clip now spends visible time where work happens.** An instant action reaches the
   canvas as a single frame, so a recording of it showed a workflow that turned green all at once
   rather than a run unfolding. Three fixtures moved: the Concurrency Showcase's four legs sleep
@@ -24,6 +37,37 @@ All notable changes to this project are documented here. The format follows
   most of the clip.
 
 ### Fixed
+- **An agent could loop forever in the value-blind net after its tool-call budget was spent**
+  (ADR 0008). When `A_calls_out` re-entered `X_run` with the budget exhausted, the run still
+  offered its request branch, so the state-class graph explored
+  `calls_out → run → done_req → calls_out` without end — a lasso the executor never runs, since
+  that activation always fails with `toolCallBudgetExceeded` before `runNode`. Two independent
+  checks in libpetri 6.0.0 saw it: the open-net termination clause (VER-022) and
+  the state-equation ranking query (VER-019). The budget-exceeded re-entry now runs a distinct
+  `A_run_failed`, whose out spec is the non-agent outcome with no request branch (the chain's
+  first `X/failed_1` when the agent declares an `onFailure` chain, so a routed overflow still
+  takes the error branch). It reads its own running place `A/running_failed`, which only
+  `A_calls_out` writes, so the primary run is structurally unreachable from `A_calls_out` — no
+  inhibitor, which is what lets a linear ranking bound the round and prove termination past the
+  graph budget (`agentAssumedRounds` at 64 calls, K = 231). Runtime is unchanged: the failed
+  activation produced no request before either, so no conformance or differential result moves;
+  the change removes only the graph's impossible path. The payoff is that the state-class graph
+  now **closes** on agent nets it used to run past: proper completion is proven outright on the
+  graph route, no solver, at `agentOneTool` 1,466 classes, `agentTwoTools` 6,318 and
+  `agentNested` 19,646; `agentSharedTool` closes at 24,106 with every edge proven and one
+  value-blind witness at the net (the shared tool's interleaving, which the executor's priority
+  never runs — a VER-004 witness, not a divergence). The structural hash advances to `v: 13`.
+
+- **An agent workflow's truncation reason called itself a cap set too low.** `truncationReason`
+  had advice for a cycle and for parallelism only, so a `tool-calls` truncation fell through to
+  "no cycle and no branching node explains it: raise maxClasses". That was wrong on every agent
+  workflow, and doubly so on one with routers. The reason now names each agent's budget and,
+  when the workflow branches, says the branches multiply the same count and a smaller budget
+  shrinks only its own factor. Measured on the chat bot above: its graph still truncated with
+  the agent at two calls. The report line now names `executionPolicy.maxToolCalls`, the key that
+  survives an editor save, instead of the deprecated `options.maxToolCalls`, and no longer
+  promises that a smaller budget closes the graph.
+
 - **`diff-engines.sh` could no longer finish a run.** It executes every seeded workflow and dies
   on the first that does not succeed, and the seed has since grown workflows that exist to show a
   *difference*: the tool-deadline agent is canceled at n8n's execution timeout, the waiting child

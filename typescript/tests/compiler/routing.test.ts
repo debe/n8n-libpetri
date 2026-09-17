@@ -194,13 +194,17 @@ describe.each<Executor>(['precompiled', 'bitmap'])('per-output routing end to en
     expect(names.indexOf('id:Q/done')).toBeLessThan(names.indexOf('id:S0/start'));
   });
 
-  it('under no-data routing Q is skipped (its skip writes every empty edge) and the four successors skip once each', async () => {
+  it('under no-data routing Q is skipped, and with nothing downstream reading the skip it ends there: S0…S3 never activate', async () => {
     const c = compile(fanOut4);
+    expect(gadget(c, 'Q').skipForwards).toBe(false);
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), executor);
     expect(failed(store)).toEqual([]);
     expect(marking.tokenCount(gadget(c, 'Q').skipped!)).toBe(1);
     expect(marking.tokenCount(gadget(c, 'Q').done)).toBe(0);
-    for (const s of ['S0', 'S1', 'S2', 'S3']) expect(marking.tokenCount(gadget(c, s).skipped!)).toBe(1);
+    for (const s of ['S0', 'S1', 'S2', 'S3']) {
+      expect(marking.tokenCount(gadget(c, s).skipped!), s).toBe(0);
+      expect(started(store, (n) => n.startsWith(`id:${s}/`)), s).toEqual([]);
+    }
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(1);
   });
 

@@ -21,6 +21,20 @@ function runAction(g: NodeGadget, map: NetMapView, info: RunTransition): Transit
   // With a chain each attempt has its own run transition and its own `X/running_i`; attempt 1
   // reuses `X/running`, so a policy-free node is untouched.
   const from = g.attempts.length === 0 ? g.running : attemptOf(g, info).running;
+  return runFrom(g, map, from);
+}
+
+/**
+ * `A_run_failed`: the budget-exceeded re-entry, read off `A/running_failed`. It is the same run
+ * as {@link runAction} — `attempt` fails the activation with `toolCallBudgetExceeded` on the
+ * `toolCallsExceeded` payload before `runNode` — only the place it reads differs.
+ */
+function runFailedAction(g: NodeGadget, map: NetMapView): TransitionAction {
+  if (g.agent === null) throw new InternalSchedulerError(`internal: node '${g.node}' has a run-failed transition but no agent side`);
+  return runFrom(g, map, g.agent.runningFailed);
+}
+
+function runFrom(g: NodeGadget, map: NetMapView, from: Place<unknown>): TransitionAction {
   return async (ctx) => {
     const env = envOf(ctx);
     const { state } = env;
@@ -85,6 +99,7 @@ export function schedulerActions(): ActionBinder {
       case 'start': return startAction(g, map);
       case 'start-unmet': return startAction(g, map, info.reference);
       case 'run': return runAction(g, map, info);
+      case 'run-failed': return runFailedAction(g, map);
       case 'attempt': return attemptStepAction(g, info, map);
       case 'deadline': return deadlineAction(g, info);
       case 'route': return routeAction(g, info);

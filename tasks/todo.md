@@ -492,6 +492,20 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       timeout. The reason was not extracted. Worth chasing before the `bounded (K)` item below:
       if the coloured or flat encoder decides this, the default-budget agent verifies without a
       declared budget at all, and the graph is only the fast path
+- [x] **The agent's value-blind livelock, `calls_out → run → done_req → calls_out`.** *Closed
+      2026-09-16.* The budget-exceeded re-entry offered its request branch, so the graph explored
+      an infinite lasso the executor never runs (`A_calls_out`'s activation always fails with
+      `toolCallBudgetExceeded`). Found by two independent checks in libpetri 6.0.0,
+      the open-net termination clause (VER-022) and the ranking query (VER-019). Fix: a distinct
+      `A_run_failed` with no request branch, reading its own running place `A/running_failed`
+      that only `A_calls_out` writes (`run.ts`, `agent-round.ts`, hash `v: 13`). No inhibitor, so
+      the primary run is structurally unreachable from `A_calls_out` and a linear ranking bounds
+      the round: `agentAssumedRounds` (64 calls) proves termination by SMT ranking at K = 231
+      where the graph can't close; the other agent nets close on the graph and prove outright.
+      Runtime unchanged (the failed activation never requested); `tests/compiler/agent.test.ts`
+      and `tests/scheduler/agent.test.ts` pin it, including the `onFailure`-chain agent whose
+      overflow routes to its error branch.
+
 - [ ] **A `bounded (K)` verdict for agents.** An agent left at the runtime default (64) verifies
       as truncated. The graph could instead be explored at a smaller budget and the verdict
       reported as "proven for every execution making at most K tool calls" — the agent analogue
@@ -501,6 +515,30 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
 
 ### 4. Upstream (libpetri)
 
+- [ ] **Handed over 2026-09-15 — `tasks/libpetri-handover-2026-09-15.md`.** Four asks, measured
+      and with acceptance tests, for a libpetri session to take up:
+      **A** open-net verification of a subnet against a contract (ports as environment places,
+      `bounded(1)` arrival; guarantee "exactly one of `data`/`empty` per edge, budget refunded,
+      idle restored, nothing internal" at quiescence) — the per-gadget half of making `proven`
+      a property of the compiler's vocabulary; the composition theorem stays here as an ADR.
+      **B** consume-all exact along the whole SMT route: the step relation already is
+      (`firingConditions`), the marking equation drops the places (`equationPlaces`, H1). The
+      libpetri session measured that the spurious `sat` on `diamond` and `loopOverItems` is
+      *not* that row but inhibitor ordering (`X_skip` fired with `hasdata` marked), refuted only
+      by a guard-aware inductive inequality such as `hasdata ≤ ready_0 + ready_1`; so the plan is
+      a sound relaxation row for consume-all places, invariant synthesis against the guarded
+      step relation (traps as a special case), a directed witness search, and a
+      ranking-function firing bound as the completeness backstop. Not a join-only concern:
+      the arc is the queue-and-bundle idiom.
+      **C** a `state-equation` phase before IC3 with a Farkas certificate through
+      `certificate-checker.ts`: the chat bot proves in ~45 ms against 226 s through Spacer.
+      **D** a terminal-marker cut in the state-class graph — *dropped the same day*: measured
+      by the libpetri session on 21 fixtures, it removes 0 classes at budget 1 and at most 2 %
+      at budget 2 where its conditions hold (`fanOut` 6/307, `partialRequired` 14/2,164), since
+      the halt-marked classes are halt points the cut cannot touch; the record is in the brief.
+      Rule shared by both
+      sides: a bound is both the runtime cap and the width of the claim; unbounded is reported
+      unproven, by design
 - [ ] **No public solver-free route for a ν-net, so adopting `matchSpec` costs the M5 route.**
       libpetri exports `ClassView` and `decideOverClasses`, and `verifyViaStateClassGraph` for
       the plain bounded enumeration (VER-017) — but Route B, the ν name-partition quotient
@@ -557,6 +595,17 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       above, reached from the other side: the capability exists and only Route B can see it. The
       compiler change is small and can be redone in an hour once it lands; what cannot be worked
       around here is an abstraction that cannot see the pre-emption the executor performs
+
+      A second standing instance, 2026-09-16: after the agent livelock fix (`A_run_failed`,
+      hash v12) the state-class graph closes on the agent nets, and `agentSharedTool`'s whole-net
+      proper completion then reports **violated** — one value-blind witness, the shared tool's
+      interleaving through A1 ending `Calculator/done`, with every edge proven. The libpetri
+      session confirmed no state-equation refinement can discharge it: every refinement is sound
+      for the priority-blind semantics and the witness marking is genuinely reachable there.
+      Only a flat-route analogue of `prioritySemantics('conflict')` — this same ask — would
+      remove it. So it is a VER-004 witness, not a divergence, and stays until priority is
+      modelled in the flat route. Runtime completes (the reachable graph is acyclic, 24,106
+      markings).
 - [ ] **`inhibitorArc` is a zero test only**, with no threshold: `ArcInhibitor` is
       `{ type, place }` and `inhibitorArc(place)` takes no count. Every capacity encoding
       therefore needs a complementary place that *every* writer has to keep in step — the
@@ -627,7 +676,17 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       would need. Structural reduction ranks first for cost, since these nets come from a fixed
       gadget and are full of systematically reducible intermediate places, though our property's
       large support caps the win at a constant factor. Unfoldings are the best theoretical fit for
-      breadth and are blocked by our inhibitor arcs
+      breadth and are blocked by our inhibitor arcs.
+      **Measured 2026-09-15 on a 37-node chat-bot shape** (three If gates, a Switch into three
+      branches, one an agent with two tools), after a skip stopped at the last node that reads it
+      (ADR 0002 amendment): with the tools removed the graph closes at 42,112 classes, but with
+      them it truncates at 200,000 even with the agent at two calls. The multiplier is a router's
+      value-blind `xor`: both outputs may carry data, so both branches run, and the graph takes
+      every order of the agent's round against the other branch. One caveat for the design: a
+      deadlock-preserving stubborn set keeps every *distinct* deadlock, and a halt or a pause
+      freezes concurrent branches at every pair of positions — 33,317 terminal classes here. Those
+      markings are conditional sinks for proper completion, so the reduction only pays if it may
+      drop them, i.e. preserves the deadlocks outside the widening rather than all of them
 - [x] **A coverability / cutoff route for cyclic workflows**, which would turn today's `bounded`
       into a `proven` on Loop Over Items without changing the net. *Reached another way,
       2026-09-08: the SMT fallback, asked as the graph's own question with the state equation on

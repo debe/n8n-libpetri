@@ -18,6 +18,25 @@ function doneCounts(c: CompiledWorkflow, m: Awaited<ReturnType<typeof runCompile
   return Object.fromEntries(c.netMap.nodes.map((g) => [g.node, m.tokenCount(g.done)]));
 }
 
+/**
+ * The nodes an empty reaches under no-data routing on an acyclic workflow: every start node
+ * (the primary one runs, the others are seeded to skip), and every successor of a reached node
+ * that is the primary start or forwards its skip (ADR 0002).
+ */
+function reachedUnderNoData(c: CompiledWorkflow): ReadonlySet<string> {
+  const reached = new Set<string>(c.analysis.startNodes);
+  const queue = [...reached];
+  for (let x = queue.pop(); x !== undefined; x = queue.pop()) {
+    if (x !== c.startNode && !c.netMap.node(x).skipForwards) continue;
+    for (const e of c.analysis.outgoing.get(x) ?? []) {
+      if (reached.has(e.to)) continue;
+      reached.add(e.to);
+      queue.push(e.to);
+    }
+  }
+  return reached;
+}
+
 /** Places that must be empty at quiescence: edges, ins, ready, hasdata, ran, running, ok, routed, retry. */
 function transientPlaces(c: CompiledWorkflow) {
   return c.netMap.places
@@ -78,18 +97,22 @@ describe('placeholder actions (no-data routing) quiesce cleanly on every fixture
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(c.effectiveBudget);
     expect(tokenCounts(marking, transientPlaces(c)).every((n) => n === 0)).toBe(true);
     // The start node ran; no node is activated (run or skipped) more than once under no-data
-    // routing — an OR input aggregates its all-empty round into one skip — and on an acyclic
-    // fixture every reachable, non-dead node is activated exactly once. Inside a cycle a
-    // skipped entry node emits nothing on its cycle edges (README emission rule), so cycle
-    // mates and the exits they own stay untouched; emission.test.ts pins that shape.
+    // routing — an OR input aggregates its all-empty round into one skip. On an acyclic fixture
+    // a reachable, non-dead node is activated exactly when an empty reaches it: from a start
+    // node, which runs or is seeded to skip, or from a skipped producer that forwards because a
+    // successor must hear of the skip (ADR 0002). A skip nothing downstream reads ends at the
+    // node that took it. Inside a cycle a skipped entry node emits nothing on its cycle edges
+    // (README emission rule), so cycle mates and the exits they own stay untouched;
+    // emission.test.ts pins that shape.
     const start = c.netMap.node(c.startNode);
     expect(marking.tokenCount(start.done)).toBe(1);
+    const reached = reachedUnderNoData(c);
     for (const g of c.netMap.nodes) {
       const done = marking.tokenCount(g.done);
       const skipped = g.skipped === null ? 0 : marking.tokenCount(g.skipped);
       const dead = g.inputs.some((i) => !i.wired);
       expect(done + skipped, g.node).toBeLessThanOrEqual(1);
-      if (!c.analysis.hasCycle) expect(done + skipped, g.node).toBe(g.reachable && !dead ? 1 : 0);
+      if (!c.analysis.hasCycle) expect(done + skipped, g.node).toBe(g.reachable && !dead && reached.has(g.node) ? 1 : 0);
       expect(marking.tokenCount(g.idle), g.node).toBe(1);
     }
   });

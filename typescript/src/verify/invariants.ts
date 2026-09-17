@@ -99,8 +99,9 @@ function nodeCarriesUnit(g: NodeGadget, terms: ReadonlyMap<string, number>, w: n
     ...(g.routing.kind === 'collapsed' ? [g.routing.routed] : g.routing.outputs.flatMap((o) => [o.ok, o.routed])),
     ...(g.retry === null ? [] : [g.retry.retry]),
     // An agent holds its unit on `A/routed_req` between the request outcome and `A_done_req`,
-    // exactly as any node holds it on `X/routed` between `X_run` and `X_done` (ADR 0004).
-    ...(g.agent === null ? [] : [g.agent.routedRequest]),
+    // exactly as any node holds it on `X/routed` between `X_run` and `X_done` (ADR 0004), and on
+    // `A/running_failed` between `A_calls_out` and `A_run_failed`.
+    ...(g.agent === null ? [] : [g.agent.routedRequest, g.agent.runningFailed]),
   ];
   return inFlight.length === 0 || inFlight.some((p) => (terms.get(p.name) ?? 0) > 0);
 }

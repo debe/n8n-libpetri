@@ -95,7 +95,10 @@ export function callsOutAction(g: NodeGadget): TransitionAction {
     const round = take(ctx, agent.dispatched, isRoundPayload);
     const queue = take(ctx, agent.queue, isRequestPayload);
     const exceeded = { undispatched: queue.pending.length, budget: agent.maxToolCalls };
-    ctx.output(g.running, reentryRun(g, round, { toolCallsExceeded: exceeded }));
+    // Onto `A/running_failed`, which only `A_run_failed` consumes, so the re-entry runs a node
+    // with no request branch; `A_run_failed` reads this payload exactly as the primary run reads
+    // `A/running`.
+    ctx.output(agent.runningFailed, reentryRun(g, round, { toolCallsExceeded: exceeded }));
   };
 }
 

@@ -10,6 +10,12 @@ export const TRANSITION = {
   start: 'start',
   /** Attempt 1's run, and the only run of a policy-free node. */
   run: 'run',
+  /**
+   * An agent's budget-exceeded re-entry run (`A_calls_out` → here). Same node run, same `run`
+   * role and action, but its out spec has no request branch: a failed activation never opens a
+   * tool round, so the value-blind graph must not offer one (ADR 0008).
+   */
+  runFailed: 'run_failed',
   done: 'done',
   skip: 'skip',
   retryWait: 'retry_wait',

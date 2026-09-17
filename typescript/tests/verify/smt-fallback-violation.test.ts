@@ -50,6 +50,11 @@ vi.mock('libpetri/verification', async (importOriginal) => {
     sinkPlacesWhen(): this { return this; }
     stateEquation(): this { return this; }
     enumerationMaxClasses(): this { return this; }
+    // VER-018 / VER-019. Nothing here calls them and the fake never runs a phase, but
+    // `assertLibpetriSurface` probes `SmtVerifier.prototype` for them, so a fake without them
+    // is an install that predates the surface and every case fails before it starts.
+    stateEquationPhase(): this { return this; }
+    firingBound(): this { return this; }
     async verify(): Promise<SmtVerificationResult> {
       // A programming error inside the query path — the shape a version skew takes, where a
       // method the verifier calls is missing from the installed library.
@@ -182,5 +187,36 @@ describe('a fallback violation the pause filter does not excuse is a finding', (
       (c) => c.property === 'proper-completion' && c.name.includes('completes')
         && 'place' in c.subject && c.subject.place !== readyPlace.name);
     expect(others.every((c) => c.verdict === 'unknown'), digest(report)).toBe(true);
+  });
+
+  it('a place the witness marks but its terminal kind excuses is not that row\'s violation', { timeout: CASE_TIMEOUT_MS }, async () => {
+    // The witness is a paused run that strands an `edge-data` place — the one role in
+    // `HALT_REST_ROLES` and *not* in `PAUSE_REST_ROLES`, so the whole-net finding is real and
+    // survives the downgrade — while also holding an `in-data` place, which the pause does
+    // excuse because mode `pause` writes that entry back onto `nodeExecutionStack` (ADR 0005).
+    //
+    // Attributing the whole-net verdict by "is this place marked?" made the `in-data` row
+    // `violated`, on a row the complete state-class graph proves. Measured on `unbalancedJoin`
+    // widened with four independent branches: at a 2,000-class cap the fallback reported seven
+    // violations where the graph, closing at 12,679 classes, reports four. A false `violated`
+    // is the one direction this verifier must never get wrong, so the per-place test applies
+    // the same widening the whole-net verdict was judged with.
+    const compiled = compile(unbalancedJoin);
+    const stranded = compiled.netMap.places.find((p) => p.role === 'edge-data');
+    const excused = compiled.netMap.places.find((p) => p.role === 'in-data');
+    if (stranded === undefined || excused === undefined) throw new Error('fixture lost its edge / input places');
+    mockWitness.place = stranded.place.name;
+    mockWitness.also = ['_pause', excused.place.name];
+
+    const report = await verify(unbalancedJoin, {
+      properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
+    });
+    const rowFor = (name: string) => report.checks.find(
+      (c) => c.property === 'proper-completion' && 'place' in c.subject && c.subject.place === name);
+
+    expect(rowFor(stranded.place.name)?.verdict, digest(report)).toBe('violated');
+    const excusedRow = rowFor(excused.place.name);
+    expect(excusedRow?.verdict, digest(report)).toBe('unknown');
+    expect(excusedRow?.reason).toContain('found a stranding elsewhere in this net');
   });
 });

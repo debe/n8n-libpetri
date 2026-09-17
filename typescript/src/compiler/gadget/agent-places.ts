@@ -45,6 +45,10 @@ export function declareAgentPlaces(ctx: GadgetContext): LocalAgent | null {
     // Owned by the agent, written by every tool it dispatches — exposed like `done` and bound
     // by each tool's own output port.
     response: internal(AGENT_PLACE.response, 'response', null),
+    // The running place `A_calls_out`'s re-entry lands on, consumed only by `A_run_failed`, so
+    // the primary run is structurally unreachable from `A_calls_out` (no inhibitor, so a linear
+    // ranking can bound the round). It carries the re-entry unit for one step and never rests.
+    runningFailed: internal(AGENT_PLACE.runningFailed, 'running-failed', null),
     tools, maxRounds: a.maxRounds, roundsAssumed: a.roundsAssumed,
     maxToolCalls: a.maxToolCalls, toolCallsAssumed: a.toolCallsAssumed,
   };

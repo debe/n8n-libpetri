@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2024-5fa04e)](typescript/package.json)
-[![libpetri](https://img.shields.io/badge/libpetri-%5E5.1.0-1f6feb)](https://github.com/debe/libpetri)
+[![libpetri](https://img.shields.io/badge/libpetri-%5E6.0.0-1f6feb)](https://github.com/debe/libpetri)
 [![License](https://img.shields.io/badge/license-Apache--2.0-1f6feb)](LICENSE)
 
 n8n executes a workflow by running a scheduling loop over an explicit stack of pending nodes.
@@ -162,6 +162,12 @@ graph into strongly connected components before emitting:
 
 A local sink consumes `nil`. It records that an output was not selected without inventing
 traffic on a cycle. [ADR 0002](docs/adr/0002-emission-rule.md) records the decision.
+
+A skip is forwarded only where something downstream reads it: a join or OR slot, a `$('X')`
+reference, a cycle or a loop. Past the last such reader a skipped node deposits nothing, so an
+unselected branch costs one skip instead of a chain of them. The chain changed no run data, since
+n8n never runs a skipped node, and the state-class graph paid for every order it could take
+against the branch that ran.
 
 ### Per-node gadget
 

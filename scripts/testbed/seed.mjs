@@ -155,7 +155,13 @@ const workflows = [];
 for (const file of ['concurrency-showcase.json', 'agent-two-tools.json', 'agent-budget-showcase.json',
   'agent-tool-deadline.json', 'agent-nested.json', 'agent-escalation-ladder.json',
   'failure-policy-showcase.json',
-  'resilient-fan-out.json', 'waiting-child.json', 'parent-waits-on-child.json']) {
+  'resilient-fan-out.json', 'waiting-child.json', 'parent-waits-on-child.json',
+  // Not a demo: the shape the verifier reports an OR-round overflow on. A node with two
+  // producers runs twice, so a downstream OR input with two producers takes three deliveries
+  // against a round of two (`compiler/gadget/input-or.ts`, `verify/families/arrival-bound.ts`).
+  // Whether that is a real stranding or our bound being wrong is a question only n8n's own
+  // engine answers, which is what this leg is for.
+  'or-round-overflow.json']) {
   workflows.push(await workflow(file, cred, workflows));
 }
 

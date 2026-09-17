@@ -113,6 +113,10 @@ export function buildOutputSide(ctx: GadgetContext, hasSkip: boolean): OutputSid
   const routing: LocalRouting = split
     ? { kind: 'split', outputs: splitOutputs }
     : { kind: 'collapsed', routed: internal(PLACE.routed, 'routed', null), outputs: collapsedOutputs };
-  const skipEmpties = routing.outputs.flatMap((out) => out.edges.flatMap((e) => (e.empty !== null ? [outPlace(e.empty)] : [])));
+  // A skip forwards its empties only when a successor must hear of it (ADR 0002). Past the last
+  // observer the chain would change no run data and only multiply the interleavings.
+  const skipEmpties = ctx.skipForwards
+    ? routing.outputs.flatMap((out) => out.edges.flatMap((e) => (e.empty !== null ? [outPlace(e.empty)] : [])))
+    : [];
   return { routing, outputs: routing.outputs, skipEmpties };
 }

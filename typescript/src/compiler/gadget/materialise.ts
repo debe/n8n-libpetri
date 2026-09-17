@@ -65,7 +65,7 @@ function transitionsOf(names: GadgetTransitionNames): NodeGadgetTransitions {
 
 /** The `materialise` of a built gadget: its `NodeGadget` over canonical places. */
 export function materialiser(ctx: GadgetContext, parts: GadgetParts): (lookup: (finalName: string) => Place<unknown>) => NodeGadget {
-  const { a, analysis, name, id, depth, cyclic, reachable, isStartNode, agents, finalNames } = ctx;
+  const { a, analysis, name, id, depth, cyclic, reachable, isStartNode, skipForwards, agents, finalNames } = ctx;
   const { markers, side, skip, routing, references, retry, chain, agent, names } = parts;
   const { running, idle, done, waiting, stopped } = markers;
   const { referenceNames, unguardedReferences } = references;
@@ -86,6 +86,7 @@ export function materialiser(ctx: GadgetContext, parts: GadgetParts): (lookup: (
       running: fin(running), idle: fin(idle),
       routing: routingGadget, done: fin(done),
       skipped: skippedMarkerOf(c, skip),
+      skipForwards,
       attempts: attemptGadgets,
       attemptTimeoutMs: chainTimeoutMs,
       waiting: fin(waiting), stopped: fin(stopped),

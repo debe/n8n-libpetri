@@ -84,12 +84,32 @@ export function buildRun(
   const { attempts, chainTimeoutMs } = chain;
   const outcomeOf = outcomeFor(ctx, branches, retry, agent);
   const runName = qualified(id, TRANSITION.run);
-  if (attempts.length > 0) {
-    return { runName, attemptRunNames: attempts.map((att) => buildAttemptRun(ctx, idle, outcomeOf, att, chainTimeoutMs)) };
+  const attemptRunNames = attempts.length > 0
+    ? attempts.map((att) => buildAttemptRun(ctx, idle, outcomeOf, att, chainTimeoutMs))
+    : [];
+  if (attempts.length === 0) {
+    emit(Transition.builder(TRANSITION.run)
+      .inputs(one(running))
+      .outputs(and(outcomeOf(null), outPlace(idle)))
+      .priority(depth + 1).build(), { role: 'run', attempt: 1 });
   }
-  emit(Transition.builder(TRANSITION.run)
-    .inputs(one(running))
-    .outputs(and(outcomeOf(null), outPlace(idle)))
-    .priority(depth + 1).build(), { role: 'run', attempt: 1 });
-  return { runName, attemptRunNames: [] };
+  // `A_run_failed`: the run an agent re-enters after `A_calls_out`, off `A/running_failed` —
+  // a running place only `A_calls_out` writes, so the primary run is unreachable from it (no
+  // inhibitor, which is what lets a linear ranking bound the round). It runs the same node and
+  // fails the same way (`toolCallBudgetExceeded` before `runNode`, so the executor is
+  // unchanged), but its out spec is the non-agent outcome — no request branch — because a
+  // failed activation never opens a tool round. That cuts the value-blind
+  // `calls_out → run → done_req → calls_out` lasso the executor never runs (ADR 0008). With an
+  // `onFailure` chain the failure is the chain's first `X/failed_1`, so a routed budget
+  // overflow takes the chain's error branch exactly as an attempt-1 failure does; without one
+  // it is the plain non-agent outcome.
+  if (agent !== null) {
+    const failedOutcome = outcomeFor(ctx, branches, retry, null);
+    const firstAttempt = attempts.length > 0 ? attempts[0]! : null;
+    emit(Transition.builder(TRANSITION.runFailed)
+      .inputs(one(agent.runningFailed))
+      .outputs(and(failedOutcome(firstAttempt === null ? null : firstAttempt.failed), outPlace(idle)))
+      .priority(depth + 1).build(), { role: 'run-failed' });
+  }
+  return { runName, attemptRunNames };
 }

@@ -23,6 +23,11 @@ export interface GadgetFacts {
   readonly incoming: readonly EdgeRef[];
   readonly outgoing: readonly EdgeRef[];
   readonly form: JoinForm;
+  /**
+   * A successor must hear of this node's skip — it reads skips itself or feeds a node that does
+   * (`analysis/skip-observers.ts`) — so the skip forwards its empties (ADR 0002).
+   */
+  readonly skipForwards: boolean;
   /** The halt branch is part of the outcome: `onError: 'stopWorkflow'`, or any `onFailure` chain. */
   readonly stopWorkflow: boolean;
   readonly required: ReadonlySet<number>;
@@ -47,6 +52,7 @@ export function deriveGadgetFacts(
   host: SharedPlaces,
 ): GadgetFacts {
   const name = a.node.name;
+  const outgoing = analysis.outgoing.get(name) ?? [];
   return {
     a, analysis, edgeSlots, syntheticIn, host, name,
     id: a.node.id,
@@ -55,8 +61,9 @@ export function deriveGadgetFacts(
     reachable: analysis.reachable.has(name),
     isStartNode: analysis.startNodeSet.has(name),
     incoming: analysis.incoming.get(name) ?? [],
-    outgoing: analysis.outgoing.get(name) ?? [],
+    outgoing,
     form: a.form,
+    skipForwards: outgoing.some((e) => analysis.skipObservable.has(e.to)),
     // A chain needs the halt branch whatever `onError` says: its own `stop` step deposits it, and
     // `guarded()` falls back to it for a fatal raised outside n8n's node try (ADR 0009 §3).
     stopWorkflow: a.onError === 'stopWorkflow' || a.failure !== null,

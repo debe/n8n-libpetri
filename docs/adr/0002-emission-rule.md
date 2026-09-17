@@ -69,3 +69,49 @@ edges are classified after an SCC decomposition of the main-connection graph:
   terminates with 4 loop-node firings and 3 body firings; every `nil` place peaks at one token
   and ends empty; skipping the whole loop yields `empty` on the exit edge; the `empty`-on-cycle
   control never quiesces.
+
+## Amendment (2026-09-15): a skip stops where nothing reads it
+
+An `empty` token has a reader only where a node decides by it: a join or OR slot (the `or`,
+`join` and `choose-branch` forms), a `$('X')` reference that reads `X/skipped`, and a cycle or
+Loop Over Items. Anywhere else a chain of skips changes no run data, because n8n never runs a
+skipped node. It still costs the verifier: the state-class graph takes every order of the chain
+against the branch that ran, and a halt or a pause freezes the chain at every position it has
+reached.
+
+A skipped node now forwards its empties only when one of its successors must hear of the skip —
+reads one, or feeds a node that does (`analysis/skip-observers.ts`, `NodeGadget.skipForwards`).
+Otherwise `X_skip` consumes its arrival, writes `X/skipped`, refunds its join slots and deposits
+nothing downstream. A producer that *runs* still writes `data | empty` on every tree edge, so the
+first node of an unselected branch still skips once: the chain is cut after one hop.
+
+Every reader keeps what it had. Each node upstream of a join input, an OR round, a referenced
+node or a cycle exit is in the set, so those still receive their empties. The codec reads
+`Y/skipped` only for referenced nodes and discards the rest on encode, so resumable state does
+not change.
+
+Measured at k = 1 unless noted; no verdict moved:
+
+| Fixture | Before | After |
+|---|---:|---:|
+| `linear` | 43 | 37 |
+| `chain40` | 1,967 | 407 |
+| `chain40`, k = 2 | 29,767 | 8,447 |
+| `diamond` | 306 | 295 |
+| `diamond`, k = 2 | 963 | 935 |
+| `chooseBranch` | 77 | 73 |
+| `ifBothOutputs` (violated) | 697 | 695 |
+
+On a 37-node chat-bot shape — three If gates, a Switch into three branches, one of them an
+agent with two tools — the unselected branches were most of the cost. With the tools removed the
+graph closed at 182,448 classes in 12.1 s before and at 42,112 in 1.9 s after; the taken path
+alone went from 493 to 187. With the tools it still truncates at 200,000 classes, and there the
+SMT fallback decides proper completion: `unknown` at a 300 s budget before, `proven` in 226 s
+after. What still multiplies that graph is a router's value-blind `xor` letting two branches
+run and interleave (`tasks/todo.md`, partial-order reduction).
+
+Evidence: `tests/compiler/skip-observers.test.ts` (which nodes must hear of a skip, and which
+compiled skips forward), `tests/compiler/routing.test.ts` (a skipped router with no observer
+leaves its four successors untouched), `tests/compiler/execution.test.ts` (on every acyclic
+fixture a node activates exactly when an empty reaches it), and the re-pinned counts in
+`tests/verify/state-class.test.ts`.

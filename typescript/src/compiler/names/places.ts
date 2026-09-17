@@ -46,6 +46,14 @@ export const AGENT_PLACE = {
   dispatched: 'dispatched',
   rounds: 'rounds',
   response: 'response',
+  /**
+   * `A/running_failed`: the running place `A_calls_out`'s re-entry lands on, consumed only by
+   * `A_run_failed`. It replaces steering the primary run with an inhibitor: the primary run is
+   * now structurally unreachable from `A_calls_out`, so a linear ranking can bound the round.
+   * It carries the re-entry unit for one step and never rests (`A_run_failed` is always
+   * enabled once it holds a token).
+   */
+  runningFailed: 'running_failed',
 } as const;
 
 /** `X/in`: the direct form's edge place, or the synthetic one of a node with no producer. */

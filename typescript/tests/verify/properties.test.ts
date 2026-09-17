@@ -23,12 +23,12 @@ import {
   twoTriggers, workflow, failurePolicy,
 } from '../fixtures/workflows.js';
 import {
-  DEFAULT_MAX_CLASSES, alternativeEntryReach, effectiveMaxClasses, producersOf, verify, verifyCompiled,
+  DEFAULT_MAX_CLASSES, FIRST_PASS_MAX_CLASSES, alternativeEntryReach, effectiveMaxClasses, producersOf, verify, verifyCompiled,
 } from '../../src/verify/index.js';
 import type { PropertyCheck } from '../../src/verify/index.js';
 import {
-  CASE_TIMEOUT_MS, TEST_TIMEOUT_MS, checksOf, describeZ3, digest, liveSampleNode, orphanBranch,
-  retryFour, unbalancedJoin,
+  CASE_TIMEOUT_MS, TEST_TIMEOUT_MS, checksOf, describeZ3, digest, generateFanOut, liveSampleNode,
+  orphanBranch, retryFour, unbalancedJoin,
 } from './support.js';
 import { retryOf, splitOutputsOf } from '../compiler/support.js';
 
@@ -421,12 +421,20 @@ describeZ3('verify: properties', () => {
       }
     });
 
-    it('an acyclic workflow whose graph truncates has nothing to bound, and stays unknown — with the query really asked', { timeout: CASE_TIMEOUT_MS }, async () => {
+    it('an acyclic workflow whose graph truncates has nothing to bound — the fallback decides it, never a bound', { timeout: CASE_TIMEOUT_MS }, async () => {
       // The other truncation shape (NU-053: independent parallelism, no partial-order
-      // reduction). There is nothing to count, so no bounded verdict is available and the
-      // honest answer is `unknown` — the row must never borrow the cyclic case's bound. It is
-      // also the one fixture where the fallback is a real question: every quiescent class the
-      // graph found is inside the rest set, so `deadlockFree` is not refuted and z3 is asked.
+      // reduction). There is nothing to count, so **no bounded verdict is available** whatever
+      // the fallback answers — the row must never borrow the cyclic case's bound. That is what
+      // this case is for. It is also the one fixture where the fallback is a real question:
+      // every quiescent class the graph found is inside the rest set, so `deadlockFree` is not
+      // refuted and z3 is asked.
+      //
+      // The verdict itself moved with the libpetri floor and is pinned as the flip it is: at
+      // 5.1.0 this was `unknown`, a 2 s Spacer timeout rather than a statement about the net
+      // (`docs/verification.md`, "Vary the timeout before reading anything into an `unknown`").
+      // The state-equation phase (VER-018) proves it in milliseconds, so the honest pin is
+      // `proven` *by that method* — and the `bounded` assertions below are unchanged, because
+      // they were always the point.
       const report = await verify(switch20, {
         ...base, timeoutMs: 2_000, maxClasses: 500, properties: ['proper-completion'],
       });
@@ -434,8 +442,9 @@ describeZ3('verify: properties', () => {
       expect(report.stateSpace.boundedCyclicRuns).toBeNull();
       expect(report.stateSpace.loopSteps).toBe(0);
       const whole = checksOf(report, 'proper-completion').find((c) => c.subject.kind === 'net')!;
-      expect(whole.verdict, digest(report)).toBe('unknown');
+      expect(whole.verdict, digest(report)).toBe('proven');
       expect(whole.query.route).toBe('smt');
+      expect(whole.query.method).toBe('state-equation');
       expect(report.counts.bounded).toBe(0);
     });
 
@@ -502,20 +511,73 @@ describeZ3('verify: properties', () => {
 
     it('carries the solver-free route\'s own numbers, so a truncation is visible in the JSON', { timeout: CASE_TIMEOUT_MS }, async () => {
       const report = await verify(diamond, { ...base, properties: ['proper-completion'] });
-      // Re-measured with the collapsed outcome (ADR 0004): 393 with X/ok + X_route per node.
-      expect(report.stateSpace.classes).toBe(306);
+      // Re-measured with the collapsed outcome (ADR 0004): 393 with X/ok + X_route per node; and
+      // 306 until a skip stopped at the join that nothing past it reads (ADR 0002).
+      expect(report.stateSpace.classes).toBe(295);
       expect(report.stateSpace.complete).toBe(true);
-      // `requestedMaxClasses` is the constant the caller did not override; `maxClasses` is that
-      // lowered to what *this* heap can hold, because only a memory bound stops a V8 heap
-      // exhaustion from aborting the process (`effectiveMaxClasses`). Pinning it to 200 000
-      // pins the runner's memory: a GitHub runner's ~2.35 GB heap reports 140 928, and the
-      // graph still closes at 306 well inside it. The lowering itself is covered at fixed heap
-      // sizes in `state-class.test.ts`.
-      expect(report.stateSpace.requestedMaxClasses).toBe(DEFAULT_MAX_CLASSES);
-      expect(report.stateSpace.maxClasses).toBe(effectiveMaxClasses(DEFAULT_MAX_CLASSES));
+      // `requestedMaxClasses` is the cap the route asked for; `maxClasses` is that lowered to
+      // what *this* heap can hold, because only a memory bound stops a V8 heap exhaustion from
+      // aborting the process (`effectiveMaxClasses`). The lowering itself is covered at fixed
+      // heap sizes in `state-class.test.ts`.
+      //
+      // It is the **staged** cap, not `DEFAULT_MAX_CLASSES`: `diamond` is acyclic and the caller
+      // set no `maxClasses`, so the first pass runs at `FIRST_PASS_MAX_CLASSES` (`verify.ts`,
+      // "The staged route"). It closes at 295 there, so nothing escalates and the report carries
+      // the first pass's numbers — which is the point of staging, and is visible here rather
+      // than hidden.
+      expect(report.stateSpace.requestedMaxClasses).toBe(FIRST_PASS_MAX_CLASSES);
+      expect(report.stateSpace.maxClasses).toBe(effectiveMaxClasses(FIRST_PASS_MAX_CLASSES));
       expect(report.stateSpace.maxClasses).toBeGreaterThan(report.stateSpace.classes);
       expect(report.stateSpace.strandedPlaces).toBe(0);
       expect(report.stateSpace.error).toBeNull();
+    });
+  });
+
+  describe('the staged cap', () => {
+    // `DEFAULT_MAX_CLASSES` was a flat constant, so a net whose graph cannot close discovered
+    // that by burning all of it: `fanOut8` at k = 4 spent 18.5 s reaching 200 000 classes and
+    // was then decided by the SMT route in under a second. Measured after staging: 1.7 s, same
+    // verdicts. These pin the three ways the route can go.
+
+    it('does not escalate when the first pass truncates but everything is proven', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // The case staging exists for. The graph cannot close, the SMT route decides every check,
+      // and spending the other 175 000 classes could not change an answer.
+      const report = await verify(generateFanOut(12), { ...base, properties: ['proper-completion'] });
+      expect(report.stateSpace.truncation, digest(report)).not.toBeNull();
+      expect(report.stateSpace.requestedMaxClasses).toBe(FIRST_PASS_MAX_CLASSES);
+      expect(report.checks.every((c) => c.verdict === 'proven'), digest(report)).toBe(true);
+    });
+
+    it('escalates to the full cap when the first pass leaves something undecided', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // A violation needs the graph for its witness — the solver route is weak there — so a
+      // truncated first pass that did not prove everything must spend the caller's whole cap.
+      const wide = workflow('wide-unbalanced', [
+        node('Trigger', 'trigger', [0, 0]), node('A', 'set', [200, -100]),
+        node('B', 'set', [200, 100]), node('M', 'merge', [400, 0]),
+        ...Array.from({ length: 8 }, (_, i) => node(`W${i}`, 'set', [200, 300 + i * 100])),
+      ], [
+        conn('Trigger', 0, 'A', 0), conn('Trigger', 0, 'B', 0), conn('A', 0, 'M', 0),
+        conn('B', 0, 'M', 0), conn('Trigger', 0, 'M', 1),
+        ...Array.from({ length: 8 }, (_, i) => conn('Trigger', 0, `W${i}`, 0)),
+      ], 'Trigger');
+      const report = await verify(wide, { ...base, properties: ['proper-completion'] });
+      expect(report.stateSpace.requestedMaxClasses).toBe(DEFAULT_MAX_CLASSES);
+      expect(report.checks.some((c) => c.verdict === 'violated'), digest(report)).toBe(true);
+      expect(report.checks.some((c) => c.counterexample !== null), digest(report)).toBe(true);
+    });
+
+    it('never stages a cyclic workflow: a smaller prefix is a narrower `bounded` claim', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // Its space is unbounded, so it truncates whatever the cap. A first pass could only narrow
+      // the prefix the `bounded` verdict is certified over, and could never save a second.
+      const report = await verify(loopOverItems, { ...base, properties: ['proper-completion'] });
+      expect(report.stateSpace.requestedMaxClasses).toBe(DEFAULT_MAX_CLASSES);
+    });
+
+    it('a caller ceiling below the staged cap is used as-is, in one pass', { timeout: CASE_TIMEOUT_MS }, async () => {
+      // `maxClasses` is a ceiling, not a strategy. Below the staged cap there is nothing to
+      // stage, so the route asks for exactly what the caller allowed.
+      const report = await verify(diamond, { ...base, properties: ['proper-completion'], maxClasses: 3_000 });
+      expect(report.stateSpace.requestedMaxClasses).toBe(3_000);
     });
   });
 });

@@ -1,0 +1,68 @@
+{
+  "name": "OR Round Overflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-520, 0],
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": { "assignments": { "assignments": [ { "id": "f1", "name": "who", "value": "first", "type": "string" } ] }, "options": {} },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-280, -160],
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Producer A"
+    },
+    {
+      "parameters": { "assignments": { "assignments": [ { "id": "f2", "name": "who", "value": "second", "type": "string" } ] }, "options": {} },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-280, 0],
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Producer B"
+    },
+    {
+      "parameters": { "assignments": { "assignments": [ { "id": "f3", "name": "who", "value": "side", "type": "string" } ] }, "options": {} },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-280, 200],
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Side Producer"
+    },
+    {
+      "parameters": { "assignments": { "assignments": [ { "id": "f4", "name": "stage", "value": "twice", "type": "string" } ] }, "options": {} },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-40, -80],
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Runs Twice"
+    },
+    {
+      "parameters": { "assignments": { "assignments": [ { "id": "f5", "name": "stage", "value": "collector", "type": "string" } ] }, "options": {} },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 40],
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Collector"
+    }
+  ],
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [[
+        { "node": "Producer A", "type": "main", "index": 0 },
+        { "node": "Producer B", "type": "main", "index": 0 },
+        { "node": "Side Producer", "type": "main", "index": 0 }
+      ]]
+    },
+    "Producer A": { "main": [[{ "node": "Runs Twice", "type": "main", "index": 0 }]] },
+    "Producer B": { "main": [[{ "node": "Runs Twice", "type": "main", "index": 0 }]] },
+    "Runs Twice": { "main": [[{ "node": "Collector", "type": "main", "index": 0 }]] },
+    "Side Producer": { "main": [[{ "node": "Collector", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

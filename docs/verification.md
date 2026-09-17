@@ -137,6 +137,32 @@ can refill it through an omitted path.
 Checks that two named nodes are never running together. Use repeated `--mutex A,B` arguments
 for selected resources. `--all-pairs` is useful on small nets and expensive on large ones.
 
+## Why the workflow-net soundness literature does not apply here
+
+Recorded so it is not re-proposed. Blondin, Mazowiecki and Offtermatt (CAV 2022) prove that for
+**free-choice** workflow nets, 1-, generalised, structural and continuous soundness all coincide
+— and *generalised* soundness is k-soundness for **every** k. That would make k-independence a
+theorem proved once instead of a measurement repeated per budget, which is exactly what this
+project wants.
+
+It does not apply, and the reason is structural rather than a matter of effort. Free-choice
+requires that two transitions sharing an input place share their whole preset, which forbids a
+place that arbitrates between structurally different alternatives — and **a join arbitrates**.
+Measured (`tasks/spike-free-choice.mts`): with `_budget`, `_halt` and `_pause` all ignored, so
+ADR 0010 already granted, 16 of 60 corpus templates are free-choice and 44 are not. What breaks
+it is `ready` in 134 workflows, `free` in 87, `idle` in 46, `retry` in 29 — the join gadget's
+slot places (ADR 0003), and any `idle` with both a `start` and a `resume`.
+
+The 16 are not a fragment to grow. They are free-choice *because* they have no joins, no retries
+and no agents, so the property and the triviality have the same cause. The payoff is therefore
+anti-correlated with need: free on nets that already verify in milliseconds, worth nothing on
+every shape that motivated the question.
+
+What survives is the paper's **necessary conditions**, which hold on any net: integer
+unboundedness is a polynomial LP and implies generalised unsoundness. Whether that is already
+computed as the Farkas dual of libpetri's VER-019 ranking condition is an open question, not a
+claim.
+
 ## State-class graph
 
 The graph performs breadth-first exploration over marking classes. When it closes, the set
@@ -147,6 +173,39 @@ The graph ignores transition priority. That creates a superset of scheduler beha
 lower-priority transitions may appear earlier than the executor would choose them. For
 safety proofs this is conservative. A property proved over the larger set also holds for the
 priority-respecting execution. Validate a counterexample against the executor when priority matters.
+
+### That caveat has teeth: a measured false `violated` (2026-09-16)
+
+Not a hypothetical. Across the 200-template corpus, 25 templates report a proper-completion
+violation, and the dominant shape is an **OR input whose producer runs more than once**.
+`scripts/testbed/workflows/or-round-overflow.json` is the minimal form — six `Set` nodes, no
+credentials:
+
+```
+Trigger ─┬─> Producer A ─┐
+         ├─> Producer B ─┴─> Runs Twice ─┐
+         └─> Side Producer ──────────────┴─> Collector
+```
+
+`Runs Twice` has two producers, so n8n activates it twice; `Collector` therefore takes **three**
+deliveries on an input whose OR round is two (`compiler/gadget/input-or.ts` counts the edges
+that carry an `empty`, which is two). The verifier reports three violations on a graph that
+**closes** at 4,360 classes — so the verdict is exact under the abstraction, not a fallback
+artifact: `Collector input 0 queues at most 2 arrivals per round` (`hasdata_0` = 3), `Collector
+input 0 always completes` (`ready_0` stranded), and the whole-net row.
+
+Run in a real n8n server under both engines (`scripts/testbed/diff-engines.sh`), every leg
+**succeeds with identical data and the same order**: legacy 142 ms, libpetri k=1 149 ms, k=4
+156 ms, k=8 147 ms, 8 happens-before edges intact on each. The order is
+`Trigger → Producer A → Runs Twice#0 → Collector#0 → Producer B → Runs Twice#1 → Collector#1
+→ Side Producer → Collector#2` — three `Collector` runs, nothing stranded, at every budget.
+
+So the stranding is an interleaving the priority-blind abstraction admits and the executor does
+not take. **A proper-completion `violated` is a candidate, not a finding, until it is replayed
+against the executor.** The proof direction is unaffected — nothing here weakens a `proven`,
+which is exactly what the superset argument buys. Two consequences for reporting: the corpus's
+25 violations are 25 candidates and were never triaged as findings, and a report that prints one
+should say which it is.
 
 State-space cost depends more on shape than node count:
 
@@ -186,13 +245,20 @@ Recorded on the repository's verifier measurement harness:
 
 | Workflow | Result | State classes | Approximate time |
 |---|---|---:|---:|
-| Diamond | Proven | 306 | 21 ms |
-| 41-node chain | Proven | 1,967 | 150 ms |
+| Diamond | Proven | 295 | 10 ms |
+| 41-node chain | Proven | 407 | 21 ms |
 | `ifBothOutputs` | Violated | Counterexample found | 42 ms |
 | 21-node five-diamond | Proven at k=1 | Complete | About 2 s |
 | 49-node parallel shape | Unknown | Truncated | Shape exceeds practical graph budget |
-| `agentOneTool` (`maxToolCalls` 4) | Proven | 1,466 | 16 ms |
-| `agentTwoTools` (`maxToolCalls` 4) | Proven | 6,315 | 101 ms |
+| `agentOneTool` (`maxToolCalls` 4) | Proven | 1,464 | 29 ms |
+| `agentTwoTools` (`maxToolCalls` 4) | Proven | 6,313 | 113 ms |
+
+The diamond, chain and agent rows were re-measured on 2026-09-15, after a skip stopped at the
+last node that reads it (ADR 0002, amendment), as the median `verify()` wall time of three
+runs: before it they were 306, 1,967, 1,466 and 6,315 classes. The chain moved most, because
+every node that can return no data used to start a skip chain down the rest of it. The agent
+rows moved by two classes, the one `End` node past each agent, so the K-scaling table below
+predates the change by that margin.
 
 State-class counts are under libpetri's canonical state-class key (2026-09-08); the earlier
 figures — `diamond` 330, `agentOneTool` 1,730, `agentTwoTools` 7,968 — counted one marking once

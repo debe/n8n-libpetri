@@ -79,13 +79,18 @@ describe('the solver-free route (VER-010)', () => {
       // Counts before the routed outcome was collapsed into `X_run` (ADR 0004), for the
       // record: 50, 393, 99, 245, 108, 889, 2048, 6151. Removing one place and one
       // transition per node removed a class per activation, most on the join-heavy shapes.
-      ['linear', linear, 43, 'proven'],
-      ['diamond', diamond, 306, 'proven'],
+      // Before a skip stopped past the last node that reads it (ADR 0002): `linear` 43 and
+      // `chain40` 1967 — a chain paid for every order of its skip chain against the node that
+      // returned no data. Every row that feeds a join is unchanged, since there the skip is read.
+      ['linear', linear, 37, 'proven'],
+      // Before it, too: `diamond` 306, `chooseBranch` 77 and `ifBothOutputs` 697, whose joins
+      // no longer pass a skip on to the node after them.
+      ['diamond', diamond, 295, 'proven'],
       ['fanOut', fanOut, 90, 'proven'],
       ['multiProducer', multiProducer, 211, 'proven'],
-      ['chooseBranch', chooseBranch, 77, 'proven'],
-      ['ifBothOutputs', ifBothOutputs, 697, 'violated'],
-      ['chain40 (41 nodes)', generateChain(40), 1967, 'proven'],
+      ['chooseBranch', chooseBranch, 73, 'proven'],
+      ['ifBothOutputs', ifBothOutputs, 695, 'violated'],
+      ['chain40 (41 nodes)', generateChain(40), 407, 'proven'],
       ['wide8 (9 nodes)', generateFanOut(8), 5894, 'proven'],
     ];
 
@@ -109,10 +114,11 @@ describe('the solver-free route (VER-010)', () => {
     // the doc's table fixes. The class count grows sharply with the budget — a second unit
     // lets independent branches interleave — so the k = 2 counts are pinned too: "41 nodes
     // closes in 106 ms" is a statement about k = 1 and must not be read as a general ceiling.
-    // Before the collapse: 1551 and 31448.
+    // Before the collapse: 1551 and 31448. Before a skip stopped past the last node that reads
+    // it (ADR 0002): 963 and 29767 — `diamond` feeds a join, so its count did not move.
     const atBudgetTwo: ReadonlyArray<readonly [string, Parameters<typeof verify>[0], number]> = [
-      ['diamond', diamond, 963],
-      ['chain40 (41 nodes)', generateChain(40), 29767],
+      ['diamond', diamond, 935],
+      ['chain40 (41 nodes)', generateChain(40), 8447],
     ];
     for (const [label, workflow, classes] of atBudgetTwo) {
       it(`${label} at k = 2: ${classes} classes`, { timeout: CASE_TIMEOUT_MS }, async () => {
@@ -362,7 +368,7 @@ describe('the solver-free route (VER-010)', () => {
     });
 
     it('a cap set too low is reported as a cap, not as parallelism the workflow does not have', { timeout: CASE_TIMEOUT_MS }, async () => {
-      // `linear` is Trigger -> A -> B -> C: no cycle, no branching node, 43 classes. At a
+      // `linear` is Trigger -> A -> B -> C: no cycle, no branching node, 37 classes. At a
       // 10-class cap the old cause was `parallelism`, and every reason read "independent
       // parallel branches blow the class count up combinatorially" — about a chain.
       const report = await completionOf(linear, 10);

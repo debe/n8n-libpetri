@@ -29,8 +29,22 @@ import type { SolverInfo } from './types.js';
  * future release ever splits them, this check passes while `'auto'` or `route` is missing —
  * and the failure returns to its disguised form, a `TypeError` from inside a query. Add the
  * split piece here if that ever happens.
+ *
+ * **The phase surface is required even though nothing here calls it.** `stateEquationPhase` and
+ * `firingBound` (VER-018 / VER-019) are default-on in libpetri, so this verifier never names
+ * them — and that is exactly why they belong here. Measured on 2026-09-16, every fallback proof
+ * on every fixture came back with method `state-equation`; without the phase `switch20` and
+ * `chain40` return nothing at all above k = 2 (`tasks/libpetri-handover-2026-09-16.md`). An
+ * install that predates them therefore does not fail, it just stops proving things, which is
+ * the one outcome this module exists to prevent. Their presence is the proxy for the phase.
+ *
+ * They shipped in libpetri 6.0.0 alongside VER-022 open-net contracts, which is why the floor
+ * moved there from 5.1.0. A `^5` install satisfies neither, and the failure it produces without
+ * this check is not an error but a report whose proofs are quietly absent.
  */
-const REQUIRED_VERIFIER_METHODS = ['sinkPlacesWhen', 'stateEquation', 'enumerationMaxClasses'] as const;
+const REQUIRED_VERIFIER_METHODS = [
+  'sinkPlacesWhen', 'stateEquation', 'enumerationMaxClasses', 'stateEquationPhase', 'firingBound',
+] as const;
 
 /**
  * Fails with a message naming the gap when the installed libpetri predates the API this
@@ -42,10 +56,11 @@ export function assertLibpetriSurface(): void {
   if (missing.length === 0) return;
   throw new Error(
     `the installed libpetri is too old for this verifier: SmtVerifier is missing ${missing.join(', ')}. ` +
-    'This surface (VER-014 conditional sinks, VER-016 the state equation, VER-017 bounded ' +
-    "enumeration, and `semiflowInvariants('auto')`) ships in libpetri 5.1.0. Install that or " +
-    'later rather than relaxing this check: without those methods every SMT query fails, and ' +
-    'the report would close with every proof missing.',
+    'This surface is VER-014 conditional sinks, VER-016 the state equation, VER-017 bounded ' +
+    "enumeration and `semiflowInvariants('auto')`, plus VER-018 / VER-019, the state-equation " +
+    'and firing-bound phases. All of it is in libpetri 6.0.0; run `npm install libpetri@^6.0.0` ' +
+    'rather than relaxing this check. Without the phases the report does not fail — it closes ' +
+    'with the proofs quietly missing.',
   );
 }
 

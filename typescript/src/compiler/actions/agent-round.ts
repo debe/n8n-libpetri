@@ -51,14 +51,25 @@ export function dispatchAction(g: NodeGadget, map: NetMapView): TransitionAction
 }
 
 /**
- * The agent re-enters `X_run` with the open round's entry, off `A/dispatched`. Two roles take it:
- * `A_resume`, when the round is complete, and `A_calls_out`, when the call budget is spent with
- * calls still queued, so the agent re-enters to fail.
+ * `A_resume`: the round is complete, so the agent re-enters the primary `X_run` off
+ * `A/dispatched` onto `A/running`.
  */
 export function reenterAction(g: NodeGadget): TransitionAction {
   const agent = agentOf(g);
   return async (ctx) => {
     ctx.output(g.running, ctx.input(agent.dispatched));
+  };
+}
+
+/**
+ * `A_calls_out`: the call budget is spent with calls still queued, so the agent re-enters to
+ * fail — onto `A/running_failed`, which only `A_run_failed` consumes, so the primary run is
+ * unreachable from here and the run that follows offers no request branch.
+ */
+export function callsOutReenterAction(g: NodeGadget): TransitionAction {
+  const agent = agentOf(g);
+  return async (ctx) => {
+    ctx.output(agent.runningFailed, ctx.input(agent.dispatched));
   };
 }
 

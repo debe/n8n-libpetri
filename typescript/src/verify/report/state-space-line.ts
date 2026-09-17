@@ -53,15 +53,17 @@ function cyclicBound(space: StateSpaceFigures): string {
 
 /**
  * The one truncation with a knob. The graph explores every round size up to an agent's
- * tool-call budget — a product of per-tool and per-round counters, polynomial in both — so the fix is a smaller declared
- * budget, and the message says which agent, what it has now, and whether that number was the
- * workflow's or the scheduler's runtime default.
+ * tool-call budget — a product of per-tool and per-round counters, polynomial in both — so a
+ * smaller declared budget shrinks it, and the message says which agent, what it has now, and
+ * whether that number was the workflow's or the scheduler's runtime default. It does not promise
+ * a complete graph: branching nodes multiply the same count, and no budget reaches those
+ * (the per-check reason names both, `reasons.ts`).
  */
 function agentBudgets(agents: StateSpaceFigures['agents']): string {
   const each = agents.map((a) =>
     `'${a.node}' may make ${a.maxToolCalls} tool call(s) across ${a.tools} tool(s)` +
     (a.assumed ? ' (the scheduler default — nothing declared)' : ' (declared)'));
   return `an agent's tool-call budget: ${each.join('; ')}. The graph explores every round size up to ` +
-    'the budget, so declare a small options.maxToolCalls on the agent for a complete graph — a ' +
-    'declared budget is both the runtime cap and the width of the claim';
+    'the budget, so a small executionPolicy.maxToolCalls on the agent shrinks it — a declared budget ' +
+    'is both the runtime cap and the width of the claim';
 }

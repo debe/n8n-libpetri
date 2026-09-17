@@ -11,13 +11,25 @@
 | [0007](0007-verification.md) | The verification surface: what the property table proves, and what it cannot | accepted (amended M5: the state-class graph is the primary route, z3 the fallback) |
 | [0008](0008-agent-tool-dispatch.md) | Agent tool dispatch: the round is a marking | accepted |
 | [0009](0009-execution-policy.md) | Execution policy in workflow JSON: the attempt chain | accepted (compiler, carrier and scheduler built; codec and the per-attempt bound remain) |
+| [0010](0010-bounds-at-the-entry.md) | Bounds at the entry, not a global concurrency counter | **proposed** — nothing built; would supersede the budget half of 0004 and the k-safety half of 0006 |
+| [0011](0011-composition-theorem.md) | The composition theorem: per-gadget contracts to a whole-workflow claim | **proposed** — proof sketch, not mechanised; measured to cover 40.5% of the template corpus |
 
 Each ADR has Context / Decision / Consequences / Evidence; Evidence names the spike under
 `typescript/tests/spikes/` that pins the behaviour it rests on.
 
-All nine are accepted and none is superseded; 0003, 0004, 0005 and 0007 carry amendments
+0001–0009 are accepted and none is superseded; 0003, 0004, 0005 and 0007 carry amendments
 recorded in
-the ADR itself rather than as a new record. 0007's M5 amendment inverts the routes (§9-§12):
+the ADR itself rather than as a new record. 0010 and 0011 are the **proposed** pair, and they
+are read together: 0010 removes the global `_budget` counter so that gadgets share only edge
+places and two monotone markers, and 0011 is the theorem that turns per-gadget proofs into a
+whole-workflow claim — which is much harder while a shared counter remains, because a gadget's
+contract then silently assumes a unit is free for it. 0011 is measured to cover 40.5% of the
+template corpus as scoped; cycles and agents are the two extensions worth more than the core.
+0010 argues
+for deleting the global `_budget` place in favour of an admission bound at the entry, a
+declared bound per loop and an optional author-placed throttle, and it would supersede the
+concurrency-budget half of 0004 and the k-safety half of 0006 once built. Until then those two
+stand as written. 0007's M5 amendment inverts the routes (§9-§12):
 libpetri's state-class graph (VER-010) decides proper completion and the other reachability
 families, the `SmtVerifier` is the fallback for a truncated graph, and a fourth verdict,
 `bounded`, reports what a cyclic workflow's explored prefix does establish.

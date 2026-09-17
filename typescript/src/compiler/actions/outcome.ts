@@ -14,6 +14,20 @@ export function runAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView)
   };
 }
 
+/**
+ * `A_run_failed`: the placeholder for an agent's budget-exceeded re-entry. It reads the
+ * re-entry off `A/running_failed` and takes the success outcome like any placeholder run; the
+ * scheduler's own action fails the activation instead. Its out spec has no request branch.
+ */
+export function runFailedAction(g: NodeGadget, policy: RoutingPolicy, map: NetMapView): TransitionAction {
+  if (g.agent === null) throw new InternalCompilerError(`internal: node '${g.node}' has a run-failed transition but no agent side`);
+  const runningFailed = g.agent.runningFailed;
+  return async (ctx) => {
+    succeed(ctx, g, policy, ctx.input(runningFailed), map);
+    ctx.output(g.idle, null);
+  };
+}
+
 /** Per-output routing only (`routing.kind === 'split'`): `X_route_o` drains one `X/ok_o`. */
 export function routeAction(g: NodeGadget, info: RouteTransition, policy: RoutingPolicy): TransitionAction {
   if (g.routing.kind !== 'split') throw new InternalCompilerError(`internal: node '${g.node}' has a route transition but routes in X_run`);

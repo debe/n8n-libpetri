@@ -74,6 +74,7 @@ export interface LocalAgent {
   readonly dispatched: Place<unknown>;
   readonly rounds: Place<unknown>;
   readonly response: Place<unknown>;
+  readonly runningFailed: Place<unknown>;
   readonly tools: readonly [string, ...string[]];
   readonly maxRounds: number;
   readonly roundsAssumed: boolean;

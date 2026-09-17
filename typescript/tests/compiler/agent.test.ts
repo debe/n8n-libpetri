@@ -11,7 +11,7 @@ import { enumerateBranches } from 'libpetri';
 import { StateSpace, markingStateOf, renderStateSpace, verify } from '../../src/verify/index.js';
 import type { NodeDescription } from '../../src/compiler/index.js';
 import {
-  agentAssumedRounds, agentNested, agentOneTool, agentSharedTool, agentTwoTools, conn, linear, node,
+  agentAssumedRounds, agentNested, agentOneTool, agentSharedTool, agentTwoTools, conn, linear, node, tool, workflow,
 } from '../fixtures/workflows.js';
 import { agentOf, asForm, inOf, inToolOf, outputNames, transitionOf } from './support.js';
 import { CompileError } from '../../src/compiler/index.js';
@@ -310,7 +310,13 @@ describe('verification', () => {
     expect(assumed.stateSpace.truncation).toBe('tool-calls');
     expect(assumed.stateSpace.agents).toEqual([{ node: 'Agent', tools: 1, maxToolCalls: 64, assumed: true }]);
     expect(renderStateSpace(assumed)).toMatch(/'Agent' may make 64 tool call\(s\).*the scheduler default/);
-    expect(renderStateSpace(assumed)).toMatch(/declare a small options\.maxToolCalls/);
+    // The key that survives an editor save (ADR 0009 §2), not the deprecated `options` spelling.
+    expect(renderStateSpace(assumed)).toMatch(/a small executionPolicy\.maxToolCalls/);
+    // The per-check reason names the same cause rather than calling it a cap set too low.
+    const reason = assumed.checks.find((c) => c.property === 'proper-completion')!.reason ?? '';
+    expect(reason).toContain("'Agent' 64 call(s) across 1 tool(s), the scheduler default");
+    expect(reason).toContain('may close it');
+    expect(reason).not.toContain('No cycle and no branching node');
     expect(assumed.counts.proven).toBe(0);
 
     // The same workflow with a declared budget — the runtime cap the workflow chose — closes,
@@ -323,6 +329,28 @@ describe('verification', () => {
     expect(declared.stateSpace.agents).toEqual([{ node: 'Agent', tools: 1, maxToolCalls: 3, assumed: false }]);
     expect(declared.counts.violated).toBe(0);
     expect(declared.counts.unknown).toBe(0);
+  });
+
+  it('an agent on one branch of a router: the reason names both factors, since no budget reaches the branches', async () => {
+    // Measured on a two-branch chat bot: with its agent at two calls the graph still truncated,
+    // so "lower the budget" alone would have pointed at a knob that cannot close it.
+    const branching = workflow('agentOnABranch', [
+      node('Trigger', 'trigger', [0, 0]),
+      node('IF', 'if', [200, 0]),
+      node('Agent', 'agent', [400, -100], { maxRounds: 2, maxToolCalls: 2 }),
+      node('Other', 'set', [400, 100]),
+      node('Calculator', 'tool', [400, 200]),
+    ], [
+      conn('Trigger', 0, 'IF', 0), conn('IF', 0, 'Agent', 0), conn('IF', 1, 'Other', 0),
+    ], 'Trigger', { toolConnections: [tool('Calculator', 'Agent')] });
+    const report = await verify(branching, { properties: ['proper-completion'], timeoutMs: 1, maxClasses: 20 });
+    expect(report.stateSpace.complete).toBe(false);
+    expect(report.stateSpace.truncation).toBe('tool-calls');
+    const reason = report.checks.find((c) => c.property === 'proper-completion')!.reason ?? '';
+    expect(reason).toContain("'Agent' 2 call(s) across 1 tool(s), declared");
+    expect(reason).toContain('multiplied by the interleavings');
+    expect(reason).toContain('shrinks only the first factor');
+    expect(reason).not.toContain('No cycle and no branching node');
   });
 
   it('treats a spent round budget as a designed pause, not a stranding', async () => {
@@ -407,7 +435,9 @@ describe('an agent used as another agent\'s tool', () => {
     // delivered an empty activation to skip. Everything else is `A`'s, entire: the node core
     // and all eight round places.
     const core = ['idle', 'running', 'routed', 'waiting', 'stopped', 'done'];
-    const round = ['routed_req', 'queue', 'dispatched', 'drained', 'calls', 'outstanding', 'response', 'rounds'];
+    // Nine round places: the eight pending markers plus `running_failed`, the running place a
+    // budget-exceeded re-entry lands on for `A_run_failed`.
+    const round = ['routed_req', 'queue', 'dispatched', 'drained', 'calls', 'outstanding', 'response', 'rounds', 'running_failed'];
     expect(localsOf(c.net.places, 'B')).toEqual([...core, ...round, 'in_tool'].sort());
     expect(localsOf(c.net.places, 'A')).toEqual([...core, ...round, 'in', 'in_empty', 'skipped'].sort());
     // Which states the same thing as a difference, so a place added to one gadget and not the
@@ -416,9 +446,11 @@ describe('an agent used as another agent\'s tool', () => {
     expect(minus(localsOf(c.net.places, 'A'), localsOf(c.net.places, 'B'))).toEqual(['in', 'in_empty', 'skipped']);
     expect(minus(localsOf(c.net.places, 'B'), localsOf(c.net.places, 'A'))).toEqual(['in_tool']);
 
-    // Transitions: the node core plus the six of the round. `A` has one more, `skip`.
+    // Transitions: the node core — including the budget-exceeded re-entry `run_failed` every
+    // agent has — plus the six of the round. `A` has one more, `skip`.
+    const coreT = ['start', 'run', 'run_failed', 'done'];
     const roundT = ['done_req', 'dispatch', 'collect', 'resume', 'calls_out', 'rounds_out'];
-    expect(localsOf(c.net.transitions, 'B')).toEqual([...['start', 'run', 'done'], ...roundT].sort());
+    expect(localsOf(c.net.transitions, 'B')).toEqual([...coreT, ...roundT].sort());
     expect(minus(localsOf(c.net.transitions, 'A'), localsOf(c.net.transitions, 'B'))).toEqual(['skip']);
 
     // And a plain tool is untouched by any of it: no round block on `Code`.
@@ -447,6 +479,40 @@ describe('an agent used as another agent\'s tool', () => {
     const written = new Set(enumerateBranches((dispatch as unknown as { outputSpec: never }).outputSpec)
       .flatMap((b) => [...b].map((p) => p.name)));
     expect(written.has('id:Code/in_tool')).toBe(true);
+  });
+
+  it('a budget-exceeded re-entry runs A_run_failed, which cannot open a round', () => {
+    // ADR 0008: `A_calls_out` re-enters the run when the tool-call budget is spent, and that
+    // activation always fails (`toolCallBudgetExceeded` before `runNode`). The run it re-enters
+    // must therefore not offer the request branch, or the value-blind graph explores
+    // `calls_out → run → done_req → calls_out` forever — a lasso the executor never runs.
+    const c = compile(agentTwoTools, { budget: 1 });
+    const branchesOf = (name: string): string[][] => {
+      const t = [...c.net.transitions].find((x) => x.name === name)!;
+      return enumerateBranches((t as unknown as { outputSpec: never }).outputSpec).map((b) => [...b].map((p) => p.name).sort());
+    };
+    const run = branchesOf('id:Agent/run');
+    const failed = branchesOf('id:Agent/run_failed');
+    // The primary run holds the request branch; the failed re-entry is it minus that branch.
+    expect(run.some((b) => b.includes('id:Agent/routed_req'))).toBe(true);
+    expect(failed.some((b) => b.includes('id:Agent/routed_req'))).toBe(false);
+    const key = (bs: string[][]): Set<string> => new Set(bs.map((b) => b.join('+')));
+    const withoutRequest = key(run.filter((b) => !b.includes('id:Agent/routed_req')));
+    expect(key(failed)).toEqual(withoutRequest);
+
+    // `A/running_failed` is the separation, not an inhibitor: `A_calls_out` writes it,
+    // `A_run_failed` reads it, and it is the only way into `A_run_failed`. The primary run reads
+    // `A/running` and carries no inhibitor, so it is unreachable from `A_calls_out` — which is
+    // what lets a linear ranking bound the round.
+    const callsOut = [...c.net.transitions].find((t) => t.name === 'id:Agent/calls_out')!;
+    const callsOutWrites = new Set(enumerateBranches((callsOut as unknown as { outputSpec: never }).outputSpec).flatMap((b) => [...b].map((p) => p.name)));
+    expect(callsOutWrites.has('id:Agent/running_failed')).toBe(true);
+    expect(callsOutWrites.has('id:Agent/running')).toBe(false);
+    const primary = [...c.net.transitions].find((t) => t.name === 'id:Agent/run')! as unknown as { inputSpecs: readonly { place: { name: string } }[]; inhibitors: readonly { place: { name: string } }[] };
+    expect(primary.inputSpecs.some((s) => s.place.name === 'id:Agent/running')).toBe(true);
+    expect(primary.inhibitors.length).toBe(0);
+    const failedT = [...c.net.transitions].find((t) => t.name === 'id:Agent/run_failed')! as unknown as { inputSpecs: readonly { place: { name: string } }[] };
+    expect(failedT.inputSpecs.map((s) => s.place.name)).toEqual(['id:Agent/running_failed']);
   });
 
   it('bounds both levels: each agent spends its own A/calls, and neither refunds', () => {

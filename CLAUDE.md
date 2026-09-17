@@ -57,17 +57,37 @@ libpetri requirement IDs (`IO-015`, `EXEC-003`, `MOD-010`, …).
 
 ### libpetri
 
-`libpetri@^5.1.0`. 5.0.0 made [IO-015] an exact-explanation search (`And` unordered, an inner
-`Xor` no longer pre-empting an enclosing one), split [VER-002] into strict `DeadlockFree` and
-`TerminatesAtSink`, added the `run(ms, 'close')` timeout policy, and fixed sparse enablement at
-bit 31. **5.1.0 is the floor** because the verifier calls its surface directly:
-`sinkPlacesWhen` conditional sinks [VER-014], the linear state-equation bound [VER-015], the
-state equation with firing counters [VER-016], bounded enumeration [VER-017] with
-`enumerationMaxClasses`, `semiflowInvariants('auto')`, `SmtVerificationResult.route`, and the
-canonical state-class key that five pinned class counts rest on. The compiler and the verifier
-both depend on those semantics; do not downgrade. `verify()` checks the surface at entry
-(`assertLibpetriSurface`) and refuses an install that predates it, because the alternative is a
-report that closes with every proof silently missing.
+`libpetri@^6.0.0`, an ordinary registry dependency. **6.0.0 is the floor** because the verifier
+calls its surface directly: `sinkPlacesWhen` conditional sinks [VER-014], the linear
+state-equation bound [VER-015], the state equation with firing counters [VER-016], bounded
+enumeration [VER-017] with `enumerationMaxClasses`, the state-equation and firing-bound phases
+[VER-018] / [VER-019], open-net contracts [VER-022], `semiflowInvariants('auto')`,
+`SmtVerificationResult.route`, and the canonical state-class key that five pinned class counts
+rest on. The compiler and the verifier both depend on those semantics; do not downgrade.
+`verify()` checks the surface at entry (`assertLibpetriSurface`) and refuses an install that
+predates it, because the alternative is a report that closes with every proof silently missing.
+
+VER-018 / VER-019 are in `REQUIRED_VERIFIER_METHODS` even though nothing calls them — they are
+default-on, so an install without them does not fail, it just stops proving things: measured
+2026-09-16, every fallback proof on every fixture carried method `state-equation`, and without
+the phases `switch20` and `chain40` return nothing at all above k = 2
+([`tasks/libpetri-handover-2026-09-16.md`](tasks/libpetri-handover-2026-09-16.md)).
+
+**What the 6.0.0 major changed under us.** [TIME-012] restarts a transition's clock when a
+firing takes its input or read token and puts one back, and the state-class graph now also
+requires enablement in `M - Pre(t)` ([VER-010] AC4) — so verdicts on timed nets with a
+consume-and-return or a reset refresh *can* move, and we have both (`delayed(waitBetweenTries)`
+in the failure chain, `all(X/hasdata)` in the join's start). Immediate transitions also move
+later in FIFO order within their priority, and `stateEquation(true)` now gives a place drained
+by `all()` / `atLeast()` an upper bound in the HORN encoding, so its scripts change. Measured
+2026-09-17 against released 6.0.0: suite 1075/1075 across 79 files, typecheck clean, and the
+200-template survey compiles and verifies 200/200 with no timeouts. Nothing moved for the
+shapes we have — that is not a general result, and a new timed shape is not covered by it.
+
+`scripts/link-libpetri.sh` points `node_modules/libpetri` at a sibling libpetri checkout, for
+the periods when this repository is again the first consumer of an unreleased surface. It is
+**not** the current state, and a number produced against a linked tree is not comparable with
+one produced against the registry; say which a measurement used.
 
 ### n8n conformance (`scripts/`)
 
@@ -153,3 +173,25 @@ proof — and never widen a check's claim past its query.
 
 Decisions go in `docs/adr/`. Open work goes in `tasks/todo.md`. Divergences from n8n go in
 `docs/divergences.md`.
+
+<!-- code-graph-mcp:begin v2 -->
+## Code Graph (repo-wide AST index)
+
+AST + FTS + vector index of the whole repo — prefer over multi-round Grep/Read for
+structural queries (LSP only sees open files; this sees everything). Fastest path = Bash CLI:
+
+| Intent | Command |
+|--------|---------|
+| Who calls X / what X calls | `code-graph-mcp callgraph X` |
+| Impact before editing a fn | `code-graph-mcp impact X` |
+| Unfamiliar dir / module | `code-graph-mcp overview <dir>` |
+| Symbol source / signature | `code-graph-mcp show X` |
+| Concept search (no exact name) | `code-graph-mcp search "…"` (vector: MCP `semantic_code_search`) |
+| grep + AST context | `code-graph-mcp grep "pat" [paths] [-t lang] [-g glob] [-c]` |
+
+Not on PATH? A plugin-only install keeps its own copy — same commands, run
+`~/.cache/code-graph/bin/code-graph-mcp` (or `npm i -g @sdsrs/code-graph` once).
+
+Still use Grep for literal strings/regex in non-code files; still Read files you'll edit.
+Full command + MCP-tool table: `.claude/plugin_code_graph_mcp.md`
+<!-- code-graph-mcp:end -->

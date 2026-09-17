@@ -18,6 +18,7 @@ import { assembleNodes } from './analysis/nodes.js';
 import { reachableFromStarts } from './analysis/reachability.js';
 import { classifyReferences } from './analysis/references.js';
 import { decompose } from './analysis/scc.js';
+import { skipObservableNodes } from './analysis/skip-observers.js';
 import { wireTools } from './analysis/tools.js';
 import { requirePositiveInt, validateNodes } from './analysis/validate.js';
 
@@ -92,11 +93,12 @@ export function analyse(workflow: WorkflowDescription, options: AnalysisOptions 
   const { analysed, byName } = assembleNodes(
     { raws, toolsOf, agentsOf, incoming, outgoing, referencesOf, deadInputsOf, fallbackRounds, defaultCalls }, diagnostics);
   const multiProducerInputs = multiProducerInputsOf(edges);
+  const skipObservable = skipObservableNodes(analysed, incoming, cyclic, referenced);
 
   return {
     startNode: primaryStart, startNodes, startNodeSet: new Set(startNodes),
     nodes: analysed, byName, edges, incoming, outgoing, sccOf, sccs, cyclic, reachable,
     depth, maxDepth, hasCycle: cyclic.size > 0, multiProducerInputs, referenced, seededSkipped,
-    toolConnections, agentsOf, hasAgents: toolConnections.length > 0, diagnostics,
+    skipObservable, toolConnections, agentsOf, hasAgents: toolConnections.length > 0, diagnostics,
   };
 }

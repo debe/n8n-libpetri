@@ -55,6 +55,8 @@ export function truncationReason(ctx: ReasonContext): string {
     ? ' The workflow has a cycle, so its reachable state space is unbounded and no class cap can ' +
       'close it (NU-053). Nothing was stranded among the classes explored, which is a bounded fact ' +
       'about a prefix of the runs, not a proof about all of them.'
+    : cause === 'tool-calls'
+      ? agentAdvice(ctx.shape)
     : cause === 'parallelism'
       ? ' This workflow has branching nodes, and independent parallel branches blow the class count up ' +
         'combinatorially (NU-053: the graph has no partial-order reduction). Raising maxClasses may ' +
@@ -62,6 +64,24 @@ export function truncationReason(ctx: ReasonContext): string {
       : ' No cycle and no branching node explains it, so the cap is simply below what this workflow ' +
         'needs: raise maxClasses.';
   return explored + advice;
+}
+
+/**
+ * Why an agent workflow's graph did not close. The graph explores every round size up to each
+ * agent's tool-call budget, so a smaller declared budget shrinks the count; branching nodes
+ * multiply the same count by their interleavings, and no budget reaches those. Saying only
+ * "lower the budget" to a workflow that also branches points at a knob that cannot close it —
+ * measured on a two-branch chat bot, whose graph still truncated with its agent at two calls.
+ */
+function agentAdvice(shape: TruncationShape): string {
+  const each = shape.agents.map((a) =>
+    `'${a.node}' ${a.maxToolCalls} call(s) across ${a.tools} tool(s)${a.assumed ? ', the scheduler default' : ', declared'}`);
+  const budgets = ` The graph explores every round size up to each agent's tool-call budget (${each.join('; ')})`;
+  return shape.independentBranches
+    ? `${budgets}, multiplied by the interleavings of the workflow's branching nodes (NU-053: the graph ` +
+      'has no partial-order reduction). A smaller executionPolicy.maxToolCalls shrinks only the first factor.'
+    : `${budgets}. A smaller executionPolicy.maxToolCalls may close it — a declared budget is both the ` +
+      'runtime cap and the width of the claim.';
 }
 
 /**

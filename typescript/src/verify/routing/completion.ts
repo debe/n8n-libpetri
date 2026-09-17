@@ -13,7 +13,7 @@ import { witnessCounterexample } from '../state-space/decode.js';
 import {
   HALT_REST_ROLES, PAUSE_REST_ROLES, REST_ROLES, restRolesFor, terminalKindOf,
 } from '../state-space/roles.js';
-import type { Counterexample, QueryRecord } from '../types.js';
+import type { Counterexample, MarkedPlace, QueryRecord } from '../types.js';
 import type { Context, Decision } from './context.js';
 import { boundedOrUnknown, graphDecision } from './graph.js';
 import { smtDecision, type ConditionalSink } from './smt.js';
@@ -96,16 +96,40 @@ export function graphStranding(ctx: Context, place: Place<unknown>): Decision | 
   return graphDecision('proven');
 }
 
-/** True when the witness marking holds `_pause` or `_halt`. */
-function witnessIsExcusedTerminal(cex: Counterexample | null): boolean {
-  if (cex === null) return false;
-  const rest = restRolesFor(terminalKindOf(cex.stuckMarking.map((p) => p.role)));
-  return !cex.stuckMarking.some((p) => p.role === null || !rest.has(p.role));
+/** The rest set the witness marking's own terminal kind is classified against (VER-014). */
+function witnessRestRoles(cex: Counterexample): ReadonlySet<PlaceRole> {
+  return restRolesFor(terminalKindOf(cex.stuckMarking.map((p) => p.role)));
 }
 
-/** Whether the fallback's witness marking holds a token on this very place. */
-function witnessMarks(cex: Counterexample | null, place: Place<unknown>): boolean {
-  return cex !== null && cex.stuckMarking.some((p) => p.place === place.name);
+/** Pending work rather than residue `rest` licenses — the per-place stranding test. */
+function isStranded(rest: ReadonlySet<PlaceRole>, marked: MarkedPlace): boolean {
+  return marked.role === null || !rest.has(marked.role);
+}
+
+/** True when every place the witness marking holds is residue its terminal kind excuses. */
+function witnessIsExcusedTerminal(cex: Counterexample | null): boolean {
+  if (cex === null) return false;
+  const rest = witnessRestRoles(cex);
+  return !cex.stuckMarking.some((p) => isStranded(rest, p));
+}
+
+/**
+ * Whether the fallback's witness marking strands **this** place.
+ *
+ * Marked is not stranded. Inside a designed terminal the rest set widens (VER-014,
+ * `roles.ts`) and a token the codec writes back is residue by design — `in-data` is in
+ * `PAUSE_REST_ROLES` precisely because mode `pause` pushes that entry back onto
+ * `nodeExecutionStack` (ADR 0005). {@link witnessIsExcusedTerminal} lets the whole-net
+ * verdict stand as soon as *one* place is unexcused, so attributing that verdict to a row
+ * has to apply the same widening. Asking only "is it marked?" reports an excused `X/in`
+ * sitting beside a real stranding elsewhere as this row's own violation — a `violated` on a
+ * row the complete graph proves, which is the one direction this verifier must never get
+ * wrong.
+ */
+function witnessStrands(cex: Counterexample | null, place: Place<unknown>): boolean {
+  if (cex === null) return false;
+  const rest = witnessRestRoles(cex);
+  return cex.stuckMarking.some((p) => p.place === place.name && isStranded(rest, p));
 }
 
 /** The graph first (NU-053); the whole-net `deadlockFree` query only where it truncated. */
@@ -115,12 +139,13 @@ export async function decideStranding(ctx: Context, place: Place<unknown>): Prom
   const fallback = await smtFallbackCompletion(ctx);
   if (fallback.verdict === 'proven') return fallback;
   // A `violated` that reached here is a stranding the solver found and the pause filter did
-  // *not* excuse (`smtFallbackCompletion` downgrades a designed-terminal witness). It is
+  // *not* excuse (`smtFallbackCompletion` downgrades a witness excused end to end). It is
   // about the whole net, so it becomes this row's finding only when its own witness marking
-  // holds this place; otherwise the whole-net row carries it and this row stays undecided —
-  // with a reason that says so rather than claiming the fallback decided nothing.
+  // strands this place — marked *and* unexcused, the same widening the whole-net verdict was
+  // judged with. Otherwise the whole-net row carries it and this row stays undecided, with a
+  // reason that says so rather than claiming the fallback decided nothing.
   if (fallback.verdict === 'violated') {
-    if (witnessMarks(fallback.counterexample, place)) return fallback;
+    if (witnessStrands(fallback.counterexample, place)) return fallback;
     return {
       ...fallback,
       verdict: 'unknown',
