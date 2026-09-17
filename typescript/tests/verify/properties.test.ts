@@ -435,8 +435,19 @@ describeZ3('verify: properties', () => {
       // The state-equation phase (VER-018) proves it in milliseconds, so the honest pin is
       // `proven` *by that method* — and the `bounded` assertions below are unchanged, because
       // they were always the point.
+      //
+      // The budget is 10 s, matching the cyclic sibling above, because the 2 s that came with
+      // the old pin was *itself* the thing being asserted: it existed to produce the Spacer
+      // timeout the verdict then reported. Once the verdict became a proof the number stopped
+      // describing the claim and started bounding it, and a wall clock is not part of this
+      // claim — the phase either returns a proof or it does not, and no budget invents one.
+      // Measured 2026-09-17: the call costs ~1.25 s idle, so 2 s left ~1.6x headroom on the
+      // fastest hardware we have; under CPU contention the z3 child is descheduled, passes the
+      // 3 s hard kill (1.5x the budget) and the row degrades to `unknown` exactly as designed.
+      // That is a red build for a correct degradation. Reproduced 1 run in 4 at 2 s with the
+      // cores saturated, 0 in 8 at 5 s and 10 s under the same load.
       const report = await verify(switch20, {
-        ...base, timeoutMs: 2_000, maxClasses: 500, properties: ['proper-completion'],
+        ...base, timeoutMs: 10_000, maxClasses: 500, properties: ['proper-completion'],
       });
       expect(report.stateSpace.truncation).toBe('parallelism');
       expect(report.stateSpace.boundedCyclicRuns).toBeNull();

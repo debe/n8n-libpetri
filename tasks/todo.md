@@ -839,6 +839,23 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       timeout for the same reason. Two load-sensitive flakes were observed once each and were not
       reproducible in isolation (`tests/spikes/emission-cycle.test.ts` "empty storm", and one
       `packages/cli` template test during a legacy leg)
+- [x] **A "must prove" assertion pinned behind a 2 s budget, root-caused and closed.** CI went red
+      on `097c76a`, a README-only commit, in `properties.test.ts`'s acyclic-truncation case: the
+      whole-net row came back `unknown` with "z3 hard timeout after 3s" where it asserts `proven`
+      by `state-equation`. The two runs before it, on identical TypeScript, were green. The 2 s was
+      inherited, and it used to be the *subject* of the case — at the 5.1.0 floor this pinned
+      `unknown`, and 2 s was chosen to produce the Spacer timeout the verdict then reported. `2d01995`
+      flipped the assertion to `proven` (VER-018 proves it in milliseconds) and left the number, so
+      a budget that had described the claim was now bounding it. Measured 2026-09-17: the call costs
+      ~1.25 s idle whatever the budget, so 2 s was ~1.6× headroom on the fastest hardware here,
+      against the 10–50× the row above assumes; with the cores saturated the z3 child is descheduled,
+      crosses the 3 s hard kill (1.5× the budget) and the row degrades to `unknown` as designed —
+      a red build for a *correct* degradation. Reproduced 1 run in 4 at 2 s under load, 0 in 8 at
+      5 s and 10 s. It carries `10_000` now, matching the cyclic sibling four cases above; six
+      consecutive full-suite runs green, three of them loaded. **The general rule this leaves:**
+      `TEST_TIMEOUT_MS` is the floor the headroom was measured against, so a per-case `timeoutMs`
+      override may raise it and must never lower it — and when a case stops asserting a timeout,
+      the timeout it was asserting has to go with it
 - [x] **Two more load-sensitive failures, both root-caused and closed** while getting CI green on
       the 5.0.0 lockfile. Neither was the engine. (a) `collapsed-outcome.test.ts`'s twenty-output
       case costs ~2.6 s alone and ~7.5 s with the other 47 files on the same cores — it walks the
