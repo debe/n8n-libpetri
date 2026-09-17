@@ -26,7 +26,7 @@ Every scheduler milestone is complete:
   queue mode, where a separate worker process executes and the marking round-trips through the
   database between jobs.
 
-The implementation requires libpetri 5.1.0 or later (`^5.1.0`, and the lock pins 5.1.0). Node
+The implementation requires libpetri 6.0.0 or later (`^6.0.0`, and the lock pins 6.0.0). Node
 outcomes route directly from `X_run` for up to three connected outputs. Wider fan-outs split routing per output to avoid exponential output
 spec flattening. `_halt` is a terminal marker; the old halt-reap phase and `_halted` place no
 longer exist.
