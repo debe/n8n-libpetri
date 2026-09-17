@@ -1,7 +1,7 @@
 {
   "name": "n8n-libpetri",
   "version": "0.1.0",
-  "description": "n8n workflow scheduler replaced by a libpetri Coloured Time Petri Net engine",
+  "description": "An alternative intra-workflow scheduler for n8n that models an execution as a libpetri Coloured Time Petri Net",
   "private": true,
   "homepage": "https://github.com/debe/n8n-libpetri",
   "repository": {
