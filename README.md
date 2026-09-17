@@ -5,19 +5,30 @@
 [![libpetri](https://img.shields.io/badge/libpetri-%5E6.0.0-1f6feb)](https://github.com/debe/libpetri)
 [![License](https://img.shields.io/badge/license-Apache--2.0-1f6feb)](LICENSE)
 
-n8n executes a workflow by running a scheduling loop over an explicit stack of pending nodes.
-The loop is compact and effective, and it carries a complete scheduling model: the states a node
-passes through, the condition under which it may run, the number of nodes that may run at once,
-and the conditions under which an execution ends. That model is expressed as control flow and as
-a small number of execution-global fields. A reader of the source can follow it; a tool cannot
-read it.
+**n8n-libpetri is a compiler and a scheduling kernel.** The compiler turns an n8n workflow into
+a Coloured Time Petri Net. The kernel runs that net to quiescence — and the net decides what
+runs next, not a host-side queue, a permit gate or a dispatch policy.
 
-n8n-libpetri restates that model as a coloured time Petri net, registered through the seam the
-patches under `patches/n8n/` add. n8n keeps the editor, the workflow format, credentials, node
-implementations, persistence, webhooks, hooks and queue mode.
+n8n keeps everything else: the editor, the workflow format, credentials, node implementations,
+persistence, webhooks, hooks and queue mode. The engine registers through the seam the two
+patches under `patches/n8n/` add, and with nothing registered n8n runs its own loop exactly as
+before.
 
-Concurrency, cycles, joins, retries, resource limits and terminal states gain explicit semantics.
-The scheduler executes that net; the verifier analyses the same net.
+<img alt="The Agent Nested Agents workflow running in the n8n editor. An agent calls a second
+agent wired as its tool, that second agent calls a tool of its own, and every node turns green."
+  src="docs/media/agent-nested-agents.gif" width="900" />
+
+*An agent calling a second agent wired as its tool, which calls a tool of its own — recorded in
+a real n8n editor running on the net. Nesting is not a case the kernel handles: it is graph
+structure the compiler already emits, so each level spends its own call budget and one
+conservation law covers both (ADR 0008).*
+
+**Why compile at all.** n8n's scheduling model lives today in a loop of roughly 490 lines plus a
+few execution-global fields. It is compact, it works, and a reader of the source can follow it —
+but a *tool* cannot read it. Compiling turns that model into data. Concurrency, cycles, joins,
+retries, resource limits and terminal states stop being properties of a loop and become places,
+transitions and arcs. One net then serves both jobs: the kernel executes it, the verifier
+analyses it, and there is no second model to drift out of sync.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/workflow-to-net-dark.svg" />
@@ -26,7 +37,7 @@ The scheduler executes that net; the verifier analyses the same net.
   place and a halt place that inhibits the start." src="docs/img/workflow-to-net-light.svg" />
 </picture>
 
-*What the compiler does. Circles are places, bars are transitions, and a token sits in a place.
+*What the compiler emits. Circles are places, bars are transitions, and a token sits in a place.
 Four of these six nodes compile to exactly this gadget, wired to the shared `_budget` and `_halt`
 places; `Trigger` drops the skip branch, and `Merge` adds the join below. `run` is the only
 transition that calls `runNode()`.*
@@ -34,7 +45,7 @@ transition that calls `runNode()`.*
 ## Contents
 
 1. [The scheduler in n8n today](#the-scheduler-in-n8n-today)
-2. [What formalisation provides](#what-formalisation-provides)
+2. [What compiling provides](#what-compiling-provides)
 3. [Principles](#principles)
 4. [Scope](#scope)
 5. [Execution model](#execution-model)
@@ -56,11 +67,11 @@ Two conditions make it work, and the loop satisfies both by construction. It enq
 successor only when the output carried data, so a recovery pass completes any node still waiting
 once the stack drains. One node runs at a time, which keeps the execution-global fields safe.
 
-## What formalisation provides
+## What compiling provides
 
-Restating the model changes none of the work n8n performs. It changes what you can say about
-that work before it runs. Three conditions the loop holds implicitly become objects in the net,
-and analysis follows from having them.
+Compiling changes none of the work n8n performs. It changes what you can say about that work
+before it runs. Three conditions n8n's loop holds implicitly become objects in the net — and
+once they are objects, the kernel enforces them and the verifier can read them.
 
 **Waiting becomes a place.** A join in the net holds one slot per input and fires when the last
 slot is claimed. An edge with no data for this activation claims its slot with an `empty` token, so "produced
@@ -177,7 +188,7 @@ The normal path is:
 input + idle + budget -> running -> routed -> done + budget
 ```
 
-In the gadget pictured at the top of this file, `start` acquires one `_budget` token. `run` calls
+In the gadget diagram near the top of this file, `start` acquires one `_budget` token. `run` calls
 n8n's existing `runNode()` and routes the result. `done` refunds the token one scheduler cycle
 later. The split models duration and makes the budget a structural property of the net:
 
@@ -411,13 +422,10 @@ anyway." src="docs/media/agent-tool-deadline.gif" width="900" />
 at the tool's own deadline (IO-013 — the firing, not the work behind it), the agent gets the error
 as its tool response, and `Answer` still runs.*
 
-<img alt="The Agent Nested Agents workflow running. An agent calls a second agent wired as its
-tool, that second agent calls a tool of its own, and every node turns green."
-  src="docs/media/agent-nested-agents.gif" width="900" />
-
-*Agent · Nested Agents. `Sub Agent` is an agent wired as another agent's tool, with a tool of its
-own. Depth is graph, not a special case: each level spends its own call budget and z3 validates one
-conservation law across both.*
+*Agent · Nested Agents — **the clip at the top of this file**, repeated here so the set is
+complete. `Sub Agent` is an agent wired as another agent's tool, with a tool of its own. Depth is
+graph, not a special case: each level spends its own call budget and z3 validates one conservation
+law across both.*
 
 <img alt="The Agent Escalation Ladder workflow running. The first agent turns red when its
 tool-call budget is spent, its error output leads to a second agent, which answers, and the give-up
