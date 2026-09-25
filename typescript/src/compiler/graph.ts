@@ -24,7 +24,6 @@ import { skipObservableNodes } from './analysis/skip-observers.js';
 import { wireTools } from './analysis/tools.js';
 import { profileOf, requirePositiveInt, validateNodes } from './analysis/validate.js';
 import { analyseEngineV2 } from './analysis/engine-v2/analyse.js';
-import { v2TriggerOf } from './analysis/engine-v2/shape.js';
 
 export { retryParamsOf } from './failure-chain.js';
 export { isAllRequired, joinFormOf, requiredInputsOf } from './analysis/inputs.js';
@@ -76,6 +75,15 @@ export interface AnalysisOptions {
    * `packages/@n8n/node-engine-compatibility/src/v1-step-executor.ts`).
    */
   readonly profile?: CompileProfile;
+  /**
+   * `engineV2` only: the trigger that fired, the `firedTriggerName` n8n's `V1WorkflowConverter`
+   * is handed (`analysis/engine-v2/root.ts`). The workflow is rooted at it. Without it the
+   * description's one start node names it, and without that the workflow's only trigger is
+   * taken; a workflow with several triggers and none named is refused
+   * (`v2-ambiguous-trigger`), as n8n refuses it. Refused under `v1`, whose start nodes are
+   * the description's.
+   */
+  readonly trigger?: string;
   /** Fallback seed for `A/rounds`; default {@link DEFAULT_MAX_AGENT_ROUNDS}. */
   readonly maxAgentRounds?: number;
   /** Default seed for `A/calls`; default {@link DEFAULT_MAX_AGENT_TOOL_CALLS}. */
@@ -92,15 +100,22 @@ export function analyse(workflow: WorkflowDescription, options: AnalysisOptions 
     throw new CompileError('invalid-options',
       'analyse: maxAgentRounds / maxAgentToolCalls seed the agent round, which the engineV2 profile does not have');
   }
-  if (workflow.nodes.length === 0) throw new CompileError('empty-workflow', 'compile: workflow has no nodes');
-  // The one profile decision of the analysis (ADR 0012 Consequences): both targets validate the
-  // nodes and connections alike, and diverge after that — engine v2 has none of the phases
-  // below and refuses what n8n's own validator refuses (`analysis/engine-v2/`).
-  const trigger = profile === 'engineV2' ? v2TriggerOf(workflow) : null;
+  if (profile === 'v1' && options.trigger !== undefined) {
+    throw new CompileError('invalid-options',
+      'analyse: trigger names the fired trigger of an engineV2 compile; a v1 compile starts from the start nodes');
+  }
+  // Under engineV2 a workflow with no nodes is n8n's to refuse as it refuses any other with no
+  // trigger: "Graph has no trigger node to start from" (`v2-trigger-count`, `root.ts`).
+  if (workflow.nodes.length === 0 && profile === 'v1') throw new CompileError('empty-workflow', 'compile: workflow has no nodes');
+  // The one profile decision of the analysis (ADR 0012 Consequences): engine v2 has none of the
+  // phases below. It converts the workflow as n8n's converter does, refuses what n8n's
+  // converter and validator refuse, and analyses the graph they accept (`analysis/engine-v2/`).
+  if (profile === 'engineV2') {
+    return analyseEngineV2(workflow, options.trigger === undefined ? {} : { trigger: options.trigger }, diagnostics);
+  }
   const validated = validateNodes(workflow, diagnostics);
   const { primaryStart, startNodes, raws, rawByName } = validated;
   const raw = canonicaliseConnections(workflow, rawByName, diagnostics);
-  if (trigger !== null) return analyseEngineV2({ workflow, validated, raw, trigger }, diagnostics);
   const { toolConnections, toolsOf, agentsOf, mainEdges } = wireTools(workflow, rawByName, raw, diagnostics);
   const { succ, sccOf, sccs, cyclic, edges, incoming, outgoing } = decompose(raws, mainEdges);
   const reachable = reachableFromStarts(startNodes, succ, toolConnections);

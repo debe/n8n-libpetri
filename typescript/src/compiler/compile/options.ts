@@ -50,12 +50,18 @@ export function analysisOf(workflow: WorkflowDescription, options: CompileOption
     }
     return analyse(workflow, {
       profile, maxAgentRounds: options.maxAgentRounds, maxAgentToolCalls: options.maxAgentToolCalls,
+      ...(options.trigger === undefined ? {} : { trigger: options.trigger }),
     });
   }
   if (options.maxAgentRounds !== undefined || options.maxAgentToolCalls !== undefined) {
     throw new CompileError('invalid-options',
       'compile: maxAgentRounds / maxAgentToolCalls are analysis options; with a precomputed analysis, ' +
       'pass them to analyse()');
+  }
+  if (options.trigger !== undefined && options.trigger !== options.analysis.engineV2?.trigger) {
+    throw new CompileError('invalid-options',
+      `compile: trigger '${options.trigger}' is not the fired trigger of the precomputed analysis; ` +
+      'pass it to analyse()');
   }
   if (options.analysis.profile !== profile) {
     throw new CompileError('invalid-options',

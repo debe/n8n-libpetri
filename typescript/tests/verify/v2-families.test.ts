@@ -37,7 +37,7 @@ const compileV2 = (graph: V2Graph): CompiledWorkflow =>
  */
 const V2_REFUSED: ReadonlySet<string> = new Set([
   'multiProducer', 'loopOverItems', 'userCycle', 'twoTriggers', 'ifBothOutputs',
-  'chooseBranch', 'partialRequired', 'continueErrorOutput', 'switch20',
+  'continueErrorOutput', 'switch20',
 ]);
 
 /** Every engineV2 net the suite verifies: the hand-written v2 graphs and the v1 fixtures v2 accepts. */
@@ -326,9 +326,9 @@ const CHAIN_JSON = JSON.stringify({
 });
 
 /**
- * Two triggers, the second one's branch joining the first's. n8n roots the graph at the fired
- * trigger (`rootAt`) and accepts it; the raw-JSON route does not port that yet (plan step 13),
- * so the engineV2 analysis refuses it and the CLI says so.
+ * Two triggers into one node's one slot. n8n's converter needs the fired one named
+ * (`AmbiguousTriggerError`), roots the graph at it (`rootAt`) and accepts either; so does the
+ * CLI, through the compiler's port of the converter (plan step 13) and `--trigger`.
  */
 const TWO_TRIGGERS_JSON = JSON.stringify({
   name: 'cli-v2-two-triggers',
@@ -391,11 +391,39 @@ describe('verify CLI --profile engineV2', () => {
     expect(cli.err).toMatch(/budget/);
   });
 
-  it('refuses a workflow the raw-JSON route cannot yet root, with the CompileError (exit 2)', async () => {
+  it('needs --trigger for a workflow with two triggers, as n8n\'s converter needs the name (exit 2 without)', async () => {
     const cli = io({ 'wf.json': TWO_TRIGGERS_JSON });
     expect(await runCli(['wf.json', '--profile', 'engineV2', '--quiet'], cli)).toBe(2);
-    expect(cli.err).toMatch(/v2-|trigger/);
+    expect(cli.err).toMatch(/the workflow has 2 triggers \('Trigger', 'Cron'\), so the trigger that fired must be named \(AmbiguousTriggerError/);
     expect(cli.out).toBe('');
+    for (const fired of ['Trigger', 'Cron']) {
+      const named = io({ 'wf.json': TWO_TRIGGERS_JSON });
+      expect(await runCli(['wf.json', '--profile', 'engineV2', '--trigger', fired, '--json', '--quiet'], named), fired).toBe(0);
+      const report = JSON.parse(named.out) as VerificationReport;
+      // Rooted at the fired trigger: the other is not compiled, so End has one way in.
+      expect(report.counts.violated, fired).toBe(0);
+      expect(report.counts.proven, fired).toBe(report.checks.length);
+    }
+    const unknown = io({ 'wf.json': TWO_TRIGGERS_JSON });
+    expect(await runCli(['wf.json', '--profile', 'engineV2', '--trigger', 'End', '--quiet'], unknown)).toBe(2);
+    expect(unknown.err).toMatch(/node 'End' \(n8n-nodes-base\.noOp\) is not a trigger/);
+  });
+
+  it('splices a disabled node out rather than refusing the workflow', async () => {
+    const wf = JSON.parse(CHAIN_JSON) as { nodes: { name: string; disabled?: boolean }[] };
+    wf.nodes.find((n) => n.name === 'Set')!.disabled = true;
+    const cli = io({ 'wf.json': JSON.stringify(wf) });
+    expect(await runCli(['wf.json', '--profile', 'engineV2', '--json', '--quiet'], cli)).toBe(0);
+    expect((JSON.parse(cli.out) as VerificationReport).counts.violated).toBe(0);
+  });
+
+  it('takes --trigger under engineV2 only, and --start under v1 only (usage, exit 2)', async () => {
+    const v1 = io({ 'wf.json': CHAIN_JSON });
+    expect(await runCli(['wf.json', '--trigger', 'Trigger', '--quiet'], v1)).toBe(2);
+    expect(v1.err).toContain('--trigger names the fired trigger of --profile engineV2');
+    const v2 = io({ 'wf.json': CHAIN_JSON });
+    expect(await runCli(['wf.json', '--profile', 'engineV2', '--start', 'Trigger', '--quiet'], v2)).toBe(2);
+    expect(v2.err).toContain('under --profile engineV2 name the fired trigger with --trigger');
   });
 
   it('takes only the two profile names', async () => {

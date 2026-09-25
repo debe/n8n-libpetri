@@ -6,20 +6,30 @@
  */
 import { analyse, kSafety } from '../../../src/compiler/index.js';
 import { graphToDescription } from '../../../src/conformance/v2/graph.js';
-import { ACCEPTED, analyseV2, edge, loop, trigger, v1 } from '../../fixtures/v2-graphs.js';
-import { agentOneTool, diamond, expressionRef, failurePolicy, retry } from '../../fixtures/workflows.js';
+import { ACCEPTED, analyseV2, loop } from '../../fixtures/v2-graphs.js';
+import { agentOneTool, conn, diamond, expressionRef, failurePolicy, node, retry, workflow } from '../../fixtures/workflows.js';
 
 describe('the compiled node set (decision 9)', () => {
   it('is the trigger and its descendants over every edge, back edges included', () => {
     expect([...analyseV2(loop).reachable].sort()).toEqual(['After', 'B', 'Body', 'T']);
   });
 
-  it('leaves out, with a diagnostic, the orphan disabled-node splicing leaves when it feeds nothing reached', () => {
-    // A -> Disabled.1 -> Y spliced away leaves Y with no incoming edge (`spliceOutDisabledNodes`
-    // joins slot 0 only); v2 owes Y no step (`countExpectedSettledSteps`), and neither do we.
-    const a = analyseV2({ nodes: [trigger('T'), v1('A'), v1('Y'), v1('W')], edges: [edge('T', 'A'), edge('Y', 'W')] });
+  it('leaves out, with a diagnostic, what the converter drops and the orphan disabled-node splicing leaves', () => {
+    // T -> A -> D.1 -> Y -> W, D disabled, X unwired: `rootAt` drops X; `spliceOutDisabledNodes`
+    // joins slot 0 only, so Y and W lose their way in and stay in the graph unreached. v2 owes
+    // them no step (`countExpectedSettledSteps`), and neither do we.
+    const wf = workflow('orphans', [
+      node('T', 'trigger', [0, 0]), node('A', 'set', [1, 0]), node('D', 'merge', [2, 0], { disabled: true }),
+      node('Y', 'set', [3, 0]), node('W', 'set', [4, 0]), node('X', 'set', [5, 0]),
+    ], [conn('T', 0, 'A', 0), conn('A', 0, 'D', 1), conn('D', 0, 'Y', 0), conn('Y', 0, 'W', 0)], 'T');
+    const a = analyse(wf, { profile: 'engineV2' });
+    expect(a.nodes.map((n) => n.node.name)).toEqual(['T', 'A', 'Y', 'W']);
     expect([...a.reachable].sort()).toEqual(['A', 'T']);
     expect(a.diagnostics).toEqual([
+      "node 'X' is not reachable from the trigger 'T'; engine v2's converter drops it (rootAt), so it is not " +
+      'compiled under engineV2',
+      "node 'D' is disabled; engine v2's converter splices it out, joining the edges into its input 0 to the edges " +
+      'out of it (spliceOutDisabledNodes), so it is not compiled under engineV2',
       "node 'Y' is not reachable from the trigger; engine v2 owes it no step (countExpectedSettledSteps), so it " +
       'is not compiled under engineV2',
       "node 'W' is not reachable from the trigger; engine v2 owes it no step (countExpectedSettledSteps), so it " +
@@ -69,8 +79,8 @@ describe('the v1 phases, not run under engineV2', () => {
     expect(diagnostics(agentOneTool)).toEqual([
       'ai_tool connection Calculator -> Agent is ignored under engineV2: engine v2 roots the graph at the trigger ' +
       'through main connections only, and fails an agent at its first tool call',
-      "node 'Calculator' is not reachable from the trigger; engine v2 owes it no step (countExpectedSettledSteps), " +
-      'so it is not compiled under engineV2',
+      "node 'Calculator' is not reachable from the trigger 'Trigger'; engine v2's converter drops it (rootAt), so it " +
+      'is not compiled under engineV2',
     ]);
   });
 

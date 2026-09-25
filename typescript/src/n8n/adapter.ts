@@ -26,6 +26,8 @@
  *   the workflow (self references are classified by the compiler) — `adapter/references.ts`;
  * - the execution policy, resolved once for this adapter and the verify CLI —
  *   `adapter/policy.ts`;
+ * - what only an `engineV2` compile reads: a Merge's `mode`, a Split In Batches' batch
+ *   configuration and the non-`main` connection types a node is the source of — `adapter/engine-v2.ts`;
  * - start nodes: every node on `executionData.nodeExecutionStack` (the first one is the
  *   primary) plus every node with `runData`, so a resumed execution is compiled from what
  *   already ran — `adapter/start-nodes.ts`.
@@ -53,6 +55,7 @@ export {
   inheritableWorkflowPolicy, nodePolicyOf, parseWorkflowPolicy, resolveNodePolicy, workflowPolicyOf,
 } from './adapter/policy.js';
 export { nodePrefixOf } from './adapter/node.js';
+export { aiOutputsOf, batchDescriptionOf, engineV2FieldsOf, strayConnectionsIn } from './adapter/engine-v2.js';
 
 export function describeWorkflow(
   workflow: Workflow,
@@ -78,7 +81,8 @@ export function describeWorkflow(
     shapes.set(node.name, nodeShapeOf(workflow, node, options));
     references.set(node.name, scanExpressionReferences(node.parameters, names));
     const policy = nodePolicyOf(node, workflow, workflowPolicy, policyDiagnostics);
-    return liveNodeDescription(node, nodePrefixOf(node.id, index, used), policy);
+    return liveNodeDescription(node, nodePrefixOf(node.id, index, used), policy,
+      workflow.connectionsBySourceNode[node.name]);
   });
   return {
     ...(policyDiagnostics.length === 0 ? {} : { diagnostics: policyDiagnostics }),

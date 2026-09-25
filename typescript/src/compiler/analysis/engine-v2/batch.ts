@@ -39,12 +39,3 @@ export const MAX_SLOT_INDEX = 100;
 export function isV2BatchNode(node: Pick<NodeDescription, 'type' | 'typeVersion'>): boolean {
   return node.type === SPLIT_IN_BATCHES_TYPE && node.typeVersion === SPLIT_IN_BATCHES_TYPE_VERSION;
 }
-
-/**
- * `isBatchStepConfig` (`graph/workflow-graph.ts`) on a description: a literal batch size that
- * is a whole number of at least 1. An `'expression'` size, or none, is not one.
- */
-export function hasLiteralBatchSize(node: Pick<NodeDescription, 'batch'>): boolean {
-  const size = node.batch?.batchSize;
-  return typeof size === 'number' && Number.isInteger(size) && size >= 1;
-}

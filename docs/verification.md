@@ -42,6 +42,7 @@ Options:
 | Option | Meaning |
 |---|---|
 | `--profile v1\|engineV2` | Compile target. Default `v1`. `engineV2` runs the `settlement` family (below). |
+| `--trigger NODE` | `engineV2` only: the trigger that fired. Default: the workflow's only trigger; required when it has several, as n8n's converter requires the name. |
 | `--budget k` | Requested concurrency budget. The compiler may lower it for unsafe shapes. Refused under `engineV2`. |
 | `--property NAME` | Select a property family. Repeatable. |
 | `--max-classes n` | State-class cap. Default 200,000; zero disables graph exploration. |
@@ -169,10 +170,21 @@ The v1 families asked of an `engineV2` net are reported as one `unknown` check e
 question, if there is one. The same applies to `settlement` asked of a v1 net. Exit code 3 does
 not apply under `engineV2`, because none of its checks is solver-backed.
 
-The raw workflow-JSON route is not yet an acceptance path for engine v2. The converter's
-rooting at the fired trigger, disabled-node splicing and back-edge marking are not ported
-(plan step 13). The CLI can therefore refuse, with the compiler's `CompileError` and exit 2, a
-workflow that n8n's converter accepts: 75 of the 209 corpus entries n8n accepts.
+From a raw workflow export the profile runs the compiler's port of n8n's converter (plan step
+13, `compiler/analysis/engine-v2/root.ts`): the workflow is rooted at the trigger that fired,
+disabled nodes are spliced out, and what n8n's converter or validator refuses is refused with
+the compiler's `CompileError`, exit 2. n8n's converter needs the fired trigger named when a
+workflow has several, and so does the CLI: `--trigger NODE` (`--start` is v1's and refused
+under `engineV2`). Measured by `tasks/v2-acceptance.mts` against n8n@2.41.3's own converter and
+validator on the 310 corpus entries and 12,019 single-change mutants of the accepted ones: the
+verdicts agree on every one, the graphs (nodes, edges, slots, `isBackEdge`) on every entry both
+accept, and the refusal codes on every one both refuse. Under `engineV2` the reader hands the
+port n8n's workflow, not the scheduler's graph — sticky notes and sub-nodes kept, connections
+through names that are no node walked, a connection `index` that is not a number refused — and
+the mutants include each of those readings. Two exports carry no usable node ids; n8n assigns
+ids when a workflow is saved (`addNodeIds`), and the comparison is made with them assigned. What
+the reader still cannot hand over as n8n reads it (repeated names, exports n8n's converter
+crashes on) is divergence row 34.
 
 ## Why the workflow-net soundness literature does not apply here
 

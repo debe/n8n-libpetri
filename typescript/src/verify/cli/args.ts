@@ -12,7 +12,7 @@ export const USAGE =
   'usage: n8n-libpetri verify <workflow.json> [--profile v1|engineV2] [--budget k] [--property NAME]...\n' +
   '                          [--timeout ms]\n' +
   '                          [--max-classes n] [--smt-fallback auto|off|force] [--node-types FILE]\n' +
-  '                          [--start NODE] [--mutex A,B]... [--all-pairs] [--no-semiflows]\n' +
+  '                          [--start NODE] [--trigger NODE] [--mutex A,B]... [--all-pairs] [--no-semiflows]\n' +
   '                          [--strict] [--json] [--out FILE] [--quiet]\n' +
   `  properties: ${PROPERTY_NAMES.join(', ')}\n` +
   '  exit: 0 clean, 1 violation (or unknown/bounded under --strict), 2 usage, 3 no usable z3';
@@ -41,6 +41,7 @@ interface Flags {
   smtFallback?: SmtFallbackMode;
   nodeTypesFile: string | null;
   startNode?: string;
+  trigger?: string;
   allPairs: boolean;
   semiflows: boolean;
   json: boolean;
@@ -57,6 +58,7 @@ function optionsOf(f: Flags): VerifyOptions {
   const selected = f.properties.length > 0 ? f.properties : undefined;
   return {
     ...(f.profile === undefined ? {} : { profile: f.profile }),
+    ...(f.trigger === undefined ? {} : { trigger: f.trigger }),
     ...(f.budget === undefined ? {} : { budget: f.budget }),
     ...(f.timeoutMs === undefined ? {} : { timeoutMs: f.timeoutMs }),
     ...(f.maxClasses === undefined ? {} : { maxClasses: f.maxClasses }),
@@ -84,6 +86,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       '--smt-fallback': (mode) => { f.smtFallback = smtFallbackOf(mode); },
       '--node-types': (v) => { f.nodeTypesFile = v; },
       '--start': (v) => { f.startNode = v; },
+      '--trigger': (v) => { f.trigger = v; },
       '--mutex': (v) => { f.pairs.push(mutexPairOf(v)); },
       '--out': (v) => { f.out = v; },
     },
@@ -97,6 +100,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     positional: (word) => { f.files.push(word); },
   });
   if (f.files.length !== 1) throw new UsageError('exactly one workflow file is required');
+  // Under engineV2 the start is the trigger that fired, which n8n's converter is handed by name.
+  if (f.trigger !== undefined && f.profile !== 'engineV2') {
+    throw new UsageError('--trigger names the fired trigger of --profile engineV2; a v1 run starts from --start');
+  }
+  if (f.startNode !== undefined && f.profile === 'engineV2') {
+    throw new UsageError('--start is the v1 start node; under --profile engineV2 name the fired trigger with --trigger');
+  }
   return {
     file: f.files[0]!,
     options: optionsOf(f),

@@ -40,12 +40,17 @@
  *   join diagnostic is for. Supply `--node-types` for such a workflow.
  *
  * The start node is the first node with no incoming main connection, preferring one whose
- * type looks like a trigger, in canvas order; `--start` overrides it.
+ * type looks like a trigger, in canvas order; `--start` overrides it. Under the `engineV2`
+ * profile none is picked: the compiler resolves the trigger that fired as n8n's converter does
+ * (`--trigger` names it). Under `engineV2` the description is also n8n's workflow rather than the
+ * scheduler's graph: named annotations and sub-nodes are kept, the connections n8n's converter
+ * walks by name ride `strayConnections`, and a connection `index` that is not a number is `NaN`.
  *
  * The parts live under `workflow-json/`: the `--node-types` file, node entries, connections,
  * shapes and the start node. This module assembles the description and re-exports them.
  */
-import type { ExecutionPolicy, NodeTypeShape, WorkflowDescription } from '../compiler/index.js';
+import type { CompileProfile, ExecutionPolicy, NodeTypeShape, WorkflowDescription } from '../compiler/index.js';
+import { strayConnectionsIn } from '../n8n/adapter/engine-v2.js';
 import { scheduledNodesOf } from '../n8n/adapter/graph.js';
 import { parseWorkflowPolicy, policyFieldsOf, resolveNodePolicy } from '../n8n/adapter/policy.js';
 import { recordOf } from '../n8n/adapter/readers.js';
@@ -80,6 +85,13 @@ export interface WorkflowJsonOptions {
   readonly nodeTypes?: NodeTypesFile;
   /** Overrides the start-node choice. */
   readonly startNode?: string;
+  /**
+   * The target the description is for; default `v1`. Under `engineV2` no start node is picked:
+   * n8n's converter resolves the trigger that fired itself — the one named, or the workflow's only
+   * trigger — and so does the compiler (`CompileOptions.trigger`). A {@link startNode} given
+   * under `engineV2` is refused: name the fired trigger with the compile option instead.
+   */
+  readonly profile?: CompileProfile;
 }
 
 /**
@@ -104,25 +116,41 @@ function policiesOf(settings: unknown, { nodes, records }: JsonNodes, diagnostic
 /** Parses an n8n workflow JSON export (the object, not the text). */
 export function describeWorkflowJson(raw: unknown, options: WorkflowJsonOptions = {}): WorkflowJsonResult {
   const root = asRecord(raw, 'workflow');
-  const json = nodesOf(root);
+  const engineV2 = options.profile === 'engineV2';
+  const json = nodesOf(root, engineV2);
   const { names } = json;
-  const parsed = connectionsOf(root['connections'], names);
+  const parsed = connectionsOf(root['connections'], names, engineV2, json.nameless.at(-1));
   const connections = parsed.connections;
 
   // The scheduler's graph, not the canvas's — the same rule `n8n/adapter.ts` applies to a live
   // `Workflow`, because one net serves execution and verification and a CLI that analysed a
-  // different set of nodes would report about a different net.
-  const { scheduled, diagnostics: dropped } = scheduledNodesOf(
-    json.nodes, connections, parsed.toolConnections, parsed.subNodeSources);
+  // different set of nodes would report about a different net. Under `engineV2` every node is
+  // kept, and so is every connection n8n's converter walks: its converter, not a scheduler,
+  // decides which nodes become steps (`rootAt`), and it checks the nodes it roots whatever their
+  // type — a sticky note wired on the main path, a sub-node named as the fired trigger or typed
+  // like a trigger — so the port must be handed n8n's node set and connections map.
+  const { scheduled, diagnostics: dropped } = engineV2
+    ? { scheduled: json.nodes, diagnostics: [] }
+    : scheduledNodesOf(json.nodes, connections, parsed.toolConnections, parsed.subNodeSources);
+  const bySource = recordOf(root['connections']);
+  const stray = engineV2 && bySource !== undefined ? strayConnectionsIn(bySource, names, json.nameless) : undefined;
 
   // Keyed by name off the **unfiltered** list: the records and `nodes` are index-aligned, and
   // dropping entries from `nodes` first would desynchronise them.
   const parametersOf = new Map<string, Record<string, unknown>>(
     json.nodes.map((n, i) => [n.name, recordOf(json.records[i]!['parameters']) ?? {}]));
 
+  // The connection heuristic guesses a count from the slots in use. Under `engineV2` a slot is
+  // n8n's, copied as written, and only `validateExecutableGraph`'s rule judges it, once the graph
+  // is rooted — a count plays no part in the verdict. So a slot no count can hold (`NaN`, or a
+  // fractional index such as 1.5) is no evidence for one: guessing from it would make a count the
+  // compiler refuses (`invalid-count`) before the port runs, even for an edge `rootAt` drops.
+  const guessFrom = engineV2
+    ? connections.filter((c) => Number.isSafeInteger(c.inputIndex) && c.inputIndex >= 0)
+    : connections;
   const warnings: string[] = [];
   const shapes = new Map<string, NodeTypeShape>(scheduled.map((node) => [
-    node.name, shapeOf(node, parametersOf.get(node.name) ?? {}, connections, options.nodeTypes ?? {}, warnings)]));
+    node.name, shapeOf(node, parametersOf.get(node.name) ?? {}, guessFrom, options.nodeTypes ?? {}, warnings)]));
 
   // Policy notes and dropped connections are *diagnostics*, not shape guesses: `warnings` is
   // the CLI's "the compiled net may differ from the workflow" list, and a policy this build
@@ -130,7 +158,10 @@ export function describeWorkflowJson(raw: unknown, options: WorkflowJsonOptions 
   const policyDiagnostics: string[] = [...parsed.diagnostics];
   const policies = policiesOf(root['settings'], json, policyDiagnostics);
 
-  const startNode = startNodeOf(options.startNode, scheduled, names, connections);
+  if (options.profile === 'engineV2' && options.startNode !== undefined) {
+    throw new Error('under engineV2 the start node is the trigger that fired: name it with the trigger option, not a start node');
+  }
+  const startNode = options.profile === 'engineV2' ? undefined : startNodeOf(options.startNode, scheduled, names, connections);
 
   const references = new Map<string, string[]>(scheduled.map((node) => [
     node.name, scanExpressionReferences(parametersOf.get(node.name) ?? {}, names)]));
@@ -147,7 +178,8 @@ export function describeWorkflowJson(raw: unknown, options: WorkflowJsonOptions 
     nodes: scheduled.map((n) => ({ ...n, ...policyFieldsOf(parametersOf.get(n.name), policies.get(n.name)) })),
     connections,
     toolConnections: parsed.toolConnections,
-    startNode,
+    ...(stray === undefined || (stray.main.length === 0 && stray.sources.length === 0) ? {} : { strayConnections: stray }),
+    ...(startNode === undefined ? {} : { startNode }),
     ...recordedLookups(shapes, references),
   };
   return { description, warnings };

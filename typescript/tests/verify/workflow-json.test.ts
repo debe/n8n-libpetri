@@ -10,6 +10,7 @@ import { analyse, compile } from '../../src/compiler/index.js';
 import {
   BUILT_IN_SHAPES, connectionsOf, describeWorkflowJson, looksLikeTrigger, parseWorkflowJson, pickStartNode,
 } from '../../src/verify/index.js';
+import type { NodeTypesFile } from '../../src/verify/workflow-json.js';
 import { agentOf } from '../compiler/support.js';
 
 /** A minimal but realistic export: a webhook, an IF, two branches and a Merge. */
@@ -352,5 +353,238 @@ describe('agent tool dispatch in an exported workflow', () => {
     const a = analyse(describeWorkflowJson(withExpression).description);
     expect(a.byName.get('AI Agent')!.roundsAssumed).toBe(true);
     expect(a.diagnostics.join('\n')).toMatch(/does not declare a static maxIterations/);
+  });
+});
+
+describe('describeWorkflowJson for engine v2 (tasks/v2-profile-plan.md step 13)', () => {
+  const json = {
+    nodes: [
+      { id: 't', name: 'T', type: 'n8n-nodes-base.manualTrigger', typeVersion: 1, position: [0, 0], parameters: {} },
+      { id: 'c', name: 'Cron', type: 'n8n-nodes-base.scheduleTrigger', typeVersion: 1, position: [0, 300], parameters: {} },
+      { id: 'b', name: 'Loop', type: 'n8n-nodes-base.splitInBatches', typeVersion: 3, position: [200, 0], parameters: { batchSize: 4, options: {} } },
+      { id: 'x', name: 'Body', type: 'n8n-nodes-base.noOp', typeVersion: 1, position: [400, 0], parameters: {} },
+      { id: 'm', name: 'Merge', type: 'n8n-nodes-base.merge', typeVersion: 3, position: [600, 0], parameters: { mode: 'append' } },
+      { id: 'l', name: 'LM', type: '@n8n/n8n-nodes-langchain.lmChatOpenAi', typeVersion: 1, position: [400, 300], parameters: {} },
+    ],
+    connections: {
+      T: { main: [[{ node: 'Loop', type: 'main', index: 0 }]] },
+      Cron: { main: [[{ node: 'Merge', type: 'main', index: 1 }]] },
+      Loop: { main: [[{ node: 'Merge', type: 'main', index: 0 }], [{ node: 'Body', type: 'main', index: 0 }]] },
+      Body: { main: [[{ node: 'Loop', type: 'main', index: 0 }]] },
+      LM: { ai_languageModel: [[{ node: 'Body', type: 'ai_languageModel', index: 0 }]] },
+    },
+  };
+
+  it('fills the fields the converter reads and picks no start node', () => {
+    const { description } = describeWorkflowJson(json, { profile: 'engineV2' });
+    expect(description.startNode).toBeUndefined();
+    expect(description.startNodes).toBeUndefined();
+    const byName = new Map(description.nodes.map((n) => [n.name, n]));
+    expect(byName.get('Loop')!.batch).toEqual({ batchSize: 4 });
+    expect(byName.get('Merge')!.mergeMode).toBe('append');
+    // n8n's node set, not the scheduler's graph: the sub-node is kept, with its connection type,
+    // and rootAt drops it from the graph since no main connection reaches it.
+    expect(byName.get('LM')!.aiOutputs).toEqual(['ai_languageModel']);
+    expect(describeWorkflowJson(json).description.nodes.some((n) => n.name === 'LM')).toBe(false);
+    // Under v1 the start node is picked as before.
+    expect(describeWorkflowJson(json).description.startNode).toBe('T');
+  });
+
+  it('refuses a start node under engineV2: the fired trigger is the compile option', () => {
+    expect(() => describeWorkflowJson(json, { profile: 'engineV2', startNode: 'T' })).toThrow(/name it with the trigger option/);
+  });
+
+  it('compiles for the fired trigger n8n\'s way: both triggers name one, each rooted apart', () => {
+    const { description } = describeWorkflowJson(json, { profile: 'engineV2' });
+    expect(() => analyse(description, { profile: 'engineV2' })).toThrow(/the workflow has 2 triggers/);
+    const fromT = analyse(description, { profile: 'engineV2', trigger: 'T' });
+    expect(fromT.nodes.map((n) => n.node.name).sort()).toEqual(['Body', 'Loop', 'Merge', 'T']);
+    expect(fromT.engineV2!.loops.map((l) => l.batchNode)).toEqual(['Loop']);
+    const fromCron = compile(description, { profile: 'engineV2', trigger: 'Cron' });
+    expect(fromCron.netMap.settlements.map((g) => g.node).sort()).toEqual(['Cron', 'Merge']);
+  });
+});
+
+/**
+ * Raw-JSON inputs where the scheduler's reading of an export is not n8n's converter's (review
+ * findings on step 13). Each verdict below is what n8n@2.41.3's `V1WorkflowConverter.convert`
+ * followed by `validateExecutableGraph` gives the same export, reproduced against the pinned
+ * dist; `tasks/v2-acceptance.mts` re-checks each shape against n8n on the corpus's mutants.
+ */
+describe('describeWorkflowJson under engineV2 hands the port n8n\'s workflow, not the scheduler\'s graph', () => {
+  const node = (name: string, type: string, extra: Record<string, unknown> = {}) =>
+    ({ id: `id-${name}`, name, type, typeVersion: 1, position: [0, 0], parameters: {}, ...extra });
+  const main = (...targets: string[]) => ({ main: [targets.map((n) => ({ node: n, type: 'main', index: 0 }))] });
+  const TRIGGER = 'n8n-nodes-base.manualTrigger';
+  const LM = '@n8n/n8n-nodes-langchain.lmChatOpenAi';
+  const AGENT = '@n8n/n8n-nodes-langchain.agent';
+  /** `code` of the CompileError the engineV2 analysis throws, `accepted: nodes`, or the error. */
+  const v2 = (raw: unknown, trigger?: string, nodeTypes?: NodeTypesFile): string => {
+    try {
+      const { description } = describeWorkflowJson(raw, { profile: 'engineV2', ...(nodeTypes === undefined ? {} : { nodeTypes }) });
+      const a = analyse(description, { profile: 'engineV2', ...(trigger === undefined ? {} : { trigger }) });
+      compile(description, { profile: 'engineV2', ...(trigger === undefined ? {} : { trigger }), analysis: a });
+      return `accepted: ${[...a.reachable].sort().join(', ')}`;
+    } catch (e) {
+      return (e as { code?: string }).code ?? String(e);
+    }
+  };
+
+  // (a) n8n: UnsupportedWorkflowError on B (continueErrorOutput): rootAt reaches B through Ghost.
+  it('roots through a connections key that is no node, as getChildNodes walks the map by name', () => {
+    const ghost = { nodes: [node('T', TRIGGER), node('B', 'n8n-nodes-base.set', { onError: 'continueErrorOutput' })],
+      connections: { T: main('Ghost'), Ghost: main('B') } };
+    expect(v2(ghost)).toBe('v2-continue-error-output');
+    expect(describeWorkflowJson(ghost, { profile: 'engineV2' }).description.strayConnections)
+      .toEqual({ main: [{ from: 'T', to: 'Ghost' }, { from: 'Ghost', to: 'B' }], sources: [] });
+    // Under v1 nothing changes: the hops are dropped with a diagnostic, as before.
+    expect(describeWorkflowJson(ghost).description.strayConnections).toBeUndefined();
+  });
+
+  // (b) n8n: GraphValidationError "slot index undefined; slot indices are non-negative integers".
+  it('reads a main connection index that is no number as NaN, which the slot rule refuses', () => {
+    for (const index of [undefined, '1']) {
+      const wf = { nodes: [node('T', TRIGGER), node('A', 'n8n-nodes-base.set')],
+        connections: { T: { main: [[{ node: 'A', type: 'main', ...(index === undefined ? {} : { index }) }]] } } };
+      expect(v2(wf), String(index)).toBe('input-index-out-of-range');
+      // v1 reads it as 0, as before.
+      expect(describeWorkflowJson(wf).description.connections[0]!.inputIndex).toBe(0);
+    }
+  });
+
+  // (c) n8n: UnsupportedWorkflowError, "sets its Merge mode with an expression": '3' >= 2.
+  it('compares a Merge version written as a string as n8n does', () => {
+    const wf = { nodes: [node('T', TRIGGER), node('M', 'n8n-nodes-base.merge', { typeVersion: '3', parameters: { mode: '={{ "append" }}' } })],
+      connections: { T: main('M') } };
+    expect(v2(wf)).toBe('v2-merge-mode');
+    // A Split In Batches whose version is the string '3' is not version 3 there (`!==`): refused either way.
+    const sib = { nodes: [node('T', TRIGGER), node('L', 'n8n-nodes-base.splitInBatches', { typeVersion: '3' })], connections: { T: main('L') } };
+    expect(v2(sib)).toBe('v2-batch-config');
+  });
+
+  // (d) n8n: UnsupportedWorkflowError on B; with B fine it accepts, the note a step of the graph.
+  it('keeps a named sticky note, so one wired on the main path is rooted through', () => {
+    const wf = (onError?: string) => ({
+      nodes: [node('T', TRIGGER), node('S', 'n8n-nodes-base.stickyNote'), node('B', 'n8n-nodes-base.set', onError === undefined ? {} : { onError })],
+      connections: { T: main('S'), S: main('B') } });
+    expect(v2(wf('continueErrorOutput'))).toBe('v2-continue-error-output');
+    expect(v2(wf())).toBe('accepted: B, S, T');
+  });
+
+  // Review finding (round 3): a `main` target with no `node` field puts `undefined` in rootAt's
+  // reachable set, which keeps every nameless node, and toEdges turns it into an edge to the last
+  // of them. n8n@2.41.3: T -> {no node} beside a nameless note is accepted as nodes [T, <nameless>]
+  // with edge T -> <nameless>; with the note on continueErrorOutput it is refused.
+  it('describes a nameless note under a name of its own, which a target with no node reaches', () => {
+    const note = (extra: Record<string, unknown> = {}) => ({ id: 's', type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [0, 0], parameters: {}, ...extra });
+    const nodeless = { type: 'main', index: 0 };
+    const wf = (...notes: Record<string, unknown>[]) => ({ nodes: [node('T', TRIGGER), ...notes], connections: { T: { main: [[nodeless]] } } });
+    const { description } = describeWorkflowJson(wf(note()), { profile: 'engineV2' });
+    expect(description.nodes.map((n) => n.name)).toEqual(['T', '(nameless nodes[1])']);
+    expect(description.connections).toEqual([{ from: 'T', outputIndex: 0, to: '(nameless nodes[1])', inputIndex: 0 }]);
+    expect(v2(wf(note()))).toBe('accepted: (nameless nodes[1]), T');
+    expect(v2(wf(note({ onError: 'continueErrorOutput' })))).toBe('v2-continue-error-output');
+    // Every nameless node is kept, the edge goes to the last: the first is checked, and is an orphan.
+    expect(v2(wf(note({ id: 's1', onError: 'continueErrorOutput' }), note({ id: 's2' })))).toBe('v2-continue-error-output');
+    expect(v2(wf(note({ id: 's1' }), note({ id: 's2' })))).toBe('accepted: (nameless nodes[2]), T');
+    // No target without a node: nothing reaches the note, and the port drops it (n8n: accepts [T]).
+    expect(v2({ nodes: [node('T', TRIGGER), note({ onError: 'continueErrorOutput' })], connections: {} })).toBe('accepted: T');
+    // The walk goes on through the map's key 'undefined' (n8n: refuses B), and not through a node
+    // of that name, which it does not keep (n8n: accepts [T, B]).
+    const through = (extra: Record<string, unknown>) => ({ nodes: [node('T', TRIGGER), node('B', 'n8n-nodes-base.set', extra)],
+      connections: { T: { main: [[nodeless]] }, undefined: main('B') } });
+    expect(v2(through({ onError: 'continueErrorOutput' }))).toBe('v2-continue-error-output');
+    const named = { ...through({}), nodes: [...through({}).nodes, node('undefined', 'n8n-nodes-base.set', { onError: 'continueErrorOutput' })] };
+    expect(v2(named)).toBe('accepted: T');
+    const graph = analyse(describeWorkflowJson(named, { profile: 'engineV2' }).description, { profile: 'engineV2' });
+    expect(graph.nodes.map((n) => n.node.name).sort()).toEqual(['B', 'T']);
+    expect(graph.edges).toEqual([]);
+    // A name no node has: a node already called that pushes it aside. v1 still drops every note.
+    const taken = { nodes: [node('T', TRIGGER), node('(nameless nodes[2])', 'n8n-nodes-base.set'), note()], connections: {} };
+    expect(describeWorkflowJson(taken, { profile: 'engineV2' }).description.nodes.map((n) => n.name))
+      .toEqual(['T', '(nameless nodes[2])', "(nameless nodes[2])'"]);
+    expect(describeWorkflowJson(wf(note())).description.nodes.map((n) => n.name)).toEqual(['T']);
+  });
+
+  // Review finding (round 3): n8n's dedupeEdges keys `${from}|${to}|${out}|${in}` over node ids.
+  it('drops the edge n8n\'s dedupe drops when node ids hold `|`', () => {
+    const wf = { nodes: [node('T', TRIGGER), { ...node('A', 'n8n-nodes-base.set'), id: 'x|y' }, { ...node('B', 'n8n-nodes-base.set'), id: 'z' },
+      { ...node('C', 'n8n-nodes-base.set'), id: 'x' }, { ...node('D', 'n8n-nodes-base.set'), id: 'y|z' }],
+    connections: { T: main('A', 'C'), A: main('B'), C: main('D') } };
+    const { description } = describeWorkflowJson(wf, { profile: 'engineV2' });
+    const a = analyse(description, { profile: 'engineV2' });
+    // n8n@2.41.3: nodes [T, A, B, C, D], edges T -> A, T -> C, C -> D; B is in the graph and never runs.
+    expect(a.nodes.map((n) => n.node.name).sort()).toEqual(['A', 'B', 'C', 'D', 'T']);
+    expect(a.edges.map((e) => `${e.from} -> ${e.to}`).sort()).toEqual(['C -> D', 'T -> A', 'T -> C']);
+  });
+
+  // Review finding (round 3): the dedupe key prints the index as written, so '0' beside a later 0
+  // is one key holding the 0. n8n@2.41.3 accepts ['0', 0] as T -> A.0, refuses [0, '0'] ("slot index 0").
+  it('lets n8n\'s dedupe decide between an index written "0" and a 0 on the same edge', () => {
+    const wf = (...indexes: unknown[]) => ({ nodes: [node('T', TRIGGER), node('A', 'n8n-nodes-base.set')],
+      connections: { T: { main: [indexes.map((index) => ({ node: 'A', type: 'main', index }))] } } });
+    expect(v2(wf('0', 0))).toBe('accepted: A, T');
+    expect(v2(wf([0], 0))).toBe('accepted: A, T');
+    expect(v2(wf(0, '0'))).toBe('input-index-out-of-range');
+    expect(v2(wf('0'))).toBe('input-index-out-of-range');
+    expect(describeWorkflowJson(wf('0'), { profile: 'engineV2' }).description.connections)
+      .toEqual([{ from: 'T', outputIndex: 0, to: 'A', inputIndex: Number.NaN, indexKey: '0' }]);
+    // v1 reads it as 0 and carries no key.
+    expect(describeWorkflowJson(wf('0')).description.connections).toEqual([{ from: 'T', outputIndex: 0, to: 'A', inputIndex: 0 }]);
+  });
+
+  // Review finding (round 3): a guessed count came from a fractional slot on an edge rootAt drops,
+  // and the compiler refused it (invalid-count) before the port ran. n8n@2.41.3 accepts [T -> A].
+  it('guesses no port count from a slot no count can hold', () => {
+    const wf = { nodes: [node('T', TRIGGER), node('A', 'acme.custom'), node('U', 'n8n-nodes-base.webhook')],
+      connections: { T: main('A'), U: { main: [[{ node: 'A', type: 'main', index: 1.5 }]] } } };
+    expect(v2(wf, 'T')).toBe('accepted: A, T');
+    // Rooted, the slot rule refuses the edge itself, as n8n does ("slot index 1.5").
+    expect(v2({ ...wf, connections: { T: { main: [[{ node: 'A', type: 'main', index: 1.5 }]] } } }, 'T')).toBe('input-index-out-of-range');
+  });
+
+  // Recorded, not reproduced (docs/divergences.md row 34, "Exports n8n's converter crashes on"):
+  // n8n@2.41.3 throws "TypeError: connections.hasOwnProperty is not a function" whenever the
+  // connections map has a key `hasOwnProperty` and rootAt runs, reached or not. A crash has no throw
+  // site for V2_REFUSALS to map, so the port gives the verdict the rest of the workflow earns.
+  it('pins the port\'s verdict on a connections key n8n\'s rootAt crashes on', () => {
+    const wf = { nodes: [node('T', TRIGGER), node('hasOwnProperty', 'n8n-nodes-base.set'), node('B', 'n8n-nodes-base.set')],
+      connections: { T: main('hasOwnProperty'), hasOwnProperty: main('B') } };
+    expect(v2(wf)).toBe('accepted: B, T, hasOwnProperty');
+  });
+
+  // (e) n8n: AmbiguousTriggerError ("T", "X"): the trigger rule reads types, not wiring.
+  it('keeps a sub-node, so one whose type reads as a trigger makes the trigger ambiguous', () => {
+    const wf = { nodes: [node('T', TRIGGER), node('Agent', AGENT), node('X', 'acme.fooTriggerModel')],
+      connections: { T: main('Agent'), X: { ai_languageModel: [[{ node: 'Agent', type: 'ai_languageModel', index: 0 }]] } } };
+    expect(v2(wf)).toBe('v2-ambiguous-trigger');
+    expect(v2(wf, 'T')).toBe('accepted: Agent, T');
+  });
+
+  // Finding 2: the codes n8n gives when the dropped nodes were the first defect.
+  it('gives n8n\'s code when the node the scheduler would drop is the one n8n refuses', () => {
+    const lm = (extra: Record<string, unknown> = {}) => ({ nodes: [node('Agent', AGENT), node('LM', LM, extra)],
+      connections: { LM: { ai_languageModel: [[{ node: 'Agent', type: 'ai_languageModel', index: 0 }]] } } });
+    // No trigger, so nothing is rooted: n8n checks LM (UnsupportedConnectionTypeError, then its onError first).
+    expect(v2(lm())).toBe('v2-connection-type');
+    expect(v2(lm({ onError: 'continueErrorOutput' }))).toBe('v2-continue-error-output');
+    // Named as the fired trigger: n8n finds the node and refuses it as no trigger (NotATriggerError).
+    const named = { nodes: [node('T', TRIGGER), node('S', 'n8n-nodes-base.stickyNote'), ...lm().nodes], connections: lm().connections };
+    expect(v2(named, 'LM')).toBe('v2-not-a-trigger');
+    expect(v2(named, 'S')).toBe('v2-not-a-trigger');
+    // Only notes: "Graph has no trigger node to start from", named or not.
+    expect(v2({ nodes: [node('S', 'n8n-nodes-base.stickyNote')], connections: {} })).toBe('v2-trigger-count');
+    expect(v2({ nodes: [{ type: 'n8n-nodes-base.stickyNote', parameters: {} }], connections: {} })).toBe('v2-trigger-count');
+  });
+
+  // Finding 3: n8n accepts; assertSupportedMergeMode never looks at requiredInputs.
+  it('never refuses a node for its requiredInputs, whatever shape --node-types supplies', () => {
+    const wf = (type: string, typeVersion: number) => ({
+      nodes: [node('T', TRIGGER), node('I', 'n8n-nodes-base.if'), node('C', type, { typeVersion })],
+      connections: { T: main('I'), I: { main: [[{ node: 'C', type: 'main', index: 0 }], [{ node: 'C', type: 'main', index: 1 }]] } } });
+    const nodeTypes = { nodes: { C: { inputCount: 2, outputCount: 4, requiredInputs: [0, 1] } } };
+    expect(v2(wf('n8n-nodes-base.compareDatasets', 2.3), undefined, nodeTypes)).toBe('accepted: C, I, T');
+    // A Merge with no mode set: n8n reads the parameter, which is absent.
+    expect(v2(wf('n8n-nodes-base.merge', 3), undefined, nodeTypes)).toBe('accepted: C, I, T');
   });
 });

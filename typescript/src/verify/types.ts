@@ -397,6 +397,12 @@ export interface VerifyOptions {
    * refuses one that differs from this field when it is set.
    */
   readonly profile?: CompileProfile;
+  /**
+   * `'engineV2'` only: the trigger that fired, handed to the compiler (`CompileOptions.trigger`)
+   * as n8n's converter is handed it. Needed for a workflow with several triggers; refused
+   * under `'v1'`.
+   */
+  readonly trigger?: string;
   /** Concurrency budget `k`. Default 1. The compiler may lower it (`budgetRestriction`). */
   readonly budget?: number;
   /**

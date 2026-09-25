@@ -1,19 +1,18 @@
 /**
  * Engine v2's batch loops, derived from the structure (`tasks/v2-profile-plan.md` decision 6).
  *
- * A description carries no `isBackEdge` (stage 1 drops it, `conformance/v2/graph.ts`), so which
- * edge closes a loop is derived again here, by the rule n8n marks it with, and then read the way
- * n8n reads a marked graph:
+ * A description carries no `isBackEdge`, so which edge closes a loop is derived by the rule n8n
+ * marks it with, and then read the way n8n reads a marked graph:
  * - {@link markV2BackEdges} is `V1WorkflowConverter.markBackEdges`
  *   (`node-engine-compatibility` `v1-workflow-converter.ts`), with `resolveSingleBatchEntry`;
  * - {@link deriveV2Loops} is `deriveLoops` (`@n8n/engine` `graph/loops.ts`);
  * - {@link classifyV2Edge} is `classifyEdge` (`@n8n/engine` `execution/iteration-mapping.ts`).
  *
  * Nothing here refuses: a cycle `markBackEdges` would throw on comes back as a
- * {@link BackEdgeMarking} naming the defect, and `shape.ts` turns it into the `CompileError`,
- * beside the `validateLoops` rules that need the derived loops first. With several defective
- * components, the one named is the first in {@link componentsOf}'s order, which may not be the
- * one n8n throws on; the verdict is the same either way (`shape.ts`).
+ * {@link BackEdgeMarking} naming the defect, and the converter port (`root.ts`) turns it into the
+ * `CompileError`; `shape.ts` refuses what `validateLoops` refuses on the derived loops. Given the
+ * nodes and edges in the converter's orders, {@link componentsOf} visits the components in the
+ * order n8n's Tarjan does, so with several defective components the one named is n8n's.
  */
 import type { EdgeRef, V2EdgeClass, V2Loop } from '../../types.js';
 import { tarjan } from '../scc.js';

@@ -76,9 +76,8 @@ export interface ValidatedNodes {
   readonly rawByName: ReadonlyMap<string, RawNode>;
 }
 
-/** Validates the nodes and start nodes and reads every node's shape, in canvas order. */
-export function validateNodes(workflow: WorkflowDescription, diagnostics: string[]): ValidatedNodes {
-  // ---- nodes: uniqueness, prefix validity, canvas order ----
+/** Node names and ids unique, and every id a valid MOD-010 prefix. Returns the names. */
+export function validateIdentity(workflow: WorkflowDescription): Set<string> {
   const names = new Set<string>();
   const ids = new Set<string>();
   for (const n of workflow.nodes) {
@@ -92,6 +91,13 @@ export function validateNodes(workflow: WorkflowDescription, diagnostics: string
     if (ids.has(n.id)) throw new CompileError('duplicate-node-id', `compile: duplicate node id '${n.id}'`, n.name);
     ids.add(n.id);
   }
+  return names;
+}
+
+/** Validates the nodes and start nodes and reads every node's shape, in canvas order. */
+export function validateNodes(workflow: WorkflowDescription, diagnostics: string[]): ValidatedNodes {
+  // ---- nodes: uniqueness, prefix validity, canvas order ----
+  const names = validateIdentity(workflow);
   const declaredStarts = workflow.startNodes ?? (workflow.startNode === undefined ? [] : [workflow.startNode]);
   if (declaredStarts.length === 0) throw new CompileError('no-start-node', 'compile: workflow declares no start node');
   for (const s of declaredStarts) {

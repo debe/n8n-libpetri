@@ -32,7 +32,12 @@ export {
   SPLIT_IN_BATCHES_TYPE_VERSION,
 } from './analysis/engine-v2/batch.js';
 export { isV2UnexecutableStep, V2_STEP_NODE_TYPES } from './analysis/engine-v2/steps.js';
-export { MERGE_TYPE } from './analysis/engine-v2/nodes.js';
+export { DEFAULT_BATCH_SIZE, MERGE_TYPE } from './analysis/engine-v2/nodes.js';
+// The engineV2 port of n8n's converter (`tasks/v2-profile-plan.md` step 13): its trigger rule and
+// the map of every n8n refusal to its code.
+export { isV2TriggerType, V2_TRIGGER_NODE_TYPES } from './analysis/engine-v2/root.js';
+export { V2_REFUSALS, v2RefusalOf } from './analysis/engine-v2/refusals.js';
+export type { V2Refusal, V2RefusalFile, V2RefusalSite } from './analysis/engine-v2/refusals.js';
 export { placeholderActions, forwardAllActions, routingActions } from './actions.js';
 export { settlementActions, settlementPlaceholderActions } from './actions/settlement.js';
 export type { SettlementPolicy } from './actions/settlement.js';
@@ -41,7 +46,7 @@ export type {
   InputGadget, JoinForm, JoinReadyPlaces, MainConnection, NetMapView, NodeDescription, NodeGadget,
   AttemptGadget, NodeTypeShape, OnError, OutputGadget,
   PlaceInfo, PlaceRole,
-  SharedPlaces, ToolConnection, TransitionInfo, TransitionRole, UnmetReferencePayload, Variant,
+  SharedPlaces, StrayConnections, ToolConnection, TransitionInfo, TransitionRole, UnmetReferencePayload, Variant,
   WorkflowDescription,
   // Analysis vocabulary (moved from graph.ts; the names are unchanged).
   AnalysedNode, FailureChain, MultiProducerInput, ReferenceKind, ResolvedReference, ResolvedStep,

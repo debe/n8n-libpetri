@@ -7,9 +7,11 @@
  * the start-node set of a fresh and of a resumed execution.
  */
 import type { INode } from 'n8n-workflow';
-import { compile, type NodeDescription } from '../../src/compiler/index.js';
+import { compile, MERGE_TYPE, type NodeDescription } from '../../src/compiler/index.js';
 import {
-  LOOP_NODE_TYPES, describeWorkflow, mainConnectionsOf, nodeShapeOf, scanExpressionReferences, startNodesOf,
+  LOOP_NODE_TYPES, aiOutputsOf, batchDescriptionOf, describeWorkflow, engineV2FieldsOf, mainConnectionsOf, nodeShapeOf,
+  strayConnectionsIn,
+  scanExpressionReferences, startNodesOf,
 } from '../../src/n8n/adapter.js';
 import { SHAPES, conn, continueErrorOutput, diamond, node, workflow } from '../fixtures/workflows.js';
 import { fakeNodeHelpers, fakeWorkflow, items, newRunExecutionData } from '../scheduler/support.js';
@@ -215,5 +217,85 @@ describe('startNodesOf', () => {
     // The compiler canonicalises: primary first, the rest in canvas order — (y, x) ascending,
     // so A at y −100 precedes Trigger (0, 0) and IF (200, 0).
     expect(compile(d).startNodes).toEqual(['B', 'A', 'Trigger', 'IF']);
+  });
+});
+
+describe('the engine v2 fields (adapter/engine-v2.ts; tasks/v2-profile-plan.md decision 11)', () => {
+  // What `V1WorkflowConverter` (`v1-workflow-converter.ts`) reads off a node: `toBatchConfig`'s
+  // parameters, `assertSupportedMergeMode`'s mode, `validateSupportedConnectionType`'s types.
+  it('batchDescriptionOf reads toBatchConfig\'s inputs as it reads them', () => {
+    expect(batchDescriptionOf({})).toEqual({ batchSize: 1 });
+    expect(batchDescriptionOf(undefined)).toEqual({ batchSize: 1 });
+    expect(batchDescriptionOf({ batchSize: null })).toEqual({ batchSize: 1 });
+    expect(batchDescriptionOf({ batchSize: 5 })).toEqual({ batchSize: 5 });
+    expect(batchDescriptionOf({ batchSize: 0.5 })).toEqual({ batchSize: 0.5 });
+    // Any string is refused as an expression, `"10"` included.
+    expect(batchDescriptionOf({ batchSize: '={{ 2 }}' })).toEqual({ batchSize: 'expression' });
+    expect(batchDescriptionOf({ batchSize: '10' })).toEqual({ batchSize: 'expression' });
+    expect(batchDescriptionOf({ batchSize: true }).batchSize).toBeNaN();
+    expect(batchDescriptionOf({ options: '={{ {} }}' })).toEqual({ batchSize: 1, optionsExpression: true });
+    expect(batchDescriptionOf({ options: { reset: true } })).toEqual({ batchSize: 1, reset: true });
+    expect(batchDescriptionOf({ options: { reset: '={{ $json.again }}' } })).toEqual({ batchSize: 1, reset: true });
+    expect(batchDescriptionOf({ options: { reset: false } })).toEqual({ batchSize: 1 });
+  });
+
+  it('aiOutputsOf lists every type key but main, and every connection filed under main with another type', () => {
+    expect(aiOutputsOf({ main: [[{ node: 'B', type: 'main', index: 0 }]] })).toEqual([]);
+    expect(aiOutputsOf({ main: [[]], ai_tool: [], ai_languageModel: [[{ node: 'A', type: 'ai_languageModel', index: 0 }]] }))
+      .toEqual(['ai_tool', 'ai_languageModel']);
+    expect(aiOutputsOf({ main: [null, [{ node: 'B', type: 'ai_tool', index: 0 }, { node: 'C', index: 0 }]] }))
+      .toEqual(['ai_tool', 'undefined']);
+    expect(aiOutputsOf(undefined)).toEqual([]);
+  });
+
+  it('engineV2FieldsOf sets mergeMode on every Merge (null without a string mode), batch on every Split In Batches', () => {
+    expect(engineV2FieldsOf(MERGE_TYPE, 3, { mode: 'chooseBranch' }, undefined)).toEqual({ mergeMode: 'chooseBranch' });
+    // Read and absent is not "not read": the Merge check then does not fall back on requiredInputs.
+    expect(engineV2FieldsOf(MERGE_TYPE, 3, {}, undefined)).toEqual({ mergeMode: null });
+    expect(engineV2FieldsOf(MERGE_TYPE, 3, { mode: 7 }, undefined)).toEqual({ mergeMode: null });
+    expect(engineV2FieldsOf('n8n-nodes-base.set', 1, { mode: 'raw' }, undefined)).toEqual({});
+    expect(engineV2FieldsOf('n8n-nodes-base.splitInBatches', 3, { batchSize: 3 }, { main: [[]] })).toEqual({ batch: { batchSize: 3 } });
+  });
+
+  // Review finding (c): `typeVersion >= 2` converts the version as written.
+  it('engineV2FieldsOf sets mergeVersion on a Merge whose version is not a number, as `>= 2` reads it', () => {
+    expect(engineV2FieldsOf(MERGE_TYPE, '3', { mode: '=x' }, undefined)).toEqual({ mergeMode: '=x', mergeVersion: 3 });
+    expect(engineV2FieldsOf(MERGE_TYPE, undefined, {}, undefined)).toEqual({ mergeMode: null, mergeVersion: Number.NaN });
+    expect(engineV2FieldsOf(MERGE_TYPE, null, {}, undefined)).toEqual({ mergeMode: null, mergeVersion: 0 });
+    expect(engineV2FieldsOf('n8n-nodes-base.set', '3', {}, undefined)).toEqual({});
+  });
+
+  // Review finding (a): what `getChildNodes` walks and `toEdgesForSource` checks beyond the main
+  // connections between nodes.
+  it('strayConnectionsIn lists the main hops through names that are no node, and those names\' other types', () => {
+    const names = new Set(['T', 'A', 'B']);
+    expect(strayConnectionsIn({
+      T: { main: [[{ node: 'A', type: 'main', index: 0 }, { node: 'Ghost', type: 'main', index: 0 }]] },
+      Ghost: { main: [null, [{ node: 'B', type: 'main', index: 0 }]], ai_memory: [] },
+      A: { main: [[{ node: 'B', type: 'ai_tool', index: 0 }, { node: 'B', index: 1 }, { node: 5 }]] },
+      Orphan: { ai_languageModel: [[{ node: 'A', type: 'ai_languageModel', index: 0 }]] },
+    }, names)).toEqual({
+      main: [{ from: 'T', to: 'Ghost' }, { from: 'Ghost', to: 'B' }, { from: 'A', to: 'B' }],
+      sources: [{ name: 'Ghost', aiOutputs: ['ai_memory'] }, { name: 'Orphan', aiOutputs: ['ai_languageModel'] }],
+    });
+    expect(strayConnectionsIn({ T: { main: [[{ node: 'A', type: 'main', index: 0 }]] } }, names)).toEqual({ main: [], sources: [] });
+  });
+
+  it('describeWorkflow fills them from the live node and connectionsBySourceNode, and engineV2 refuses by them', () => {
+    const merge = workflow('live-v2', [
+      node('T', 'trigger', [0, 0]), node('A', 'set', [1, 0]), node('B', 'set', [1, 1]),
+      { ...node('M', 'merge', [2, 0]), type: 'merge' },
+    ], [conn('T', 0, 'A', 0), conn('T', 0, 'B', 0), conn('A', 0, 'M', 0), conn('B', 0, 'M', 1)], 'T');
+    const wf = fakeWorkflow(merge, { parameters: { M: { mode: 'chooseBranch' } } });
+    (wf.nodes.M as { type: string }).type = MERGE_TYPE;
+    const types = wf.nodeTypes;
+    (wf as { nodeTypes: unknown }).nodeTypes = {
+      getByNameAndVersion: (t: string, v?: number) => types.getByNameAndVersion(t === MERGE_TYPE ? 'merge' : t, v),
+    };
+    (wf.connectionsBySourceNode as Record<string, unknown>).A = { ...wf.connectionsBySourceNode.A, ai_tool: [[]] };
+    const d = describeWorkflow(wf, newRunExecutionData(wf.nodes.T!), adapter);
+    expect(d.nodes.find((n) => n.name === 'M')).toMatchObject({ type: MERGE_TYPE, mergeMode: 'chooseBranch' });
+    expect(d.nodes.find((n) => n.name === 'A')).toMatchObject({ aiOutputs: ['ai_tool'] });
+    expect(() => compile(d, { profile: 'engineV2' })).toThrow(/has a "ai_tool" connection|Merge in mode chooseBranch/);
   });
 });

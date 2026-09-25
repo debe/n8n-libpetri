@@ -177,7 +177,8 @@ proof — and never widen a check's claim past its query.
   transition name comes from; `errors.ts` has `CompileError` and `InternalCompilerError`.
 - **Two compile profiles.** `compile(…, { profile: 'engineV2' })` targets n8n's engine v2
   (ADR 0012). `buildNodeGadget` is the single switch, into `compiler/gadget/settlement/` (v2's
-  settlement rule as arcs), with `compiler/analysis/engine-v2/` for loops and refusals. The v1
+  settlement rule as arcs), with `compiler/analysis/engine-v2/` for n8n's converter (ported:
+  `root.ts`, every n8n throw site mapped in `refusals.ts`), loops and refusals. The v1
   net must stay byte-identical: `tests/compiler/v1-identity.test.ts` pins it; never regenerate
   its recording to make a change pass. `codec/v2/` decodes v2 step rows into a marking and plans
   from it (the stateless planner). `conformance/v2/` holds the reference loop, with n8n's code

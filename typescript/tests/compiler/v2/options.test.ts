@@ -52,7 +52,7 @@ describe('the profile option', () => {
  */
 const V2_REFUSED: ReadonlySet<string> = new Set([
   'multiProducer', 'loopOverItems', 'userCycle', 'twoTriggers', 'ifBothOutputs',
-  'chooseBranch', 'partialRequired', 'continueErrorOutput',
+  'continueErrorOutput',
 ]);
 
 describe('structuralHash v14', () => {
@@ -121,5 +121,36 @@ describe('refusals, all invalid-options', () => {
     expect(compileAs(agentTwoTools, { analysis: a, maxAgentRounds: 3 })).toMatch(/^invalid-options: .*pass them to analyse\(\)$/);
     expect(compileAs(agentTwoTools, { structuralHash: 'x' })).toMatch(/^invalid-options: .*without the analysis it hashes$/);
     expect(compile(agentTwoTools, { maxAgentRounds: 3, budget: 2 }).requestedBudget).toBe(2);
+  });
+});
+
+describe('the trigger option (tasks/v2-profile-plan.md step 13)', () => {
+  const code = (f: () => unknown): string => {
+    try {
+      f();
+    } catch (e) {
+      if (e instanceof CompileError) return e.code;
+      throw e;
+    }
+    return 'accepted';
+  };
+
+  it('names the fired trigger of an engineV2 compile, and is refused under v1', () => {
+    const none = { ...linear, startNode: undefined };
+    expect(compile(none, { profile: 'engineV2', trigger: 'Trigger' }).analysis.engineV2!.trigger).toBe('Trigger');
+    expect(code(() => compile(linear, { trigger: 'Trigger' }))).toBe('invalid-options');
+    expect(code(() => analyse(linear, { trigger: 'Trigger' }))).toBe('invalid-options');
+  });
+
+  it('beside a precomputed analysis, must name that analysis\'s trigger', () => {
+    const analysis = analyse(linear, { profile: 'engineV2' });
+    expect(code(() => compile(linear, { profile: 'engineV2', analysis, trigger: 'Trigger' }))).toBe('accepted');
+    expect(code(() => compile(linear, { profile: 'engineV2', analysis, trigger: 'A' }))).toBe('invalid-options');
+  });
+
+  it('is hashed through the graph it roots, never beside it', () => {
+    const none = { ...linear, startNode: undefined };
+    expect(structuralHash(analyse(none, { profile: 'engineV2', trigger: 'Trigger' })))
+      .toBe(structuralHash(analyse(linear, { profile: 'engineV2' })));
   });
 });

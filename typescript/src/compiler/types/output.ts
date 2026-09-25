@@ -585,6 +585,12 @@ export interface CompileOptions {
    * carry the same profile.
    */
   readonly profile?: CompileProfile;
+  /**
+   * `engineV2` only: the trigger that fired (`AnalysisOptions.trigger`). n8n's converter needs
+   * it named when a workflow has several triggers. Refused under `v1`, and beside a precomputed
+   * {@link analysis} unless it names that analysis's trigger.
+   */
+  readonly trigger?: string;
   /** Concurrency budget `k` (`_budget` tokens). Default 1. Forced to 1 when the k-safety check fails. */
   readonly budget?: number;
   /**

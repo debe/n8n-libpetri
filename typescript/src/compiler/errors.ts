@@ -15,7 +15,7 @@ import type { CompileProfile } from './types/analysis.js';
  *   analysis, a structural hash without its analysis, a precomputed analysis of another
  *   profile), an unknown profile, or a v1 option under the `engineV2` profile (a budget, an
  *   agent budget);
- * - `empty-workflow`: no nodes at all;
+ * - `empty-workflow`: no nodes at all, under `v1` (`engineV2` refuses it as `v2-trigger-count`, n8n's verdict);
  * - `duplicate-node-name` / `duplicate-node-id`: two nodes share a name or an id;
  * - `empty-node-id` / `invalid-node-id`: an id that cannot be a MOD-010 prefix (empty, or
  *   containing the `/` separator);
@@ -28,10 +28,25 @@ import type { CompileProfile } from './types/analysis.js';
  * - `tool-start-node`: the start node is an `ai_tool` node, which only its agent can reach;
  * - `unknown-node` / `unknown-transition`: a `NetMap` lookup of a name the net does not have.
  *
- * Under the `engineV2` profile, the shapes engine v2 refuses (`analysis/engine-v2/shape.ts`,
- * each citing its n8n throw site):
- * - `v2-trigger-count`: other than exactly one start node, v2's one `trigger` step
- *   (`validateExecutableGraph`);
+ * Under the `engineV2` profile, what n8n's `V1WorkflowConverter.convert` refuses
+ * (`analysis/engine-v2/root.ts` and `nodes.ts`; each n8n throw site is mapped to its code in
+ * `analysis/engine-v2/refusals.ts`, `V2_REFUSALS`):
+ * - `v2-unknown-trigger`: the fired trigger named is no enabled node (`UnknownTriggerError`);
+ * - `v2-not-a-trigger`: the fired trigger named is not of a trigger type (`NotATriggerError`);
+ * - `v2-ambiguous-trigger`: no trigger named, and the workflow has several
+ *   (`AmbiguousTriggerError`);
+ * - `v2-continue-error-output`: a node with `onError: 'continueErrorOutput'` (`toGraphNode`);
+ * - `v2-merge-mode`: a Merge in mode chooseBranch, or with an expression mode from typeVersion 2
+ *   on (`assertSupportedMergeMode`);
+ * - `v2-batch-config`: a Split In Batches `toBatchConfig` refuses — a version other than 3, an
+ *   expression for its options or batch size, the reset option, a batch size that is not a
+ *   whole number of at least 1;
+ * - `v2-connection-type`: a reached node that is the source of a connection other than `main`
+ *   (`UnsupportedConnectionTypeError`);
+ *
+ * the shapes the converter and engine v2's validator refuse (`analysis/engine-v2/shape.ts`):
+ * - `v2-trigger-count`: no trigger at all (`validateExecutableGraph`), or a description that
+ *   declares several start nodes, where v2 fires exactly one trigger;
  * - `v2-unbatched-cycle`: a cycle with no batch node (`UnsupportedCycleError` in
  *   `markBackEdges`, rule 1 of `validateLoops`);
  * - `v2-loop-shape`: a batch loop that breaks a `validateLoops` rule, or a cycle not entered
@@ -39,17 +54,14 @@ import type { CompileProfile } from './types/analysis.js';
  * - `v2-converging-input`: more than one non-back edge into one input slot
  *   (`validateExecutableGraph`);
  * - `v2-unreachable-feeder`: an edge into a node the trigger reaches from one it cannot
- *   (`validateExecutableGraph`).
+ *   (`validateExecutableGraph`);
  *
- * and the nodes it refuses (`analysis/engine-v2/nodes.ts`):
- * - `v2-continue-error-output`: a node with `onError: 'continueErrorOutput'` (`toGraphNode`);
- * - `v2-merge-mode`: a Merge in mode chooseBranch (`assertSupportedMergeMode`);
- * - `v2-disabled-node`: a disabled node the trigger reaches, which n8n splices out
- *   (`spliceOutDisabledNodes`) and the profile does not port yet;
+ * and one step engine v2 accepts but never settles (`analysis/engine-v2/nodes.ts`):
  * - `v2-unsupported-step`: a `wait` or `subworkflow` step, which v2 has no executor for
- *   (`StepReadyHandler.executorFor`) and so never settles.
+ *   (`StepReadyHandler.executorFor`).
  *
- * A slot above v2's `MAX_SLOT_INDEX` is `output-index-out-of-range` / `input-index-out-of-range`.
+ * A slot that is negative, fractional or above v2's `MAX_SLOT_INDEX` is
+ * `output-index-out-of-range` / `input-index-out-of-range` (`validateExecutableGraph`).
  */
 export type CompileErrorCode =
   | 'invalid-budget'
@@ -78,8 +90,12 @@ export type CompileErrorCode =
   | 'v2-unreachable-feeder'
   | 'v2-continue-error-output'
   | 'v2-merge-mode'
-  | 'v2-disabled-node'
-  | 'v2-unsupported-step';
+  | 'v2-unsupported-step'
+  | 'v2-unknown-trigger'
+  | 'v2-not-a-trigger'
+  | 'v2-ambiguous-trigger'
+  | 'v2-batch-config'
+  | 'v2-connection-type';
 
 /**
  * A description the compiler cannot compile, or a question about the compiled net it cannot

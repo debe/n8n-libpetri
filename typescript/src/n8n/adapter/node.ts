@@ -3,6 +3,7 @@
  */
 import type { INode } from 'n8n-workflow';
 import type { ExecutionPolicy, NodeDescription } from '../../compiler/index.js';
+import { engineV2FieldsOf } from './engine-v2.js';
 import { policyFieldsOf } from './policy.js';
 
 /**
@@ -29,8 +30,13 @@ function definedFieldsOf<T extends object, K extends keyof T>(source: T, keys: r
   return out;
 }
 
-/** `node` as the compiler sees it, under the subnet prefix `id` and its resolved `policy`. */
-export function liveNodeDescription(node: INode, id: string, policy: ExecutionPolicy | undefined): NodeDescription {
+/**
+ * `node` as the compiler sees it, under the subnet prefix `id` and its resolved `policy`;
+ * `bySource` is its entry in `connectionsBySourceNode`, read for the engine v2 fields.
+ */
+export function liveNodeDescription(
+  node: INode, id: string, policy: ExecutionPolicy | undefined, bySource?: unknown,
+): NodeDescription {
   return {
     id,
     name: node.name,
@@ -39,5 +45,6 @@ export function liveNodeDescription(node: INode, id: string, policy: ExecutionPo
     position: [node.position[0], node.position[1]],
     ...definedFieldsOf(node, OPTIONAL_NODE_FIELDS),
     ...policyFieldsOf(node.parameters, policy),
+    ...engineV2FieldsOf(node.type, node.typeVersion, node.parameters, bySource),
   };
 }

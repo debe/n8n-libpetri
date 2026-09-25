@@ -83,29 +83,87 @@ export interface NodeDescription {
    */
   readonly executionPolicy?: ExecutionPolicy;
   /**
-   * What engine v2 reads from a Split In Batches node (`tasks/v2-profile-plan.md` decision 11).
-   * Only an `engineV2` input carries it; the v1 compiler never reads it and it is not part of
-   * the structural hash, because whether a node is v2's `batch` step is decided by `type` and
-   * `typeVersion` (decision 5) and the batch size changes no place or transition — a loop is
-   * folded, so the number of passes is data, not structure (decision 6).
+   * What engine v2 reads from a Split In Batches node (`tasks/v2-profile-plan.md` decision 11):
+   * `toBatchConfig` (`node-engine-compatibility` `v1-workflow-converter.ts`) builds a batch
+   * step's config from it, or refuses the node. The adapters fill it for every node of type
+   * `n8n-nodes-base.splitInBatches`, whatever its version; absent, the node's parameters were
+   * not read, and n8n's defaults apply (`DEFAULT_BATCH_SIZE`, no options). Only an `engineV2`
+   * compile reads it, and it is not part of the structural hash: whether a node is v2's `batch`
+   * step is decided by `type` and `typeVersion` (decision 5), and the batch size changes no
+   * place or transition — a loop is folded, so the number of passes is data, not structure
+   * (decision 6).
    */
   readonly batch?: BatchDescription;
+  /**
+   * A Merge node's `parameters.mode` as written, when it is a string (an expression starts
+   * with `=`); `null` when the parameters were read and the mode is absent or not a string;
+   * absent when they were not read, or the node is no Merge. Engine v2 refuses mode
+   * `chooseBranch`, and an expression mode from typeVersion 2 on (`assertSupportedMergeMode`,
+   * `v1-workflow-converter.ts`). Both adapters set it on every Merge; a description without it
+   * on a Merge is read by the node's `requiredInputs` instead (`analysis/engine-v2/nodes.ts`).
+   * Only an `engineV2` compile reads it; not hashed, since it decides a refusal, never a place.
+   */
+  readonly mergeMode?: string | null;
+  /**
+   * The version `assertSupportedMergeMode` compares with `>= 2`, when the node's `typeVersion`
+   * as written is not a number: n8n compares the raw value, which JavaScript converts to a
+   * number (`'3'` is 3 there, a missing version `NaN`), where the JSON reader reads a version
+   * that is not a number as 1. Absent when the written version is a number, or the node is no
+   * Merge. Only an `engineV2` compile reads it; not hashed.
+   */
+  readonly mergeVersion?: number;
+  /**
+   * The connection types other than `main` this node is the **source** of, as n8n's
+   * connections-by-source map keys them (`ai_tool`, `ai_languageModel`, …), plus the `type` of
+   * any connection filed under `main` that is not `main` itself. Engine v2's converter refuses
+   * every one of them on a node the fired trigger reaches (`UnsupportedConnectionTypeError`,
+   * `toEdgesForSource`): it validates each type key of the source, empty or not. Only an
+   * `engineV2` compile reads it; not hashed.
+   */
+  readonly aiOutputs?: readonly string[];
 }
 
 /**
- * A batch node's configuration as engine v2 sees it: `BatchStepConfig` in
- * `@n8n/engine` `graph/workflow-graph.ts`, which `toBatchConfig` in
- * `node-engine-compatibility` `v1-workflow-converter.ts` builds from the node's parameters.
- * Deliberately just the size for now: a converted graph (stage 1, decision 10) has already had
- * an expression-valued `options` and `reset` refused by that converter, so the fields that
- * would record them arrive with the converter port (step 13).
+ * A batch node's configuration as engine v2 sees it: the inputs of `toBatchConfig`
+ * (`node-engine-compatibility` `v1-workflow-converter.ts`), which builds `BatchStepConfig`
+ * (`@n8n/engine` `graph/workflow-graph.ts`) from the node's parameters or refuses it. The
+ * version `toBatchConfig` checks first is {@link NodeDescription.typeVersion}.
  */
 export interface BatchDescription {
   /**
-   * Items per pass. A whole number ≥ 1 when literal (`isBatchStepConfig`); `'expression'` when
-   * the parameter is an expression, which `toBatchConfig` refuses.
+   * `parameters.batchSize ?? DEFAULT_BATCH_SIZE`: items per pass. A number as written (the
+   * converter accepts a whole number ≥ 1, `isBatchStepConfig`); `'expression'` when the
+   * parameter is a string, which `toBatchConfig` refuses whatever it says; `NaN` for any other
+   * value, which it refuses as not a whole number.
    */
   readonly batchSize: number | 'expression';
+  /** `parameters.options` is a string (an expression), which `toBatchConfig` refuses. */
+  readonly optionsExpression?: boolean;
+  /**
+   * `parameters.options.reset` is set to anything but `false` — `true`, or an expression —
+   * which `toBatchConfig` refuses: each pass slices a list fixed at the first pass.
+   */
+  readonly reset?: boolean;
+}
+
+/**
+ * What n8n's connections-by-source map holds beyond {@link WorkflowDescription.connections}, for
+ * the `engineV2` converter port: n8n's `rootAt` walks the map by name (`getChildNodes`), so a
+ * node reached only through one of these is in n8n's graph, and `toEdgesForSource` checks the
+ * connection types of every source it keeps, node or not.
+ */
+export interface StrayConnections {
+  /**
+   * Every `from → to` under a `main` key that `connections` cannot hold, in map order: a source
+   * or a target that names no node of the workflow, or a connection whose own `type` is not
+   * `main`. The walk follows each one; no edge comes of it.
+   */
+  readonly main: readonly { readonly from: string; readonly to: string }[];
+  /**
+   * The map's keys that name no node, each with the connection types other than `main` its entry
+   * lists (as {@link NodeDescription.aiOutputs} counts them), in map order.
+   */
+  readonly sources: readonly { readonly name: string; readonly aiOutputs: readonly string[] }[];
 }
 
 /** One `main` connection `from.outputIndex → to.inputIndex`, by node name. */
@@ -114,6 +172,13 @@ export interface MainConnection {
   readonly outputIndex: number;
   readonly to: string;
   readonly inputIndex: number;
+  /**
+   * `engineV2` only, and only when the export's `index` is not a number (`inputIndex` is then
+   * `NaN`): the index as n8n's `dedupeEdges` prints it into its key, `String(index)`. n8n copies
+   * the index as written, so `'0'` and `0` on one `from → to` output are one key to it, and the
+   * later of the two is the edge it keeps. Read by the converter port's dedupe only.
+   */
+  readonly indexKey?: string;
 }
 
 /**
@@ -190,16 +255,31 @@ export interface WorkflowDescription {
    */
   readonly toolConnections?: readonly ToolConnection[];
   /**
+   * `engineV2` only: the connections n8n's converter walks or checks that {@link connections}
+   * cannot hold (a name that is no node, a `main` connection of another type). The JSON reader
+   * sets it under `engineV2`; absent means there are none. Not hashed: it decides which nodes
+   * the converter keeps and what it refuses, and the compiled net is built from those.
+   */
+  readonly strayConnections?: StrayConnections;
+  /**
    * Names of the nodes the execution starts from, first the primary one (n8n's
    * `nodeExecutionStack[0]`, whose `X/in` receives the trigger data in `initialMarking`).
    * A resumed execution lists every node on `nodeExecutionStack` plus every node with
    * `runData`, so it is compiled from what already ran: depth is the longest path from any
    * start node in the SCC condensation, and reachability (unreachable-input seeding,
    * expression-reference classification) is from the union. Part of the structural hash.
-   * At least one of `startNodes` / `startNode` is required.
+   * At least one of `startNodes` / `startNode` is required, except under `engineV2` (see
+   * {@link startNode}).
    */
   readonly startNodes?: readonly string[];
-  /** One-element alias of {@link startNodes}. */
+  /**
+   * One-element alias of {@link startNodes}.
+   *
+   * Under the `engineV2` profile the start node is the name of the trigger that fired —
+   * `firedTriggerName` of n8n's `V1WorkflowConverter.convert` — and may be left out, as
+   * `CompileOptions.trigger` may: the compiler then takes the workflow's one trigger, and refuses
+   * a workflow with several, as the converter does (`analysis/engine-v2/root.ts`).
+   */
   readonly startNode?: string;
   readonly nodeTypes: NodeTypeResolver;
   /**

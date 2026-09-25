@@ -15,7 +15,8 @@
  *   --max-classes N        state-class cap for the solver-free route (default 200000; 0 = off)
  *   --smt-fallback MODE    auto (default) | off | force — how far the SMT route may go
  *   --node-types FILE      JSON node-type shapes; without it port counts are guessed
- *   --start NODE           start node (default: the first unfed node, triggers first)
+ *   --start NODE           start node (default: the first unfed node, triggers first; v1 only)
+ *   --trigger NODE         the trigger that fired (engineV2 only; default: the only trigger)
  *   --mutex A,B            add a mutual-exclusion pair; repeatable
  *   --all-pairs            mutual exclusion for every pair of nodes (O(n^2) queries)
  *   --no-semiflows         turn VER-007 semiflow strengthening off
@@ -48,12 +49,13 @@
  *
  * `--profile engineV2` compiles for engine v2 (`tasks/v2-profile-plan.md`) and runs the
  * `settlement` family over the state-class graph alone (`settlement.ts`); `--property` of a v1
- * family then records it as not applicable. The raw-JSON route is **not yet an acceptance path**
- * for engine v2: the converter's rooting at the fired trigger, disabled-node splicing and
- * back-edge marking are not ported (plan step 13), so a workflow n8n's converter accepts can
- * still be refused here with the compiler's `CompileError` (measured: 75 of the 209 corpus
- * entries n8n accepts). That is exit 2 with the refusal on stderr, never a report. Exit 3 does
- * not apply under engineV2: no check there is solver-backed.
+ * family then records it as not applicable. The workflow goes through the compiler's port of
+ * n8n's converter (plan step 13): it is rooted at the trigger that fired — `--trigger`, or the
+ * workflow's only trigger; a workflow with several needs `--trigger`, as n8n needs the name —
+ * disabled nodes are spliced out, and what n8n's converter or validator refuses is refused with
+ * the compiler's `CompileError`, exit 2 with the refusal on stderr, never a report. Measured on
+ * the template corpus against n8n's own converter (`tasks/v2-acceptance.mts`), the verdicts
+ * agree on every entry. Exit 3 does not apply under engineV2: no check there is solver-backed.
  *
  * `--smt-fallback` is the escape hatch for the size ceiling `verify()` applies to the SMT
  * route: above a measured net size libpetri's pre-solver pipeline exhausts the V8 heap, which
@@ -116,6 +118,7 @@ function readWorkflow(parsed: ParsedArgs, nodeTypes: NodeTypesFile, io: CliIo): 
     return parseWorkflowJson(io.readFile(parsed.file), {
       nodeTypes,
       ...(parsed.startNode === undefined ? {} : { startNode: parsed.startNode }),
+      ...(parsed.options.profile === undefined ? {} : { profile: parsed.options.profile }),
     });
   } catch (e) {
     io.stderr(`${parsed.file}: ${messageOf(e)}\n`);

@@ -176,10 +176,14 @@ export async function verify(
   const compiled = options.profile === 'engineV2'
     ? compile(workflow, {
       profile: 'engineV2',
+      ...(options.trigger === undefined ? {} : { trigger: options.trigger }),
       ...(options.budget === undefined ? {} : { budget: options.budget }),
       ...agentBounds,
     })
-    : compile(workflow, { budget: options.budget ?? 1, ...agentBounds });
+    : compile(workflow, {
+      budget: options.budget ?? 1, ...agentBounds,
+      ...(options.trigger === undefined ? {} : { trigger: options.trigger }),
+    });
   return verifyCompiled(compiled, options);
 }
 

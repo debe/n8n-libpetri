@@ -947,10 +947,31 @@ Model first, seam second, upstream alongside both.
       - fewer places and transitions everywhere;
       - fewer classes than v1 at equal concurrency (k = n);
       - more classes than v1 at k = 1 on 4 of 16 subjects, because v2 has no budget.
-- [ ] **Plan step 13: port the converter** (rooting at the fired trigger, disabled-node
-      splicing, back-edge marking), so the raw-JSON route and the CLI accept what n8n accepts.
-      Divergence row 34 covers it until then. The acceptance leg compares verdicts on all 310
-      entries, and codes only on graphs with one defect
+- [x] **Plan step 13: port the converter** (`compiler/analysis/engine-v2/root.ts`, `refusals.ts`,
+      `tasks/v2-acceptance.mts`): rooting at the fired trigger (`--trigger`), disabled-node
+      splicing, `toBatchConfig`, connection types, back-edge marking, every n8n throw site mapped.
+      310 corpus entries and 12,019 mutants (raw-JSON readings included: stray connections,
+      non-number indexes, string versions, notes and sub-nodes): 0 verdict, graph or code
+      disagreements; drift guard clean. Residual reader gaps: divergence row 34
+- [ ] **The live adapter under `engineV2`**: `describeWorkflow` still describes the scheduler's
+      graph (no annotations, sub-nodes or stray connections), so an `engineV2` compile of its
+      description misses the JSON reader's n8n readings (row 34). No execution path compiles
+      `engineV2` from it today; give `AdapterOptions` the profile when one does
+- [ ] **v1: the duplicate-edge key can merge two different edges** (found by the step 13
+      review, outside step 13). `canonicaliseConnections` (`compiler/analysis/connections.ts:44`)
+      keys an edge `${from} ${outputIndex} ${to} ${inputIndex}`, joined by spaces, and node names
+      routinely contain spaces. Two different edges can then collide, and v1 drops a real edge as
+      a duplicate. Fix it with an injective key (a JSON tuple, as `engine-v2/analyse.ts` now
+      uses). Only workflows with such names change: the fingerprint records none, so it should
+      stay green. Add a regression test and re-run the corpus survey
+- [ ] **Step 13 drift guard scope**: `conformance/v2/drift.ts` matches the text of `throw new`
+      sites only. A changed predicate or constant with an unchanged message goes unnoticed:
+      `SPLIT_IN_BATCHES_TYPE_VERSION`, `MAX_SLOT_INDEX`, `MERGE_TYPE`, `DEFAULT_BATCH_SIZE`. Pin
+      them, for example by hashing the converter's and validator's source, or by asserting the
+      constants against the dist
+- [ ] **Step 13 residual raw-JSON divergences** (`docs/divergences.md` row 34, last sentence):
+      the `executionPolicy` parse under engineV2, non-object connection entries, and typeless
+      nodes
 - [ ] **engineV2 SMT fallback**: no solver route yet. `switch20` and wide fan-outs past the cap
       are `unknown` on every check, and exit 3
 - [ ] **A seeded batch failure in the reference `outcome()`**: the sampled reference never fails

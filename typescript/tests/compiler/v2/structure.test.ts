@@ -23,7 +23,7 @@ const compileV2 = (graph: V2Graph): CompiledWorkflow =>
 /** The `ALL` fixtures the engineV2 analysis refuses (`refusals.test.ts` pins their codes). */
 const V2_REFUSED: ReadonlySet<string> = new Set([
   'multiProducer', 'loopOverItems', 'userCycle', 'twoTriggers', 'ifBothOutputs',
-  'chooseBranch', 'partialRequired', 'continueErrorOutput',
+  'continueErrorOutput',
 ]);
 
 /** Every net this step compiles: the hand-written v2 graphs and the v1 fixtures v2 accepts. */
