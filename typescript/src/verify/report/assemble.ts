@@ -25,6 +25,7 @@ export function assembleReport(ctx: Context, run: RunFacts): VerificationReport 
   const counts = countVerdicts(ctx.checks);
   return {
     workflow: compiled.net.name,
+    profile: 'v1',
     structuralHash: compiled.structuralHash,
     requestedBudget: compiled.requestedBudget,
     budget: compiled.effectiveBudget,
@@ -48,7 +49,8 @@ export function assembleReport(ctx: Context, run: RunFacts): VerificationReport 
   };
 }
 
-function countVerdicts(checks: readonly PropertyCheck[]): Record<CheckVerdict, number> {
+/** How many checks came back with each verdict. */
+export function countVerdicts(checks: readonly PropertyCheck[]): Record<CheckVerdict, number> {
   const counts: Record<CheckVerdict, number> = { proven: 0, violated: 0, bounded: 0, unknown: 0 };
   for (const c of checks) counts[c.verdict]++;
   return counts;

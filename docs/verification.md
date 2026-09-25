@@ -41,7 +41,8 @@ Options:
 
 | Option | Meaning |
 |---|---|
-| `--budget k` | Requested concurrency budget. The compiler may lower it for unsafe shapes. |
+| `--profile v1\|engineV2` | Compile target. Default `v1`. `engineV2` runs the `settlement` family (below). |
+| `--budget k` | Requested concurrency budget. The compiler may lower it for unsafe shapes. Refused under `engineV2`. |
 | `--property NAME` | Select a property family. Repeatable. |
 | `--max-classes n` | State-class cap. Default 200,000; zero disables graph exploration. |
 | `--smt-fallback auto\|off\|force` | Control the SMT route. Default `auto`. |
@@ -136,6 +137,42 @@ can refill it through an omitted path.
 
 Checks that two named nodes are never running together. Use repeated `--mutex A,B` arguments
 for selected resources. `--all-pairs` is useful on small nets and expensive on large ones.
+
+### `settlement` (profile `engineV2`)
+
+The family of an `engineV2` net (`tasks/v2-profile-plan.md` step 12,
+`typescript/src/verify/families/v2-settlement.ts`). It is decided by the state-class graph
+alone: there is no SMT fallback, no budget and no invariant pipeline. It checks:
+
+- `X_start` and `X_skip` are never enabled together. A batch node has two pairs, entry and
+  back edge.
+- Every `e/arrived` place, and the trigger's `T/in`, holds at most one token.
+- Every `X/running` holds at most one token. This is the folding falsifier: a folded loop
+  cannot represent two steps of one node in flight.
+- A quiescent class without `_halt` holds no `arrived`, `live`, `running` or `ok` token.
+- For every node outside a loop, `X/done + X/skipped` never exceeds 1, and equals 1 at every
+  halt-free rest.
+- For every batch node, `B/ended` never exceeds 1, and equals 1 at every halt-free rest.
+
+A halted class carries no completion claim. After a failure v2 plans nothing more. A failed
+batch row writes `B/ended` beside `_halt`, and a failed body row leaves it unwritten, so both
+halted shapes are allowed. The bounds and the exclusivity still hold over halted classes.
+
+A `proven` needs a complete graph. A folded loop has finite markings, so loop workflows
+close like acyclic ones. A class that breaks a claim is reported `violated` with its firing
+path. It is a witness in the priority- and value-blind abstraction, not more. When the graph
+truncates, the remaining checks are `unknown`. When no halt-free quiescent class is reached,
+the at-rest claims are `unknown` too, because they would hold vacuously.
+
+The v1 families asked of an `engineV2` net are reported as one `unknown` check each, reading
+"not applicable under engineV2". The reason names the settlement check that asks the analogous
+question, if there is one. The same applies to `settlement` asked of a v1 net. Exit code 3 does
+not apply under `engineV2`, because none of its checks is solver-backed.
+
+The raw workflow-JSON route is not yet an acceptance path for engine v2. The converter's
+rooting at the fired trigger, disabled-node splicing and back-edge marking are not ported
+(plan step 13). The CLI can therefore refuse, with the compiler's `CompileError` and exit 2, a
+workflow that n8n's converter accepts: 75 of the 209 corpus entries n8n accepts.
 
 ## Why the workflow-net soundness literature does not apply here
 

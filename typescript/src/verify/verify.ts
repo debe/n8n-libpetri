@@ -115,13 +115,14 @@
  * `invariants.ts`.
  */
 import { performance } from 'node:perf_hooks';
-import type { Place, Token } from 'libpetri';
-import { MarkingState, flatten } from 'libpetri/verification';
+import { flatten } from 'libpetri/verification';
 import { assertProfile, compile } from '../compiler/index.js';
-import type { CompiledWorkflow, WorkflowDescription } from '../compiler/index.js';
+import type { CompileProfile, CompiledWorkflow, WorkflowDescription } from '../compiler/index.js';
 import { runFamilies } from './families/run-families.js';
+import { markingStateOf } from './marking.js';
 import { assembleReport } from './report/assemble.js';
 import { completionSinksOf, smtRefusalFor, type Context } from './route.js';
+import { verifySettlement } from './settlement.js';
 import { alternativeEntryReach, truncationShapeOf } from './shape.js';
 import { assertLibpetriSurface, resolveSolver } from './solver.js';
 import { DEFAULT_MAX_CLASSES, FIRST_PASS_MAX_CLASSES, StateSpace, loopTransitions } from './state-class.js';
@@ -129,45 +130,56 @@ import type { PropertyName, VerificationReport, VerifyOptions } from './types.js
 import { PROPERTY_NAMES } from './types.js';
 
 export { assertLibpetriSurface, resolveSolver } from './solver.js';
+export { markingStateOf } from './marking.js';
 
 /** Per-query z3 timeout when the caller names none. */
 export const DEFAULT_TIMEOUT_MS = 60_000;
 
-/** Property families run when the caller names none: everything a workflow always has. */
+/** Property families run on a v1 net when the caller names none: everything a workflow always has. */
 export const DEFAULT_PROPERTIES: readonly PropertyName[] = [
   'budget', 'no-double-activation', 'dead-nodes', 'retry-bound', 'proper-completion',
 ];
 
-// ==================== marking ====================
-
-/** A compiler marking (tokens per place) as the verifier's count vector (VER-004: values are irrelevant). */
-export function markingStateOf(marking: ReadonlyMap<Place<unknown>, readonly Token<unknown>[]>): MarkingState {
-  const builder = MarkingState.builder();
-  for (const [place, tokens] of marking) builder.tokens(place, tokens.length);
-  return builder.build();
-}
+/** Property families run on an `engineV2` net when the caller names none: its own family. */
+export const DEFAULT_V2_PROPERTIES: readonly PropertyName[] = ['settlement'];
 
 // ==================== entry points ====================
 
-/** Which property families to run: the caller's list, or the default plus any requested pairs. */
-export function selectProperties(options: VerifyOptions): readonly PropertyName[] {
+/**
+ * Which property families to run: the caller's list, or the profile's default plus any
+ * requested pairs. A family of the other profile is kept when asked for: it is recorded as not
+ * applicable (`families/not-applicable.ts`), never dropped.
+ */
+export function selectProperties(options: VerifyOptions, profile: CompileProfile = 'v1'): readonly PropertyName[] {
   if (options.properties !== undefined) {
     return PROPERTY_NAMES.filter((p) => options.properties!.includes(p));
   }
+  const defaults = profile === 'engineV2' ? DEFAULT_V2_PROPERTIES : DEFAULT_PROPERTIES;
   return options.mutualExclusion === undefined
-    ? DEFAULT_PROPERTIES
-    : [...DEFAULT_PROPERTIES, 'mutual-exclusion'];
+    ? defaults
+    : [...defaults, 'mutual-exclusion'];
 }
 
-/** Compiles `workflow` exactly as the scheduler does (profile `v1`), then verifies the net it produced. */
+/**
+ * Compiles `workflow` exactly as its target does, then verifies the net it produced: profile
+ * `v1` (the default) as the scheduler compiles it, with the budget; profile `engineV2` with no
+ * budget option at all, which the compiler would refuse (`tasks/v2-profile-plan.md` step 2).
+ * An explicit `budget` or agent bound under `engineV2` is passed through, and refused there.
+ */
 export async function verify(
   workflow: WorkflowDescription, options: VerifyOptions = {},
 ): Promise<VerificationReport> {
-  const compiled = compile(workflow, {
-    budget: options.budget ?? 1,
+  const agentBounds = {
     ...(options.maxAgentRounds === undefined ? {} : { maxAgentRounds: options.maxAgentRounds }),
     ...(options.maxAgentToolCalls === undefined ? {} : { maxAgentToolCalls: options.maxAgentToolCalls }),
-  });
+  };
+  const compiled = options.profile === 'engineV2'
+    ? compile(workflow, {
+      profile: 'engineV2',
+      ...(options.budget === undefined ? {} : { budget: options.budget }),
+      ...agentBounds,
+    })
+    : compile(workflow, { budget: options.budget ?? 1, ...agentBounds });
   return verifyCompiled(compiled, options);
 }
 
@@ -200,18 +212,25 @@ export async function verify(
  *
  * ## Profile
  *
- * The six families are v1's: they read `NodeGadget`s, `_budget`, `X/tries` and the v1 rest
- * roles. An `engineV2` net is refused with `ProfileMismatchError` before anything runs
- * (`tasks/v2-profile-plan.md` decision 14), not reported on: a report of v1 families over a net
- * with none of their places would close with every check vacuous. Its own families are
- * `families/v2-settlement.ts` (step 12).
+ * The profile is the net's own (`compiled.netMap.profile`). The six v1 families read
+ * `NodeGadget`s, `_budget`, `X/tries` and the v1 rest roles, so an `engineV2` net goes to its own
+ * report (`settlement.ts`, `tasks/v2-profile-plan.md` step 12) and never reaches them: a report of
+ * v1 families over a net with none of their places would close with every check vacuous. A v1
+ * family asked of an `engineV2` net, or `settlement` of a v1 net, is one explicit
+ * not-applicable check. `options.profile`, when set, must name the net's profile, or the call is
+ * refused with `ProfileMismatchError`.
  */
 export async function verifyCompiled(
   compiled: CompiledWorkflow, options: VerifyOptions = {},
 ): Promise<VerificationReport> {
-  assertProfile('verifyCompiled', 'v1', compiled.netMap.profile);
-  assertLibpetriSurface();
+  const profile = compiled.netMap.profile;
+  if (options.profile !== undefined) assertProfile('verifyCompiled', options.profile, profile);
   const started = performance.now();
+  // Both routes rest on an installed libpetri this verifier can trust. The engineV2 route calls no
+  // SmtVerifier method, but its start/skip exclusion rests on `all()` requiring a token, and a
+  // report from an install below the floor is not one to hand out.
+  assertLibpetriSurface();
+  if (profile === 'engineV2') return verifySettlement(compiled, options, selectProperties(options, profile), started);
   const properties = selectProperties(options);
   const full = options.maxClasses ?? DEFAULT_MAX_CLASSES;
   const staged = stagedCap(compiled, options, full);

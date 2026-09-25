@@ -27,6 +27,7 @@ function report(partial: Partial<VerificationReport> = {}): VerificationReport {
   for (const c of checks) counts[c.verdict]++;
   return {
     workflow: 'demo',
+    profile: 'v1',
     structuralHash: 'a'.repeat(64),
     requestedBudget: 1,
     budget: 1,

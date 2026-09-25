@@ -935,17 +935,32 @@ Model first, seam second, upstream alongside both.
 - [ ] **v2 has no tool-call round**: the converter accepts agents (sub-nodes are dropped by
       `rootAt`), and `V1StepExecutor` throws `EngineRequestNotSupportedError` at the first tool
       call. That affects 85 of the 209 accepted entries. ADR 0008's round is the model to offer
-- [ ] **Compiler profile `engineV2`**: no ordering priorities, no retry or error-output gadgets,
-      whole-execution failure sink, batch loop as the only admitted cycle. It rejects exactly what
-      `V1WorkflowConverter` + `validateExecutableGraph` reject
-- [ ] **Differential harness `src/conformance/v2/`** against n8n's own `decideSuccessors`,
-      `decisionKeys` and `countExpectedSettledSteps`: seeded settlement interleavings times
-      live/dead outputs. Corpus: `m1-acceptance` workflows, our fixtures, the survey filtered by
-      the converter
-- [ ] **Verification families under the profile**: the reachable settled set against
-      `countExpectedSettledSteps`
-- [ ] **Stateless planner spike** (`tasks/spike-v2-planner.mts`): does a `StepSummary` row set
-      determine a marking?
+- [x] **Compiler profile `engineV2`** (`20c2a4f`): v2's settlement rule as arcs, batch loops
+      folded, the converter's refusals as CompileErrors, and v1 pinned byte-identical. See
+      `tasks/v2-profile-plan.md` steps 1-7
+- [x] **Stateless planner**: `codec/v2` `decodeStepRows` (guided replay) and `planFromMarking`.
+      **The net is a v2 planner.** Sampled differential: 0 disagreements on 33,367 distinct row
+      sets across 83,600 runs, all three legs. Exhaustive enumeration of n8n's handler on small
+      graphs: 0 disagreements (ADR 0012 Evidence). CI golden: `tests/fixtures/v2/`
+- [x] **Verification families under the profile** (`settlement`, CLI `--profile engineV2`). The
+      "v2 nets are smaller" hypothesis is only partly true. Measured:
+      - fewer places and transitions everywhere;
+      - fewer classes than v1 at equal concurrency (k = n);
+      - more classes than v1 at k = 1 on 4 of 16 subjects, because v2 has no budget.
+- [ ] **Plan step 13: port the converter** (rooting at the fired trigger, disabled-node
+      splicing, back-edge marking), so the raw-JSON route and the CLI accept what n8n accepts.
+      Divergence row 34 covers it until then. The acceptance leg compares verdicts on all 310
+      entries, and codes only on graphs with one defect
+- [ ] **engineV2 SMT fallback**: no solver route yet. `switch20` and wide fan-outs past the cap
+      are `unknown` on every check, and exit 3
+- [ ] **A seeded batch failure in the reference `outcome()`**: the sampled reference never fails
+      a batch step. Only the unit tests and the exhaustive spike cover that case
+- [ ] **Public surface**: decide whether `decodeStepRows`, `planFromMarking`, the reference and
+      the differential are exported. None is today
+- [ ] **libpetri state-space cache** (VER-017 amendment, unreleased): when it ships, wire it
+      into `routing/smt.ts` `verifierFor` and `collect-invariants.ts`. Measure it on the
+      forced-fallback testbed run (279 checks, about 890 s), not on the survey, which runs with
+      the fallback off
 - [ ] **Patches 0003/0004** (`SettlementPolicy` extract, then runtime option), only after the
       above is green. The gate is the engine tests, `m1-acceptance`, and Playwright `engine-v2:e2e`
 - [ ] **Upstream, in this order**: read the contribution terms (CLA, Sustainable Use License);

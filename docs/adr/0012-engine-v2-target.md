@@ -193,5 +193,92 @@ What the converter refuses, by kind, over the 101 rejected entries:
 - 9: a Merge mode that needs every input.
 - 8: other shapes.
 
-Still open: the net side of the differential (the profile), and the stateless-planner spike.
+**The net side of §2 answers the question (step 10 of `tasks/v2-profile-plan.md`, 2026-09-25).**
+The question: for every row set S that n8n's loop reaches, is `planFromMarking(decodeStepRows(S))`
+equal to R(S), n8n's own answer?
+
+`tasks/v2-differential.mts` injects n8n's dist into the reference loop, as the spike does. It
+compiles each converted graph under `profile: 'engineV2'` (stage 1, `graphToDescription`) and
+runs the net on `PrecompiledNetExecutor`. The net's step outcomes are drawn from the same seeded
+function as the reference's, and its actions wait seeded macrotask delays.
+
+Setup:
+- the corpus above: 209 entries, all compiled;
+- 20 behaviours × 20 orders;
+- an empty `[null, null]` batch terminal with chance 0.25;
+- `pFail` 0.05 on every fourth behaviour.
+
+Stamp: `n8n@2.41.3` (settlement.js `8b7fe1d317aa`, loop-ledger.js `affbe650919e`, completion.js
+`3d3c53f9902c`) and libpetri 7.0.0 from the registry.
+
+| Leg | Compared | Disagreements |
+|---|---:|---:|
+| (a) planner on decoded rows vs R(S), at every reference state | 972,945 state reports; they are **33,367 distinct row sets**, of which 25,222 have a non-empty R(S). The reports include 210,183 with a `running` row, 82 `cancelled`, 2,788 `failed` and 1,988 with an empty terminal. | **0** (0 `CodecError`s) |
+| (b) lockstep net run vs reference run: fates, slots, ends, settled = `countExpectedSettledSteps` | 83,600 pairs: 81,040 failure-free (595,840 steps); 2,560 failed (10,660 steps decided by both) | **0** |
+| (c) at every row-set point of a net run: decoded marking = executor marking, planner = libpetri's enabled starts and skips | 836,272 points from 901,968 firings | **0** |
+
+The run took 322 s of wall clock.
+
+So on this corpus the `engineV2` net *is* a v2 planner. At no row set the sampled reference
+reached does it plan anything other than what `decideSuccessors` plans, so §2's stop condition is
+not met.
+
+This is settlement-level evidence, not a conformance number, and leg (a) rests on sampled
+interleavings. The sampled reference never produces a failed batch row, because its seeded
+outcome never fails a batch step. Step 12's `settlement` family checks invariants of the net over
+all its interleavings, but it never compares the planner with R(S), so it does not close the
+sampling gap for the planner question.
+
+**What does close it, on small graphs: `tasks/spike-v2-exhaustive.mts`.** Written by the
+adversarial review, it explores n8n's handler loop depth-first through every event order and
+every step outcome, driven by n8n's own `decideSuccessors`: every filling of the output slots,
+failure, batch failure, all three batch terminals, and up to 4 passes. After a failure, running
+steps still settle. At every distinct row set it compares `planFromMarking(decodeStepRows(S))`
+with R(S), and also decodes the rows in reverse order.
+
+Reproduced on 2026-09-25 with `npx --prefix typescript tsx tasks/spike-v2-exhaustive.mts 4 1000000 14`, in 51 s:
+- 196 graphs, 21 of them with a loop: the golden's graphs plus every accepted corpus entry
+  with at most 14 nodes and output arity at most 3;
+- 1,816,621 handler states and 123,142 distinct row sets;
+- **0 disagreements**, and reversed-order decoding agrees everywhere.
+
+Only 16,493 of the row sets have a non-empty R(S), because the enumeration spends much of its
+state space after a failure, where both answers are empty. One graph (`7154.json`) hit the 1M
+cap and is covered only up to it. On the graphs it covers, the planner question is answered for
+every interleaving and every outcome, not for a sample.
+
+Sensitivity check: with B's back start dropped from a copy of the planner, the same run reports
+70 disagreements.
+
+CI replays a recorded slice of this with no `.n8n` (step 11): `tests/fixtures/v2/settlement-golden.json`,
+stamped with the pin, the full sha256 of the six dist files, and libpetri. It covers 19 committed
+graphs (7 testbed workflows n8n accepts, and the 12 v2 fixture graphs), 664 row sets with n8n's
+R(S), and 456 of n8n's runs for the net to reproduce. There were 0 findings at recording. The
+`m1-acceptance` workflows are n8n's test suite inside `.n8n/`, not committed here, so the golden
+does not hold them.
+
+**The verification families exist (step 12, 2026-09-25).** `verify(…, { profile: 'engineV2' })`
+and the CLI's `--profile engineV2` run the `settlement` family over the net's state-class graph.
+It checks that a node's start and skip are never co-enabled, that each arrival and each running
+place holds at most one token, that nothing is pending at a halt-free rest, that every node
+outside a loop is decided exactly once, and that every loop ends exactly once. On the 12 v2
+fixture graphs and the 8 accepted v1 fixtures that close, every check is proven over a complete
+graph, loops included: a folded loop has finite markings. `switch20` truncates, and all its
+checks are `unknown`. v1's `budget` and `retry-bound` are reported "not applicable under
+engineV2", never passed.
+
+**The "smaller nets" hypothesis, measured** (`tests/verify/measure-v2.ts`, libpetri 7.0.0 from the
+registry):
+- Places and transitions: v2 nets have about half the places on every subject.
+- State classes against v1 at equal concurrency (budget = node count): v2 is smaller wherever
+  v1 closes, and it closes on `chain40` and `wide8`, where v1 truncates at 200,000.
+- State classes against v1's default budget 1: the hypothesis is **refuted on 4 of 16 closing
+  subjects**, all fan-out or long-chain shapes. `fanOut4` has 2,182 classes against 1,807,
+  `chain40` 983 against 407, `wide8` 24,315 against 5,894, and `switchFanOut` 14,294 against
+  8,463.
+
+v2 has no budget to serialise concurrent steps, so "smaller" holds for the net and not for its
+state space under v1's default. The tables are in the plan's Step 12 entry.
+
+Still open: the converter port (step 13), and an SMT fallback for the `engineV2` families.
 

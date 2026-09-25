@@ -358,3 +358,179 @@ Key paths:
   `v2-disabled-node`. The cause is that rooting at the fired trigger, disabled-node splicing and
   back-edge marking are not ported yet (step 13). Stage 1 (`graphToDescription` from n8n's own
   converted graph) compiles all 209 n8n-accepted entries and refuses none.
+- **Step 8.** The decoder is `src/codec/v2/step-rows.ts`, the planner `src/codec/v2/plan.ts`, and both share a third module, `src/codec/v2/net.ts`: unit-token counts per place name (`TokenCounts`), hand enabledness (`isEnabled`: `requiredCount` per input arc, reads, inhibitors), `branchOf` (the enumerated `Out` branch writing exactly a given place set) and `fire`. Both entry points call `assertProfile` first. Neither is exported from the package's `codec` entry yet.
+  - **`decodeStepRows` returns the row counts beside the marking.** It returns `StepMarking { marking: Map<Place, Token[]>, rowCounts }`, and `planFromMarking(compiled, decoded)` takes that, so `planFromMarking(compiled, decodeStepRows(compiled, rows))` composes. The reason is that a folded loop's marking does not hold iterations (decision 6), and the planner keys its answers `(node, rowCount(node))`. `enabledTransitions(compiled, marking)` is also exported, for the state-class cross-check.
+  - **The row types are local mirrors.** `StepRow` / `StepKey` / `V2_STEP_STATUSES` mirror `StepSummary`, `StepKey` and `STEP_STATUSES` at the pin, with no `.n8n` import. `StepRow.status` is typed loosely so that a status the pin lacks, such as `waiting`, reaches the decoder's `CodecError`.
+  - **What each row fires.** `queued`, `running` and `cancelled` fire the start only, so the step is in flight. `completed` fires the start, then `X_run`'s success branch for exactly its `filledOutputSlots`, then every `X_route_o` under split routing. `failed` fires the start and the halt branch. `skipped` fires the skip. A batch node uses its entry pair at iteration 0 and its back pair after. Its completed row takes the `loop` branch when the loop slot is filled, `doneData` when the done slot is, and `doneEmpty` when neither is; on `noExit` those last two are one branch.
+    - A row is applied whole (start, run, routes).
+    - Rows are tried in input order in repeated passes, so permuting the input varies the replay order.
+    - The `_halt` of failed rows is withheld and deposited after replay.
+  - **Cancelled rows.** A cancelled row stays in flight in the marking (`X/running`), because the net does not model the cancellation (decision 8's divergence).
+  - **Queued or running trigger rows.** The decoder accepts a trigger row that is queued or running. v2 never writes one, but it is the net's state between `T_start` and `T_run`, and executor traces pass through it.
+  - **Refusals beyond the plan's six.** The decoder also raises `CodecError` for:
+    - a node the net does not compile;
+    - a repeated `(node, iteration)`;
+    - an iteration that is not a non-negative integer;
+    - a second row on a node outside every loop;
+    - a failed or skipped trigger row;
+    - a filled slot on a row that did not complete.
+  - **The prefix test runs on row-set points, not on every prefix.** An executor trace passes through markings that are not row sets: a transition in flight (its tokens consumed, none deposited), and a split run whose routes have not all fired (`X/ok_o` marked). The test decodes at every point after a completed firing where neither holds. Traces use both executors, with seeded 0–3 macrotask delays in every action so that firings interleave.
+  - **Answer order.** Answers come in net declaration order, not `decideSuccessors`' edge order. Comparisons are of sets.
+  - Tests: `tests/codec/v2-step-rows.test.ts`, 50 cases. It covers 12 graphs (`SETTLEMENT_SHAPES` ∪ `ACCEPTED`), 12 seeded behaviours each (a third of them with run failures), and both executors: 2,164 row-set points. At each point the decoded marking equals the executor's, and the hand enabled set equals `StateClassGraph.build(net, M, 1).initialClass.enabledTransitions`. The file also has:
+    - 20 permutations of two row sets per behaviour, which decode to one marking;
+    - plans written from rules 2–4;
+    - every refusal.
+  - **A preliminary differential, not step 10's.** A scratch probe (not committed) ran the spike's reference loop on the 209 accepted entries, 8 behaviours × 4 orders each, and compared `planFromMarking(decodeStepRows(S))` with R(S) at every reference state (decision 13). Over 61,497 states it found **0 disagreements and 0 `CodecError`s**. The spike's `outcome()` has no `[null, null]` terminal, no failed batch row and no `running` or `cancelled` rows, so those shapes are covered by the unit tests only. Step 10's harness is still owed.
+- **Step 9.** The reference is `src/conformance/v2/reference.ts`: `hash`, `rng`, `outcome`, `simulate`, `latestTerminal`, plus `terminalIterations` and `referenceAnswer` (R(S)). n8n's code comes in as a `SettlementReference` with the ten functions the loop calls: decision 15's seven, and `findTriggerNode`, `getDescendantNodeIds` and `getSuccessorNodeIds`. The module imports only types from `codec/v2/step-rows.ts` (`StepKey`, `V2StepStatus`) and `conformance/v2/graph.ts`. It declares `V2Loop` (`batchNodeId` and `memberIds`, the fields it reads) and `ReferenceRow` (`StepSummary`); n8n's loop objects pass through it untouched. It is not exported from the `conformance` barrel. `tests/codec/v2-step-rows.test.ts` now imports `hash` and `rng` from it rather than keeping its own copies.
+  - **API shape.** `outcome(graph, node, iteration, behaviour)` and `simulate(ref, graph, behaviour, order, options)` take a `Behaviour { seed, pFail, emptyTerminal }` in place of the spike's positional `seed, pFail`. `SimulateOptions` has `onState(rows)` and `maxEvents`, whose default is `MAX_EVENTS` = 20,000, as in the spike. The option exists so a test can reach the guard without running 20,000 O(rows) events. `RunResult` also carries the final `rows`, for step 10's fate comparison.
+  - **When `onState` fires.** It fires once for the trigger's birth row and then after every event that changed a row. Each call receives a snapshot the caller may keep.
+  - **Two row states the spike did not have.** Neither draws a random number, so no run's order, end or event count moves.
+    - A `running` row between claim and settle. `StepReadyHandler` claims `queued → running` before it runs a step.
+    - `cancelled` rows after a failure. `failExecution` calls `cancelQueuedSteps`, so a failed run's queued rows now end `cancelled`, not `queued`. That changes the fate strings and `settled`/`leftQueued` of failed runs only. Those are never compared: confluence and the completion checks read failure-free and completed runs.
+  - **R(S)** follows decision 13. It is ∅ if any row failed. Otherwise it is the union over completed and skipped rows of `decideSuccessors(graph, loops, r, S, terminalIterations(S))`, where `steps` is the whole row set and `terminalIterations` covers every loop. Both are supersets of what the handler loads, with the same value for each entry. Keys that already have a row are left out. `decideSuccessors` already skips those, and `createSteps` would insert a key only once. If two rows disagree about a key, R(S) keeps it in both lists, so the disagreement shows up in a comparison and is not resolved here.
+  - **Baseline proven unchanged.** The spike imports the module. `--baseline` turns off the `[null,null]` draw and the new per-state checks. Its output is byte-identical to the pre-move spike's: 211 workflows, 310 entries, 209 accepted (20 with a batch loop), the same 101 rejections by kind, runs 83,600 (completed 81,040, failed 2,560, drained-unfinished 0), findings 0.
+    - A scratch comparison (not committed) also ran the pre-move `simulate` and the module's side by side on every one of the 83,600 runs. End, event count and fates (with `cancelled` read as `queued`) were equal on all of them. `settled`, `expected` and `leftQueued` were equal on every completed run.
+  - **The seeded `[null,null]` terminal.** `outcome` ends a batch node's terminal step with `[false,false]` with chance `emptyTerminal` per (behaviour, batch node). The draw is `rng(hash(seed, node.id, 'empty-terminal'))`, so it moves no other draw. The spike's default is 0.25. Without `--baseline` it also checks every reference state for two steps of one node in flight (the plan's folding falsifier) and for an R(S) that both queues and skips one key.
+    - New numbers at n8n@2.41.3, registry libpetri 7.0.0: entries 310, accepted 209, runs 83,600 (completed 81,040, failed 2,560, drained-unfinished 0).
+    - 600 runs have a loop that ended empty.
+    - There are 972,945 reference states: 210,183 with a `running` row and 82 with a `cancelled` row.
+    - Findings: 0. There is no non-confluence, no two steps in flight and no queue/skip split.
+    - Completed and failed counts do not move, because an empty terminal fails nothing.
+    - Most loop runs never reach a completed terminal. Of 8,000 loop runs, 4,080 skip the batch node at its entry, and many more end by a skipped back pair. That is why only 600 end empty.
+  - **A preliminary differential again, not step 10's.** A scratch probe (not committed) compiled all 209 accepted entries through `graphToDescription` (0 compile errors). It ran the module with n8n's dist injected, 20 behaviours × 20 orders, `emptyTerminal` 0.25, and compared `planFromMarking(decodeStepRows(S))` with `referenceAnswer` at every `onState` state.
+    - It covered 972,945 states, of which 1,988 hold an empty terminal, 210,183 a `running` row and 82 a `cancelled` row.
+    - It found **0 disagreements and 0 `CodecError`s**.
+    - A failed batch row is still never produced, because `outcome` never fails a batch step. That shape is covered only by the step 6 and step 8 unit tests.
+  - Tests: `tests/conformance/v2/reference.test.ts`, 23 cases, with no `.n8n`. n8n is replaced by a stub that implements rules 2–4 of `settlement.ts` for graphs without a loop, and no claim about n8n rests on it.
+    - Pinned `hash`/`rng`.
+    - `outcome`: arity, failure, batch passes, the empty terminal and its independent draw, and the 0.25 rate.
+    - `simulate`: birth state first, every step reads queued → running → settled, snapshots are not touched later, determinism, cancellation after a failure, and the termination guard.
+    - `referenceAnswer`: union, ∅ after a failure, existing keys left out, and a split kept in both lists.
+    - `latestTerminal` and `terminalIterations`.
+    - On the six `SETTLEMENT_SHAPES`, every state the loop reports decodes, and the planner equals the stub's R(S).
+- **Step 10.** The differential is `tasks/v2-differential.mts`. Its parts live in `src/conformance/v2/`: `binder.ts`, `net-run.ts`, and a third module the plan did not name, `differential.ts`. That module holds the three leg comparisons as pure functions, so the suite can check them without `.n8n`. None of the three is exported from the `conformance` barrel.
+  - **Binder.** The signature is `v2Actions(graph, behaviour, delaySeed)`, not `v2Actions(seed)`, because `outcome()` needs the graph and the whole `Behaviour`. The binder is `settlementActions(outcomePolicy(graph, behaviour))` wrapped in `delayed(…)`.
+    - The trigger fills slot 0 only, as `ExecutionStartHandler` writes it, and `outcome` is never asked about it.
+    - **Every** action waits 0 to 3 seeded macrotask ticks: start, skip, run and route, not only `X_run`. A start or skip in flight is a net state too, and delaying it widens the interleavings.
+    - The net run of pair (b, o) uses the delay seed `hash(seed, 'net-order', o)`.
+  - **`runV2(compiled, actions)`** takes a binder rather than a seed, and runs on `PrecompiledNetExecutor`. **Rows are read from what each firing wrote, not from the policy.** libpetri 7.0.0 emits a firing's `token-added` events immediately before its `transition-completed`, so the last `producedTokens.length` added places are that firing's outputs.
+    - A slot is filled when every `live` its edges write was written. This test is exact under collapsed routing, because the compiler splits any node whose fillings collide.
+    - `B_run` filled its loop slot when it wrote no `B/ended`.
+    - A started step reads `running`: the net does not tell queued from running.
+    - As in step 8, row-set points are taken after completed firings with nothing in flight and no split route pending.
+  - **Leg (b) with a failure.** Here "compared up to the first failure" means three things:
+    1. The ends agree: the net holds `_halt` exactly when the reference ended `failed`.
+    2. On every key both runs have a row for, the step was queued in one exactly when it was queued in the other (any status but `skipped` counts as queued).
+    3. A step settled `completed` or `failed` in both has the same status and slots.
+
+    The two runs stop planning at different moments, so keys only one side decided are counted, not treated as disagreements. After `_halt`, the net finishes its in-flight starts, and the reference cancels its queued rows.
+
+    Failure-free, the comparison is the full fate multiset (`name#iteration=status`) plus every connected slot of every completed step. It also checks that no step is left `running`, and that settled equals `countExpectedSettledSteps` (from n8n, on the net's own rows) and equals the reference's settled count.
+  - **Leg (c).** The "net's next enabled set" is libpetri's own `StateClassGraph.build(net, M, 1).initialClass.enabledTransitions` at the **executor's** marking, keyed `(node, rowCount)` from the trace. The executor exposes no enabled set and emits no disable event, so the event stream cannot give it. The leg also checks that the decoded marking equals the executor's marking at every point.
+  - **The script.** It reads the spike's corpus with the same trigger rule. It prints decision 16's stamp (the pin, sha256 prefixes of the six dist files, and libpetri's version and whether it is linked). `--net-behaviours` and `--net-orders` bound the net legs, `--json` dumps the counts and findings, and the exit code is 1 on any finding.
+  - **Measured.** Run on 2026-09-25 at `n8n@2.41.3` (settlement.js `8b7fe1d317aa`, iteration-mapping.js `b020437a1dc2`, completion.js `3d3c53f9902c`, loop-ledger.js `affbe650919e`, loops.js `942db20c8af8`, v1-workflow-converter.js `6b2d8ba8518a`), against libpetri 7.0.0 from the registry. Setup: 20 behaviours × 20 orders on every leg, `emptyTerminal` 0.25, and `pFail` 0.05 on every fourth behaviour.
+    - Corpus: 310 entries, 209 accepted, 209 compiled (20 with a batch loop), 0 compile errors.
+    - **(a) state:** 83,600 reference runs and 972,945 state reports (33,367 distinct row sets, 25,222 with a non-empty R(S); review count). Of those states, 210,183 have a `running` row, 82 a `cancelled` row, 2,788 a `failed` row and 1,988 an empty terminal. **0 disagreements, 0 `CodecError`s.** The state counts equal step 9's probe, so both ran the same reference runs.
+    - **(b) lockstep:** 83,600 pairs.
+      - 81,040 pairs are failure-free, with 595,840 steps compared.
+      - 2,560 pairs failed. In those, 10,660 steps were decided by both runs and compared; 102 were decided by the net only and 35 by the reference only.
+      - **0 disagreements.**
+    - **(c) firing:** 901,968 net firings, of which 836,272 were row-set points. **0 disagreements**: 0 `CodecError`s and 0 marking mismatches.
+    - Wall clock: 322 s in all. Leg (a) took 41 s, the net runs 234 s and leg (c) 44 s. The full test suite ran concurrently for part of that time.
+  - **Limits.**
+    - `outcome()` never fails a batch step, so no run produces a failed batch row. That shape is covered only by the step 6 and step 8 unit tests.
+    - On a `noExit` loop the done slot has no edge, so the net's rows read it unfilled. The reference fills it, and nothing reads it.
+    - These are sampled interleavings. All interleavings of the abstraction are the state-class graph's, in step 12 (decision 17 says step 11, but the verification families are step 12).
+  - **Tests.** `tests/conformance/v2/differential.test.ts` has 56 cases and needs no `.n8n`.
+    - `outcomePolicy` against `outcome`.
+    - `runV2` on all 13 fixture graphs, 12 seeds each: every settled row is `outcome()`'s, read back from the written places, and the run halts exactly when a step failed.
+    - Leg (c) at every point of those runs.
+    - Legs (a) and (b) on the six loop-free shapes, with the stub reference.
+    - Each comparison catching a doctored input: a reference that never skips, rows that do not decode, a dropped row, a flipped slot, a wrong end, and a marking with an extra `_halt`.
+
+    The stub moved from `reference.test.ts` to `tests/fixtures/v2-stub-reference.ts`, and both suites import it from there.
+- **Step 11.** The recorder is `tasks/record-v2-golden.mts`, the golden `typescript/tests/fixtures/v2/settlement-golden.json`, and the replay `typescript/tests/conformance/v2-planner-golden.test.ts` (47 cases, no `.n8n`). A module the plan did not name, `src/conformance/v2/golden.ts`, holds the format (`SettlementGolden`, `GoldenEntry`, `GoldenRun`, `GoldenState`, `GoldenStamp`) and its pure helpers (`encodeRow` / `decodeRows`, `runResultOf`, `fatesOf`, `stateKey`, `selectStates`, `stampDifferences`, `asGolden`), so the recorder and the test share one definition and it is type-checked. It is not exported from the `conformance` barrel.
+  - **Corpus: committed graphs only.** `scripts/testbed/workflows` gives 7 entries: of 11 workflows, n8n's converter refuses 4 (3 `onError: continueErrorOutput`, 1 converging edges into slot 0), and the refusals are recorded under `skipped` with n8n's message. The fixtures give 12: `SETTLEMENT_SHAPES` ∪ `ACCEPTED`, each passed through n8n's `validateExecutableGraph` first. That makes 19 entries, 5 of them with a batch loop. **No `m1-acceptance` workflows exist in this repository:** they are n8n's own test suite inside `.n8n/`, so they are not a committed source, and the recorder says so in its output.
+  - **What is recorded is n8n's.** R(S), the ends, the final rows and `countExpectedSettledSteps` come from n8n's dist injected into the reference loop. The net is only the side being checked. A failing replay is a finding about the net and is never fixed by re-recording.
+  - **Format.**
+    - A row is a tuple `[node index, iteration, status, slots]`: the node is its index in the entry's `graph.nodes`, and the slots are a `0`/`1` string.
+    - A plan is `PlanKeys` (sorted `nodeId@iteration`), the form leg (a) compares.
+    - A run stores its final rows, not the fate string. The fates are `fatesOf(rows)`, and the recorder throws unless that equals `simulate`'s `fates`.
+    - One node, edge, behaviour, run or state per line.
+  - **Size and cap.** Per entry: 12 behaviours × 8 reference orders. `pFail` is 0.2 on every 4th behaviour, not the differential's 0.05, because the golden has few runs and failed and cancelled row sets are the rarest. `emptyTerminal` is 0.25. States are deduplicated as row sets and capped at 60 per entry by `selectStates`. The cap is stratified by kind (failed, cancelled, running, empty terminal, plain), with an equal share per kind and an even spread over the order the states were reported in. Each entry stores `stateCounts {reported, distinct, kept, dropped}`, and the recorder prints the kept and distinct counts by kind for every entry that drops. Totals: 17,574 states reported, 1,159 distinct, **664 kept** (218 with a `running` row, 75 `failed`, 18 `cancelled`, 24 with an empty terminal), 495 dropped. The runs of the first 2 orders are recorded: **456 runs**, 42 of them failed. The file is 262 KiB, 1,900 lines.
+  - **Stamp.** Decision 16 as `stamp {n8n, dist, libpetri}`: `n8n@2.41.3`; the **full** sha256 of the six dist files, keyed by path under `packages/@n8n` (the differential prints 12-character prefixes); and libpetri `{version: '7.0.0', linked: false}`. Against an existing golden with a different stamp, the recorder prints each difference and exits 2 without writing, unless `--force`. This was checked on a doctored copy (n8n@2.40.0, libpetri 6.0.0). Re-recording under the same stamp is byte-identical (the recorder reports `unchanged`).
+  - **The recorder also checks the net** with n8n's real functions: leg (a) on every distinct state (all 1,159, kept or not) and leg (b) on every recorded run. It exits 1 on a finding, but still writes, because the golden's content is n8n's. At recording: **0 findings**, 0 compile errors.
+  - **Leg (b) without `.n8n`.** `differential.ts` gains `compareStateTo(compiled, rows, planKeys)` and `compareRuns(graph, compiled, reference, net, expectedOf)`. `compareState` and `compareLockstep` are now thin wrappers that compute R(S) and `countExpectedSettledSteps` with the injected reference, and their behaviour is unchanged (a 30-workflow smoke run of `tasks/v2-differential.mts` gives 0 findings). The replay passes the count n8n gave on the **reference** run's final rows, where the differential uses n8n's count on the **net's** rows. The two are equal whenever the fates and connected slots agree, which is compared first. The reason: `countExpectedSettledSteps` reads the loops, the reachable set and each batch node's latest row, and a batch row is terminal by its status and loop slot.
+  - **The replay.**
+    - (a) At every recorded state, `planFromMarking(decodeStepRows(rows))` equals the recorded R(S) (`compareStateTo`).
+    - (b) Every recorded run is re-run on the compiled net with `v2Actions(graph, behaviour, netDelaySeed)` and compared by `compareRuns`. The net must end halted exactly when n8n's run failed.
+    - The suite also checks:
+      - the stamp's shape;
+      - that the recorded fixture graphs **equal the current fixtures** and cover all of them, so a changed or added fixture fails until it is re-recorded (which needs `.n8n`);
+      - that every testbed entry's source file exists;
+      - that at least one kept state of each rare kind is present;
+      - the count invariants.
+    - A doctored R(S), fate, slot and settled count must each be caught.
+    - Leg (c) needs no n8n answer and stays in `tests/conformance/v2/differential.test.ts`.
+  - **Measured.** Recorder about 2 s; replay about 0.7 s. Full suite: 93 files, 1,621 tests green, `v1-identity` unchanged. libpetri 7.0.0 from the registry.
+  - **Limits.** Still no failed batch row: `outcome()` never fails a batch step, so the golden has none either. The testbed entries have no loop, so all loop coverage comes from the 5 loop fixtures. The golden samples 19 small graphs, while the corpus-scale evidence stays with `tasks/v2-differential.mts` (step 10).
+- **Step 12.** The family is `typescript/src/verify/families/v2-settlement.ts`, one property name, `settlement`, with one check per subject. The `engineV2` report is `src/verify/settlement.ts` (`verifySettlement`, `exploreSettlement`). Its one pass over the classes is `src/verify/state-space/settlement-survey.ts`. The not-applicable records are `src/verify/families/not-applicable.ts`. `markingStateOf` moved to `src/verify/marking.ts`, and `verify.ts` re-exports it. None of the new modules is exported from the `verify` barrel. `VerificationReport.profile` and `VerifyOptions.profile` are public.
+  - **The checks.** Each is recorded with `QueryRecord.property` naming its graph question.
+    - `settlement:start-skip-exclusive`: one check per node with a skip, and two for a batch node (entry pair and back pair).
+    - `place-bound` ≤ 1: one per `arrived` place (the trigger's `T/in` included) and one per `X/running`.
+    - `settlement:quiescent-without-halt-is-settled`: one whole-net check, over the roles `arrived`, `live`, `running` and `ok`.
+    - `settlement:decided-exactly-once`: one per node outside a loop. `done + skipped` is ≤ 1 in every class and = 1 at every halt-free rest.
+    - `settlement:loop-ends-exactly-once`: one per batch node. `B/ended` is ≤ 1 everywhere and = 1 at every halt-free rest.
+  - **Step 6's open issue.** `B/ended` is also written by a failed batch row. The at-rest claims quantify over halt-free quiescent classes only, and a halted class carries no completion claim. The bounds and the exclusivity still hold over every class. The test shows that `loop`'s graph has halted classes both with and without `B/ended`, and that the loop-end check is proven there.
+  - **One route, the state-class graph.** There is no SMT fallback. A truncated graph reports the violations its prefix holds, and everything else comes back `unknown` with the cap in the reason. There is no `bounded` verdict: a folded loop has finite markings, and every loop graph in the fixtures closes. An at-rest claim is `unknown`, not `proven`, when the complete graph reaches no halt-free quiescent class, because it would hold vacuously. A witness is reported only as a class of the priority- and value-blind abstraction (VER-004).
+  - **Routing.** `verifyCompiled` reads the profile off the net. An `engineV2` net goes to `verifySettlement` and never reaches a v1 family, and `options.profile`, when set, must match the net (`ProfileMismatchError`). This replaces step 7's whole-net refusal: `boundary.test.ts` now expects the refusal only for `{ profile: 'v1' }`. `verify(workflow, { profile: 'engineV2' })` compiles without a budget option. An explicit `budget` or agent bound is passed through and refused by the compiler. `timeoutMs`, `smtFallback`, `semiflowInvariants` and `triggerItems` are ignored under the profile.
+  - **"Not applicable", as a verdict.** It is `unknown` with a reason starting `not applicable under engineV2: `, route `none`, one check per family asked for. It is not a new `CheckVerdict`, because the counts record and every renderer would have changed for v1 too. As a consequence, `--strict` fails on it. The default property list under `engineV2` is `['settlement']`, so the not-applicable checks appear only when asked for: `--property budget`, `retry-bound`, or `--mutex` / `--all-pairs`.
+    - Decision 18 names only `budget` and `retry-bound`. `no-double-activation` and `proper-completion` are also not applicable, and their reasons name the settlement check that asks the analogous question. `dead-nodes` and `mutual-exclusion` are "not ported".
+    - `settlement` asked of a v1 net is not applicable under v1, symmetrically.
+  - **Report shape under `engineV2`.**
+    - `budget` / `requestedBudget` carry the compiler's unused default 1.
+    - `invariants` are all zero, `timeoutMs` is 0, and `solver` is informational only.
+    - `stateSpace.terminal` counts halted classes, and `strandedPlaces` counts the places that some halt-free quiescent class holds pending work on.
+    - The header prints "profile engineV2", "budget none" and "solver not used".
+    - Exit code 3 applies only to v1 reports (`cli/exit-code.ts`), because no `engineV2` check is solver-backed.
+  - **CLI.** `--profile v1|engineV2`. The raw-JSON route is not yet an acceptance path (the deviation above): a workflow n8n accepts can be refused with the `CompileError`, exit 2. The test pins one such case, two triggers, which n8n roots at the fired one. This is documented in `cli.ts` and `docs/verification.md`.
+  - **Measured: class counts, v1 against `engineV2`** (`tests/verify/measure-v2.ts`, libpetri 7.0.0 from the registry, cap 200,000). The subjects are the acyclic `ALL` fixtures the profile accepts, plus the generated `chain40` and `wide8`. `+` means truncated.
+
+    | workflow | v1 k=1 P/T | v1 k=1 classes | v1 k=n classes | v2 P/T | v2 classes |
+    |---|---|---:|---:|---|---:|
+    | linear | 37/15 | 37 | 119 | 19/11 | 21 |
+    | fanOut | 37/15 | 90 | 707 | 19/11 | 64 |
+    | diamond | 62/27 | 295 | 1,785 | 30/17 | 92 |
+    | switch20 | 238/107 | 200,015+ | 200,004+ | 129/85 | 200,005+ |
+    | expressionRef | 37/16 | 69 | 181 | 19/11 | 45 |
+    | retry | 30/13 | 62 | 149 | 14/8 | 14 |
+    | ifHalf | 28/11 | 27 | 55 | 14/8 | 14 |
+    | fanOut4 | 62/27 | 1,807 | 33,141 | 33/21 | 2,182 |
+    | failurePolicy | 45/23 | 88 | 689 | 19/11 | 45 |
+    | chain40 | 370/163 | 407 | 200,000+ | 204/122 | 983 |
+    | wide8 | 82/35 | 5,894 | 200,008+ | 44/26 | 24,315 |
+
+    The v2 fixture graphs, compiled through `graphToDescription` for all three nets (a scratch run, not committed), give these class counts:
+
+    | graph | v1 k=1 | v1 k=n | v2 |
+    |---|---:|---:|---:|
+    | chain | 27 | 55 | 14 |
+    | branchDiamond | 295 | 1,785 | 92 |
+    | threeInputMerge | 746 | 4,543 | 134 |
+    | switchFanOut | 8,463 | 200,002+ | 14,294 |
+    | longChain | 37 | 119 | 21 |
+    | ifIntoMerge | 71 | 179 | 27 |
+
+    **Reading, in the direction the numbers allow:**
+    - Every v2 net has about half the places and fewer transitions.
+    - Against v1 at equal concurrency (k = node count, since v2 has no budget), v2 has fewer classes wherever v1 closes. It also closes on `chain40` and `wide8`, where v1 truncates.
+    - Against v1's default k = 1, which runs one node at a time, the hypothesis is **refuted on 4 of the 16 closing subjects**: `fanOut4` (2,182 against 1,807), `chain40` (983 against 407), `wide8` (24,315 against 5,894) and `switchFanOut` (14,294 against 8,463). These are fan-out and long-chain shapes, where v2 runs every queued step concurrently, or where the chain's dead-slot skips interleave with no budget to serialise them.
+    - `switch20` truncates under all three nets. Under `engineV2` its report is 0 proven, 0 violated, all `unknown`.
+    - This refutes ADR 0012's "smaller nets" as a claim about state classes against v1's default budget. It does not refute the design. The report wall clocks follow the class counts: v2 is 3.5 s on `wide8` against 181 ms for v1 k=1, and 39 ms against 33 ms on `chain40`.
+  - **Tests.** `tests/verify/v2-families.test.ts` has 71 cases and needs no z3 (nothing in it is solver-dependent, so it is not behind the gate).
+    - Every check is proven on 20 nets: the 12 v2 graphs and the 8 `ALL` fixtures the profile accepts, `switch20` excepted. On each net the graph is complete, halted classes are present, and the number of checks per question matches the net's structure.
+    - Nine class counts are pinned.
+    - The halted-loop carve-out is covered.
+    - Each claim is broken on purpose, from a doctored initial marking (a second unit on `T/in`, a stale Merge arrival, a pre-marked `B/ended` or `A/done`), or on a hand-built net for the exclusivity. Each yields `violated` with a decoded firing path.
+    - It covers truncation (`switch20` at a 2,000 cap, cause `parallelism`), `maxClasses: 0`, and the vacuity guard.
+    - It covers profile routing, the not-applicable records under both profiles, exit code 3 not applying, and the CLI: `--profile engineV2` end to end, `--strict` with a v1 family, `--budget` refused, a raw-JSON refusal, and a bad profile name.

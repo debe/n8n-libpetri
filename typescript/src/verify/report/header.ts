@@ -7,6 +7,7 @@ import { table } from './table.js';
 
 /** The one-line header block: what was verified, against what, with which solver. */
 export function renderHeader(report: VerificationReport): string[] {
+  if (report.profile === 'engineV2') return renderSettlementHeader(report);
   return [
     `n8n-libpetri verify — ${report.workflow}`,
     ...table([
@@ -52,4 +53,22 @@ function semiflowLine(report: VerificationReport): string {
     ?? (report.invariants.encoded === 0
       ? 'not computed — the P-invariant pipeline runs only for the budget family'
       : 'not found among the validated invariants');
+}
+
+/**
+ * An `engineV2` report's header (`settlement.ts`): no budget, no SMT fallback and no invariants
+ * to state, so those lines say why rather than printing the v1 defaults.
+ */
+function renderSettlementHeader(report: VerificationReport): string[] {
+  return [
+    `n8n-libpetri verify — ${report.workflow} (profile engineV2)`,
+    ...table([
+      ['  net', `${report.net.places} places, ${report.net.transitions} transitions, ${report.net.flatTransitions} flat (XOR-expanded, IO-016)`],
+      ['  budget', 'none — engine v2 runs every queued step'],
+      ['  state space', renderStateSpace(report)],
+      ['  solver', 'not used — the engineV2 families are decided by the state-class graph alone (VER-010)'],
+      ['  scope', 'markings reachable from one unit on the trigger\'s T/in; a verdict about a halt-free rest says nothing about a halted run'],
+      ['  hash', report.structuralHash],
+    ]),
+  ];
 }

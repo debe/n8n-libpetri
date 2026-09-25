@@ -9,6 +9,18 @@ All notable changes to this project are documented here. The format follows
 - `scripts/check-n8n-drift.sh`: a read-only dry-run of the patches in a throwaway index
   against the pin, `stable`, `beta`, the newest release and master. It also lists what touched
   the seam and n8n's engine v2 since the pin.
+- **The engineV2 profile and the stateless planner** (ADR 0012 §2, `tasks/v2-profile-plan.md`).
+  - `compile(…, { profile: 'engineV2' })` compiles n8n engine v2's settlement rule as arcs. The
+    v1 net is pinned byte-identical.
+  - `codec/v2` decodes v2 step rows into a marking by replaying them through the net, and plans
+    from enabledness.
+  - Against n8n's own `decideSuccessors`:
+    - sampled, 83,600 runs over 33,367 distinct row sets: 0 disagreements;
+    - enumerated, every event order and every outcome on small graphs
+      (`tasks/spike-v2-exhaustive.mts`): 0 disagreements.
+  - A CI golden replays a recorded slice with no `.n8n`.
+  - The verify CLI takes `--profile engineV2`. Such a run exits 3 when no check was decided.
+  - `docs/divergences.md` rows 31-34 record where the profile and v2 differ.
 - `tasks/spike-v2-settlement.mts`: the reference side of ADR 0012's differential. It drives
   n8n's own engine v2 settlement code (`decideSuccessors`, `countExpectedSettledSteps`, and the
   rest), loaded from the pinned checkout, through `StepSettledHandler`'s event loop with

@@ -1,6 +1,7 @@
 /**
- * Every property family, in the order a report runs them (`verify.ts`, "The six property
- * families and what each one can and cannot say").
+ * Every v1 property family, in the order a report runs them (`verify.ts`, "The six property
+ * families and what each one can and cannot say"). An `engineV2` net never reaches this list:
+ * `verifyCompiled` sends it to `settlement.ts`.
  */
 import type { Context } from '../route.js';
 import type { PropertyName, VerifyOptions } from '../types.js';
@@ -8,6 +9,7 @@ import { runBudget } from './budget.js';
 import { runDeadNodes } from './dead-nodes.js';
 import { runMutualExclusion } from './mutual-exclusion.js';
 import { runNoDoubleActivation } from './no-double-activation.js';
+import { recordNotApplicable } from './not-applicable.js';
 import { runProperCompletion } from './proper-completion.js';
 import { runRetryBound } from './retry-bound.js';
 
@@ -22,6 +24,8 @@ const FAMILY_ORDER: readonly (readonly [PropertyName, FamilyRunner])[] = [
   ['mutual-exclusion', (ctx, options) => runMutualExclusion(ctx, options.mutualExclusion ?? 'all-pairs')],
   ['dead-nodes', runDeadNodes],
   ['proper-completion', runProperCompletion],
+  // The engineV2 family, asked of a v1 net: one explicit not-applicable check (decision 18).
+  ['settlement', async (ctx) => recordNotApplicable(ctx, 'settlement', 'v1')],
 ];
 
 /** Runs each selected family, one after another, recording into `ctx`. */

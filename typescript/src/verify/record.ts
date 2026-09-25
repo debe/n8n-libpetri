@@ -17,9 +17,13 @@ import {
 } from './route.js';
 import type { CheckSubject, CheckVerdict, PropertyCheck, PropertyName, QueryRecord } from './types.js';
 
-/** Appends one check to the report and streams it; `counterexample` defaults to `null`. */
+/**
+ * Appends one check to the report and streams it; `counterexample` defaults to `null`. Reads
+ * only the check list and the stream, so the `engineV2` report (`settlement.ts`) records through
+ * it too.
+ */
 export function record(
-  ctx: Context,
+  ctx: Pick<Context, 'checks' | 'onCheck'>,
   check: Omit<PropertyCheck, 'counterexample'> & { readonly counterexample?: PropertyCheck['counterexample'] },
 ): void {
   const full: PropertyCheck = { counterexample: null, ...check };

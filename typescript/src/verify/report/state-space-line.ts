@@ -16,7 +16,7 @@ export function renderStateSpace(report: VerificationReport): string {
   const space = report.stateSpace;
   if (space.error !== null) return `not built: ${space.error} — every check fell back to the solver`;
   const size = `${space.classes} classes in ${(space.elapsedMs / 1000).toFixed(1)}s, ` +
-    `${space.quiescent} quiescent (${space.terminal} paused or halted)`;
+    `${space.quiescent} quiescent (${space.terminal} ${report.profile === 'engineV2' ? 'halted' : 'paused or halted'})`;
   if (space.complete) return `${size}, complete (VER-010)`;
   if (space.truncation === 'off') {
     return `${size}, the solver-free route is off (maxClasses = ${space.requestedMaxClasses})`;

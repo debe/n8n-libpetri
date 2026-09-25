@@ -175,6 +175,14 @@ proof — and never widen a check's claim past its query.
   dependency. `analysis/` holds the phases of `analyse()`, `gadget/` the phases of the per-node
   gadget and `types/` the types by audience. `names.ts` is the one vocabulary every place and
   transition name comes from; `errors.ts` has `CompileError` and `InternalCompilerError`.
+- **Two compile profiles.** `compile(…, { profile: 'engineV2' })` targets n8n's engine v2
+  (ADR 0012). `buildNodeGadget` is the single switch, into `compiler/gadget/settlement/` (v2's
+  settlement rule as arcs), with `compiler/analysis/engine-v2/` for loops and refusals. The v1
+  net must stay byte-identical: `tests/compiler/v1-identity.test.ts` pins it; never regenerate
+  its recording to make a change pass. `codec/v2/` decodes v2 step rows into a marking and plans
+  from it (the stateless planner). `conformance/v2/` holds the reference loop, with n8n's code
+  injected (`src/` never imports `.n8n`), the differential and the CI golden. Plan and deviations
+  are in `tasks/v2-profile-plan.md`.
 - `scheduler/` — `PetriScheduler` and its transition actions. `run-loop.ts` mirrors n8n's loop,
   `outcomes.ts` turns an outcome into the tokens a firing deposits and `round.ts` runs agent
   rounds (ADR 0008). `payloads.ts` is the token vocabulary the codec shares.

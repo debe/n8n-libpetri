@@ -4,11 +4,13 @@
  */
 import { parseFlags, UsageError } from '../../cli/flags.js';
 import { PROPERTY_NAMES } from '../types.js';
+import type { CompileProfile } from '../../compiler/index.js';
 import type { PropertyName, SmtFallbackMode, VerifyOptions } from '../types.js';
-import { budgetOf, maxClassesOf, mutexPairOf, propertyOf, smtFallbackOf, timeoutOf } from './flag-values.js';
+import { budgetOf, maxClassesOf, mutexPairOf, profileOf, propertyOf, smtFallbackOf, timeoutOf } from './flag-values.js';
 
 export const USAGE =
-  'usage: n8n-libpetri verify <workflow.json> [--budget k] [--property NAME]... [--timeout ms]\n' +
+  'usage: n8n-libpetri verify <workflow.json> [--profile v1|engineV2] [--budget k] [--property NAME]...\n' +
+  '                          [--timeout ms]\n' +
   '                          [--max-classes n] [--smt-fallback auto|off|force] [--node-types FILE]\n' +
   '                          [--start NODE] [--mutex A,B]... [--all-pairs] [--no-semiflows]\n' +
   '                          [--strict] [--json] [--out FILE] [--quiet]\n' +
@@ -32,6 +34,7 @@ interface Flags {
   readonly files: string[];
   readonly properties: PropertyName[];
   readonly pairs: Array<readonly [string, string]>;
+  profile?: CompileProfile;
   budget?: number;
   timeoutMs?: number;
   maxClasses?: number;
@@ -53,6 +56,7 @@ function optionsOf(f: Flags): VerifyOptions {
   // mutual exclusion when a pair was named.
   const selected = f.properties.length > 0 ? f.properties : undefined;
   return {
+    ...(f.profile === undefined ? {} : { profile: f.profile }),
     ...(f.budget === undefined ? {} : { budget: f.budget }),
     ...(f.timeoutMs === undefined ? {} : { timeoutMs: f.timeoutMs }),
     ...(f.maxClasses === undefined ? {} : { maxClasses: f.maxClasses }),
@@ -72,6 +76,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   };
   parseFlags(args, {
     values: {
+      '--profile': (v) => { f.profile = profileOf(v); },
       '--budget': (v) => { f.budget = budgetOf(v); },
       '--timeout': (v) => { f.timeoutMs = timeoutOf(v); },
       '--property': (name) => { f.properties.push(propertyOf(name)); },

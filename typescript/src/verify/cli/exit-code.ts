@@ -11,9 +11,18 @@ export function exitCodeOf(report: VerificationReport, strict: boolean, io: CliO
   // reachability-safety families without z3, so a stranding it found is a finding whether or
   // not the fallback could run.
   if (!report.ok) return 1;
-  // No solver: the SMT fallback never ran. That is not a clean run either.
-  if (!report.solver.available) {
+  // No solver: the SMT fallback never ran. That is not a clean run either. An engineV2 report
+  // has no SMT fallback to miss (`settlement.ts`): its families are the state-class graph's alone.
+  if (report.profile === 'v1' && !report.solver.available) {
     io.stderr(`the SMT fallback did not run: ${report.solver.reason ?? 'no usable z3'}\n`);
+    return 3;
+  }
+  // engineV2 has one route, the state-class graph. When it decided nothing (graph truncated or
+  // disabled), the run verified nothing, which is exactly what exit 3 exists to say.
+  if (report.profile === 'engineV2' &&
+      report.counts.proven + report.counts.violated + report.counts.bounded === 0) {
+    io.stderr(`engineV2: no check was decided (${report.counts.unknown} unknown); ` +
+      'the state-class graph is the only route and it did not close\n');
     return 3;
   }
   const unproven = report.counts.unknown + report.counts.bounded;

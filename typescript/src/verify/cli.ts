@@ -8,7 +8,8 @@
  * `main.ts` is the process entry point the `bin` maps to.
  *
  * ```
- *   --budget k             concurrency budget (default 1; the compiler may lower it)
+ *   --profile NAME         v1 (default) | engineV2 — the target the workflow is compiled for
+ *   --budget k             concurrency budget (default 1; the compiler may lower it; refused under engineV2)
  *   --property NAME        run only this property family; repeatable
  *   --timeout MS           per-query z3 timeout for the SMT fallback (default 60000)
  *   --max-classes N        state-class cap for the solver-free route (default 200000; 0 = off)
@@ -44,6 +45,15 @@
  * stay proofs should use. `--strict` fails on `bounded` as well as on `unknown`: a bounded
  * verdict is sound within the graph's closed prefix and is deliberately not a proof, so a
  * gate that demands proofs must not accept it.
+ *
+ * `--profile engineV2` compiles for engine v2 (`tasks/v2-profile-plan.md`) and runs the
+ * `settlement` family over the state-class graph alone (`settlement.ts`); `--property` of a v1
+ * family then records it as not applicable. The raw-JSON route is **not yet an acceptance path**
+ * for engine v2: the converter's rooting at the fired trigger, disabled-node splicing and
+ * back-edge marking are not ported (plan step 13), so a workflow n8n's converter accepts can
+ * still be refused here with the compiler's `CompileError` (measured: 75 of the 209 corpus
+ * entries n8n accepts). That is exit 2 with the refusal on stderr, never a report. Exit 3 does
+ * not apply under engineV2: no check there is solver-backed.
  *
  * `--smt-fallback` is the escape hatch for the size ceiling `verify()` applies to the SMT
  * route: above a measured net size libpetri's pre-solver pipeline exhausts the V8 heap, which

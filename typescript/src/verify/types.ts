@@ -9,19 +9,28 @@
  * through. {@link PropertyCheck.query} records which libpetri property was actually asked
  * and what libpetri answered, so the inversion is never hidden.
  */
-import type { BudgetRestriction, PlaceRole, TransitionRole, Variant } from '../compiler/index.js';
+import type { BudgetRestriction, CompileProfile, PlaceRole, TransitionRole, Variant } from '../compiler/index.js';
 
-/** The property families {@link verify} can ask about. CLI `--property` takes these names. */
+/**
+ * The property families {@link verify} can ask about. CLI `--property` takes these names.
+ *
+ * The first six are the v1 families. `'settlement'` is the `engineV2` family
+ * (`families/v2-settlement.ts`, `tasks/v2-profile-plan.md` decision 18). A family asked of a net
+ * of the other profile is recorded as one `unknown` check whose reason says it is not
+ * applicable under that profile (`families/not-applicable.ts`), never dropped and never passed.
+ */
 export type PropertyName =
   | 'proper-completion'
   | 'dead-nodes'
   | 'no-double-activation'
   | 'budget'
   | 'retry-bound'
-  | 'mutual-exclusion';
+  | 'mutual-exclusion'
+  | 'settlement';
 
 export const PROPERTY_NAMES: readonly PropertyName[] = [
   'proper-completion', 'dead-nodes', 'no-double-activation', 'budget', 'retry-bound', 'mutual-exclusion',
+  'settlement',
 ];
 
 /**
@@ -177,7 +186,11 @@ export type CheckRoute = 'state-class-graph' | 'smt' | 'structural' | 'none';
 
 /** What was asked, how it was answered, and what came back. */
 export interface QueryRecord {
-  /** libpetri `SmtProperty.type` naming the question, or `'none'` for a structural check. */
+  /**
+   * libpetri `SmtProperty.type` naming the question, or `'none'` for a structural check. An
+   * `engineV2` settlement check that is not a place bound names its graph question instead,
+   * `settlement:…` (`families/v2-settlement.ts`).
+   */
   readonly property: string;
   /** The place the property names, when it names one. */
   readonly place: string | null;
@@ -261,9 +274,13 @@ export interface StateSpaceSummary {
   readonly elapsedMs: number;
   /** Classes nothing can fire from: the markings a run can come to rest in. */
   readonly quiescent: number;
-  /** Of those, the designed terminals: a paused (`_pause`) or halted (`_halt`) run. */
+  /** Of those, the designed terminals: a paused (`_pause`) or halted (`_halt`) run; under `engineV2`, halted only. */
   readonly terminal: number;
-  /** Places some quiescent class leaves pending work on. Non-zero means a stranding. */
+  /**
+   * Places some quiescent class leaves pending work on. Non-zero means a stranding. Under
+   * `engineV2`, places some halt-free quiescent class holds an `arrived`, `live`, `running` or
+   * `ok` token on (`state-space/settlement-survey.ts`).
+   */
   readonly strandedPlaces: number;
   /** Why the graph did not close; `null` when it did. */
   readonly truncation: TruncationCause | null;
@@ -325,6 +342,12 @@ export interface InvariantSummary {
 
 export interface VerificationReport {
   readonly workflow: string;
+  /**
+   * The target the net was compiled for. An `engineV2` report is decided by the state-class graph
+   * alone: it has no budget (the two budget fields carry the compiler's unused default of 1), no
+   * SMT fallback and no invariants, and `solver` is informational only.
+   */
+  readonly profile: CompileProfile;
   readonly structuralHash: string;
   readonly requestedBudget: number;
   /** The budget the net was compiled with: `requestedBudget`, or 1 under a k-safety restriction. */
@@ -365,9 +388,21 @@ export type SmtFallbackMode = 'auto' | 'off' | 'force';
 export type MutualExclusionRequest = readonly (readonly [string, string])[] | 'all-pairs';
 
 export interface VerifyOptions {
+  /**
+   * The target {@link verify} compiles for. Default `'v1'`. Under `'engineV2'` the report runs the
+   * `'settlement'` family over the state-class graph alone (`settlement.ts`), and `budget`,
+   * `maxAgentRounds` and `maxAgentToolCalls` are refused by the compiler, as they are there.
+   * `timeoutMs`, `smtFallback`, `semiflowInvariants` and `triggerItems` have nothing to act on
+   * under `'engineV2'` and are ignored. `verifyCompiled` reads the profile off the net and
+   * refuses one that differs from this field when it is set.
+   */
+  readonly profile?: CompileProfile;
   /** Concurrency budget `k`. Default 1. The compiler may lower it (`budgetRestriction`). */
   readonly budget?: number;
-  /** Which property families to run. Default: everything except `'mutual-exclusion'`. */
+  /**
+   * Which property families to run. Default: under `'v1'` everything except `'mutual-exclusion'`
+   * and `'settlement'`; under `'engineV2'`, `'settlement'` only.
+   */
   readonly properties?: readonly PropertyName[];
   /** Per-query timeout handed to the SMT **fallback** (VER-013). Default 60 000 ms. */
   readonly timeoutMs?: number;

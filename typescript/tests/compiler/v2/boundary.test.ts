@@ -161,9 +161,15 @@ describe('the v1 consumers refuse an engineV2 compiled workflow at entry', () =>
     expect(budgetSemiflowOf([], flatten(v1.net), v1.netMap, 1)).toBeNull();
   });
 
-  it('verifyCompiled, before any family runs', async () => {
-    await expect(verifyCompiled(v2Of())).rejects.toThrow(ProfileMismatchError);
-    await expect(verifyCompiled(v2Of())).rejects.toMatchObject({ consumer: 'verifyCompiled', expected: 'v1', actual: 'engineV2' });
+  // Step 12: an engineV2 net now goes to its own report (`verify/settlement.ts`) and never
+  // reaches a v1 family; asking for the v1 profile explicitly is still refused at entry.
+  it('verifyCompiled: an engineV2 net gets its own report, never the v1 families', async () => {
+    await expect(verifyCompiled(v2Of(), { profile: 'v1' })).rejects.toThrow(ProfileMismatchError);
+    await expect(verifyCompiled(v2Of(), { profile: 'v1' })).rejects.toMatchObject({ consumer: 'verifyCompiled', expected: 'v1', actual: 'engineV2' });
+    await expect(verifyCompiled(v1Of(), { profile: 'engineV2' })).rejects.toMatchObject({ consumer: 'verifyCompiled', expected: 'engineV2', actual: 'v1' });
+    const report = await verifyCompiled(v2Of());
+    expect(report.profile).toBe('engineV2');
+    expect(new Set(report.checks.map((c) => c.property))).toEqual(new Set(['settlement']));
   });
 
   // The public verify exports that read a v1 net's roles, besides `verifyCompiled`: each answered

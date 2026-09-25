@@ -70,7 +70,7 @@ export function wasExpanded(expandedClasses: number, index: number, sc: StateCla
  * deadlock — every successor's firing domain was empty — but only where the BFS actually
  * tried; on the frontier the same shape is an unexplored class and evidence of nothing.
  */
-function isQuiescent(graph: StateClassGraph, sc: StateClass, expanded: boolean): boolean {
+export function isQuiescent(graph: StateClassGraph, sc: StateClass, expanded: boolean): boolean {
   if (sc.enabledTransitions.length === 0) return true;
   return expanded && graph.successors(sc).size === 0;
 }

@@ -4,6 +4,7 @@
  */
 import { UsageError } from '../../cli/flags.js';
 import { PROPERTY_NAMES } from '../types.js';
+import type { CompileProfile } from '../../compiler/index.js';
 import type { PropertyName, SmtFallbackMode } from '../types.js';
 
 /** `--budget k`: a positive integer. */
@@ -52,4 +53,10 @@ export function mutexPairOf(v: string): readonly [string, string] {
     throw new UsageError('--mutex takes two comma-separated node names');
   }
   return [parts[0]!, parts[1]!] as const;
+}
+
+/** `--profile NAME`: `v1` or `engineV2`, the target the workflow is compiled for. */
+export function profileOf(name: string): CompileProfile {
+  if (name !== 'v1' && name !== 'engineV2') throw new UsageError('--profile must be one of v1, engineV2');
+  return name;
 }
