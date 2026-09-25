@@ -13,9 +13,15 @@
 | [0009](0009-execution-policy.md) | Execution policy in workflow JSON: the attempt chain | accepted (compiler, carrier and scheduler built; codec and the per-attempt bound remain) |
 | [0010](0010-bounds-at-the-entry.md) | Bounds at the entry, not a global concurrency counter | **proposed** — nothing built; would supersede the budget half of 0004 and the k-safety half of 0006 |
 | [0011](0011-composition-theorem.md) | The composition theorem: per-gadget contracts to a whole-workflow claim | **proposed** — proof sketch, not mechanised; measured to cover 40.5% of the template corpus |
+| [0012](0012-engine-v2-target.md) | Engine v2 as a second target: model first, seam second | **proposed**: nothing built; plan for n8n's `packages/@n8n/engine` |
 
 Each ADR has Context / Decision / Consequences / Evidence; Evidence names the spike under
 `typescript/tests/spikes/` that pins the behaviour it rests on.
+
+ADRs are records of the moment they were decided. Line numbers they cite in n8n files refer
+to the commit they name (0001-0011: master `441970b`), not to the current pin
+(`scripts/n8n-pin.sh`). Moving to `n8n@2.41.3` shifted `workflow-execute.ts` by four lines
+from its prelude onwards. The extracted loop, `stack-scheduler.ts`, did not change.
 
 0001–0009 are accepted and none is superseded; 0003, 0004, 0005 and 0007 carry amendments
 recorded in
