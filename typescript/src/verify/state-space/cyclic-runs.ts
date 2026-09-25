@@ -4,7 +4,7 @@
  * prefix, and why it is tracked").
  */
 import type { StateClass, StateClassGraph } from 'libpetri/verification';
-import type { CompiledWorkflow } from '../../compiler/index.js';
+import { assertProfile, type CompiledWorkflow } from '../../compiler/index.js';
 import { wasExpanded } from './classify.js';
 
 /**
@@ -18,8 +18,12 @@ import { wasExpanded } from './classify.js';
  * `floor(k / size)` complete passes and nothing may report it as `k` iterations. A node's
  * `X_run` is the transition whose action is the node's own execution, so what is counted is
  * exactly the node runs a user would count on the canvas.
+ *
+ * v1 only: an `engineV2` net folds a batch loop (`tasks/v2-profile-plan.md` decision 6) and
+ * counts it by its own rows, so it throws `ProfileMismatchError` rather than answer.
  */
 export function loopTransitions(compiled: CompiledWorkflow): Set<string> {
+  assertProfile('loopTransitions', 'v1', compiled.netMap.profile);
   const names = new Set<string>();
   // Through `NetMap`'s per-node index rather than a scan of every transition. Not
   // `transitionFor(node, 'run')`, which returns the first match only: a node with an

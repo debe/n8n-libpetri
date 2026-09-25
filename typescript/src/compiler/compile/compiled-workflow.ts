@@ -9,7 +9,7 @@ import type { NetMap } from '../net-map.js';
 import type { ActionBinder, BudgetRestriction, CompiledWorkflow, JoinReadyPlaces, WorkflowAnalysis } from '../types.js';
 import { bindActions } from './bind.js';
 import type { DerivedPlaces } from './derived-places.js';
-import { initialMarkingOf, sharedMarkingOf } from './marking.js';
+import { initialMarkingOf, settlementInitialMarkingOf, sharedMarkingOf } from './marking.js';
 
 export class CompiledWorkflowImpl implements CompiledWorkflow {
   readonly net: PetriNet;
@@ -59,10 +59,12 @@ export class CompiledWorkflowImpl implements CompiledWorkflow {
   }
 
   sharedMarking(): Map<Place<unknown>, Token<unknown>[]> {
+    if (this.analysis.profile === 'engineV2') return new Map();
     return sharedMarkingOf(this.netMap, this.analysis, this.effectiveBudget);
   }
 
   initialMarking(triggerItems: unknown): Map<Place<unknown>, Token<unknown>[]> {
+    if (this.analysis.profile === 'engineV2') return settlementInitialMarkingOf(this.netMap, this.startNode);
     return initialMarkingOf(this.sharedMarking(), this.netMap.node(this.startNode), triggerItems);
   }
 

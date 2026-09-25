@@ -18,7 +18,7 @@ export type { AnalysisOptions } from './graph.js';
 export { parseExecutionPolicy, mergePolicies, PolicyError, POLICY_SCHEMA_VERSION } from './policy.js';
 export type { ExecutionPolicy, FailureAction, FailureStep, PolicyParse } from './policy.js';
 export { structuralHash } from './hash.js';
-export { CompileError, InternalCompilerError } from './errors.js';
+export { assertProfile, CompileError, InternalCompilerError, ProfileMismatchError } from './errors.js';
 export type { CompileErrorCode } from './errors.js';
 export { NetMap } from './net-map.js';
 export type { RoutingMode, RoutingPolicy } from './actions.js';
@@ -26,9 +26,18 @@ export type { RoutingMode, RoutingPolicy } from './actions.js';
 export { kSafety } from './compile.js';
 export { isAllRequired, joinFormOf, requiredInputsOf, retryParamsOf } from './graph.js';
 export { SPLIT_ROUTING_ABOVE } from './gadget.js';
+// Engine v2's batch step (`tasks/v2-profile-plan.md` decision 5), shared with the stage-1 input.
+export {
+  BATCH_OUTPUT_NAMES, DONE_SLOT, isV2BatchNode, LOOP_SLOT, MAX_SLOT_INDEX, SPLIT_IN_BATCHES_TYPE,
+  SPLIT_IN_BATCHES_TYPE_VERSION,
+} from './analysis/engine-v2/batch.js';
+export { isV2UnexecutableStep, V2_STEP_NODE_TYPES } from './analysis/engine-v2/steps.js';
+export { MERGE_TYPE } from './analysis/engine-v2/nodes.js';
 export { placeholderActions, forwardAllActions, routingActions } from './actions.js';
+export { settlementActions, settlementPlaceholderActions } from './actions/settlement.js';
+export type { SettlementPolicy } from './actions/settlement.js';
 export type {
-  ActionBinder, BudgetRestriction, CompileOptions, CompiledWorkflow, EdgeRef, EdgeSlot,
+  ActionBinder, BatchDescription, BudgetRestriction, CompileOptions, CompileProfile, CompiledWorkflow, EdgeRef, EdgeSlot,
   InputGadget, JoinForm, JoinReadyPlaces, MainConnection, NetMapView, NodeDescription, NodeGadget,
   AttemptGadget, NodeTypeShape, OnError, OutputGadget,
   PlaceInfo, PlaceRole,
@@ -37,6 +46,9 @@ export type {
   // Analysis vocabulary (moved from graph.ts; the names are unchanged).
   AnalysedNode, FailureChain, MultiProducerInput, ReferenceKind, ResolvedReference, ResolvedStep,
   ResolvedRetryStep, ResolvedRouteStep, ResolvedStepCommon, ResolvedTerminalStep, RetryParams, WorkflowAnalysis,
+  EngineV2Analysis, V2EdgeClass, V2Loop,
+  // The engineV2 settlement gadget (`tasks/v2-profile-plan.md` decision 14).
+  SettlementBatch, SettlementEdge, SettlementFailure, SettlementGadget, SettlementOutput, SettlementTransitions,
   // Gadget union members.
   NodeGadgetCommon, DirectGadget, OrGadget, JoinGadget, ChooseBranchGadget, ToolGadget, SlottedGadget,
   RetryGadget, AgentGadget, RoutingGadget,

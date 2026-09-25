@@ -7,6 +7,7 @@ import { InternalCompilerError } from '../errors.js';
 import type { GadgetBuild } from '../gadget.js';
 import { NetMap } from '../net-map.js';
 import type { PlaceInfo, SharedPlaces, TransitionInfo } from '../types.js';
+import type { ComposedNet, SettlementComposedNet } from './compose.js';
 
 type Lookup = (name: string) => Place<unknown>;
 
@@ -55,8 +56,31 @@ function assertMappedOnce(structural: PetriNet, placeInfos: readonly PlaceInfo[]
   }
 }
 
+/**
+ * The `NetMap` of an `engineV2` net: `_halt`, then every node's own places, and a settlement
+ * gadget per compiled node instead of a v1 `NodeGadget` (`tasks/v2-profile-plan.md` decision 14).
+ */
+function mapSettlementNet({ structural, builds, halt }: SettlementComposedNet): NetMap {
+  const lookup = canonicalLookup(structural);
+  const settlements = builds.map((b) => b.materialise(lookup));
+  const placeInfos: PlaceInfo[] = [
+    { name: halt.name, role: 'halt', node: null, port: null, place: lookup(halt.name) },
+    ...builds.flatMap((b) => b.places.map((p): PlaceInfo => ({ ...p, place: lookup(p.name) }))),
+  ];
+  const transitionInfos: TransitionInfo[] = builds.flatMap((b) => b.transitions);
+  assertMappedOnce(structural, placeInfos, transitionInfos);
+  return new NetMap(structural, null, [], transitionInfos, placeInfos, { halt: lookup(halt.name), gadgets: settlements });
+}
+
+/** The `NetMap` of a composed net, of either profile. */
+export function mapNet(composed: ComposedNet): NetMap {
+  return composed.profile === 'engineV2'
+    ? mapSettlementNet(composed)
+    : mapV1Net(composed.structural, composed.shared, composed.builds);
+}
+
 /** The `NetMap` of the structural net `builds` were composed into. */
-export function mapNet(structural: PetriNet, shared: SharedPlaces, builds: readonly GadgetBuild[]): NetMap {
+function mapV1Net(structural: PetriNet, shared: SharedPlaces, builds: readonly GadgetBuild[]): NetMap {
   const lookup = canonicalLookup(structural);
   const gadgets = builds.map((b) => b.materialise(lookup));
   const placeInfos = placeInfosOf(shared, builds, lookup);

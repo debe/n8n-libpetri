@@ -10,9 +10,9 @@ import type { WorkflowAnalysis } from './types.js';
  * canvas order with their structural fields and resolved type shapes, resolved expression
  * references, deduplicated connections in canonical order and the start nodes (the
  * primary one and the canonical set: they decide depth, reachability and which node
- * `initialMarking` seeds). Two workflows with equal hashes compile to structurally
- * identical nets and programs. The budget is deliberately not part of it: it changes only
- * the initial marking.
+ * `initialMarking` seeds) and the compile profile. Two workflows with equal hashes compile to
+ * structurally identical nets and programs. The budget is deliberately not part of it: it
+ * changes only the initial marking.
  */
 export function structuralHash(analysis: WorkflowAnalysis): string {
   const canonical = {
@@ -37,8 +37,12 @@ export function structuralHash(analysis: WorkflowAnalysis): string {
     // `calls_out → run → done_req → calls_out` lasso the executor never runs (ADR 0008);
     // 13: that re-entry lands on its own place `A/running_failed` (consumed only by
     // `A_run_failed`) instead of `A/running` guarded by an inhibitor, so the primary run is
-    // structurally unreachable from `A_calls_out` and a linear ranking can bound the round
-    v: 13,
+    // structurally unreachable from `A_calls_out` and a linear ranking can bound the round;
+    // 14: the compile profile (ADR 0012 §1). The two targets build different nets from one
+    // description, so a v1 and an engineV2 compile of the same workflow must never share a
+    // cached entry. A v1 net is unchanged by this version: only its hash moves.
+    v: 14,
+    profile: analysis.profile,
     start: analysis.startNode,
     starts: [...analysis.startNodes],
     nodes: analysis.nodes.map((a) => ({

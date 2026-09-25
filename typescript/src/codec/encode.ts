@@ -7,7 +7,7 @@
  */
 import type { Marking, Place } from 'libpetri';
 import type { IExecuteData } from 'n8n-workflow';
-import type { CompiledWorkflow, NodeGadget } from '../compiler/index.js';
+import { assertProfile, type CompiledWorkflow, type NodeGadget } from '../compiler/index.js';
 import { assertNever } from '../internal/assert.js';
 import type { ExecutionDataState } from '../n8n/host.js';
 import { activationsOf } from './activations.js';
@@ -36,12 +36,18 @@ export interface EncodeOptions {
   readonly node?: (name: string) => IExecuteData['node'] | undefined;
 }
 
+/**
+ * The quiescent `marking` of `compiled` written into `executionData`. A v1 codec: an `engineV2`
+ * net is refused with `ProfileMismatchError` (`tasks/v2-profile-plan.md` decision 14), since engine
+ * v2 keeps its state in step rows, which `codec/v2` reads.
+ */
 export function encodeMarking(
   compiled: CompiledWorkflow,
   marking: Marking,
   executionData: ExecutionDataState,
   options: EncodeOptions = {},
 ): ExecutionDataState {
+  assertProfile('encodeMarking', 'v1', compiled.netMap.profile);
   const mode = options.mode ?? 'pause';
   const diag = options.onDiagnostic ?? noop;
   const nodes = compiled.netMap.nodes;

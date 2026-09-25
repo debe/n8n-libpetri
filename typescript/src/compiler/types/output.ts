@@ -5,9 +5,11 @@
  * the {@link ActionBinder} and a precomputed analysis into `compile`.
  */
 import type { PetriNet, Place, PrecompiledNet, Token, Transition, TransitionAction } from 'libpetri';
-import type { WorkflowAnalysis } from './analysis.js';
+import type { CompileProfile, WorkflowAnalysis } from './analysis.js';
 import type { OnError } from './input.js';
-import type { EdgeRef, PlaceInfo, PlaceRole, TransitionInfo, TransitionInfoOf, TransitionRole } from './netmap.js';
+import type {
+  EdgeRef, PlaceInfo, PlaceRole, SettlementGadget, TransitionInfo, TransitionInfoOf, TransitionRole,
+} from './netmap.js';
 
 /** The host-level edge places of one connection, owned by the consumer. */
 export interface EdgeSlot {
@@ -445,20 +447,34 @@ export interface UnmetReferencePayload {
  */
 export type ActionBinder = (info: TransitionInfo, map: NetMapView) => TransitionAction | null;
 
-/** Read side of `NetMap`, as seen by action binders. */
+/**
+ * Read side of `NetMap`, as seen by action binders. The gadget accessors are profile-bound
+ * (`tasks/v2-profile-plan.md` decision 14): the v1 ones throw `InternalCompilerError` on an
+ * `engineV2` net and the `engineV2` ones on a v1 net, so neither profile reads the other's
+ * gadgets as an empty workflow. The transition and place lookups serve both.
+ */
 export interface NetMapView {
+  /** The target the net was compiled for (`CompileOptions.profile`). */
+  readonly profile: CompileProfile;
+  /** `_budget`, `_halt`, `_pause`; throws on an `engineV2` net, which has only `_halt`. */
   readonly shared: SharedPlaces;
-  /** Node gadgets in declaration (canvas) order. */
+  /** `_halt`, the shared place both profiles have. */
+  readonly halt: Place<unknown>;
+  /** Node gadgets in declaration (canvas) order; throws on an `engineV2` net. */
   readonly nodes: readonly NodeGadget[];
+  /** An `engineV2` net's settlement gadgets in declaration (canvas) order; throws on a v1 net. */
+  readonly settlements: readonly SettlementGadget[];
+  /** The settlement gadget of `name` in an `engineV2` net; throws for a node it does not compile, and on a v1 net. */
+  settlement(name: string): SettlementGadget;
   /** Every transition of the flat net, in declaration order. */
   readonly transitions: readonly TransitionInfo[];
   /** Every place of the flat net. */
   readonly places: readonly PlaceInfo[];
-  /** The gadget of `name`; throws for a node the workflow does not have. */
+  /** The gadget of `name`; throws for a node the workflow does not have, and on an `engineV2` net. */
   node(name: string): NodeGadget;
-  /** Whether `name` is a node of the workflow. */
+  /** Whether `name` is a node of the workflow; throws on an `engineV2` net. */
   hasNode(name: string): boolean;
-  /** The gadget of `name`, `undefined` for a node the workflow does not have. */
+  /** The gadget of `name`, `undefined` for a node the workflow does not have; throws on an `engineV2` net. */
   tryNode(name: string): NodeGadget | undefined;
   transition(name: string): TransitionInfo | undefined;
   transitionsOf(node: string): readonly TransitionInfo[];
@@ -501,9 +517,9 @@ export interface CompiledWorkflow {
   readonly program: PrecompiledNet;
   /**
    * SHA-256 (hex) of the canonical structural description: nodes in canvas order with
-   * their shapes, deduplicated connections, classified references, start node. Equal
-   * hashes compile to structurally identical nets and programs. The budget is not part of
-   * it: it only affects `initialMarking`.
+   * their shapes, deduplicated connections, classified references, start node, compile
+   * profile. Equal hashes compile to structurally identical nets and programs. The budget is
+   * not part of it: it only affects `initialMarking`.
    */
   readonly structuralHash: string;
   readonly netMap: NetMapView;
@@ -517,7 +533,10 @@ export interface CompiledWorkflow {
   /** `requestedBudget`, or 1 when the k-safety check failed (see `budgetRestriction`). */
   readonly effectiveBudget: number;
   readonly budgetRestriction: BudgetRestriction | null;
-  /** Every `ready` place, flat: the join inputs the verifier checks for stranded tokens. */
+  /**
+   * Every `ready` place, flat: the join inputs the verifier checks for stranded tokens. This and
+   * the next three are v1 collections; each throws `InternalCompilerError` on an `engineV2` net.
+   */
   readonly joinInputPlaces: readonly Place<unknown>[];
   /** The same places grouped per join / OR input. */
   readonly joinReadyPlaces: readonly JoinReadyPlaces[];
@@ -537,6 +556,10 @@ export interface CompiledWorkflow {
    * `nodeExecutionStack[0]`; a webhook node passes its input through). A pre-filled
    * `ready_i` slot keeps its `free_i` token withheld, so `free_i + ready_i ≤ 1` holds from
    * the first marking on.
+   *
+   * An `engineV2` net's initial marking is one unit on the trigger's `T/in` and nothing else
+   * (`tasks/v2-profile-plan.md` decision 7). `triggerItems` is not carried: engine v2 keeps the
+   * trigger's outputs in the trigger's own row, and the net carries no data (decision 3).
    */
   initialMarking(triggerItems: unknown): Map<Place<unknown>, Token<unknown>[]>;
   /**
@@ -546,6 +569,8 @@ export interface CompiledWorkflow {
    * the seeded `Y/skipped` markers. No start node is activated: the marking codec layers
    * the decoded `nodeExecutionStack` / `waitingExecution` over it and withholds the
    * `free_i` of every slot it pre-fills.
+   *
+   * Empty for an `engineV2` net, which seeds nothing before its trigger.
    */
   sharedMarking(): Map<Place<unknown>, Token<unknown>[]>;
   /** The same structure with `binder`'s actions layered over the current ones (CORE-042). */
@@ -553,6 +578,13 @@ export interface CompiledWorkflow {
 }
 
 export interface CompileOptions {
+  /**
+   * The engine the net is compiled for (ADR 0012 §1); default `v1`. Under `engineV2` the net has
+   * no `_budget` and no agent round, so {@link budget}, {@link maxAgentRounds} and
+   * {@link maxAgentToolCalls} are refused beside it, and a precomputed {@link analysis} must
+   * carry the same profile.
+   */
+  readonly profile?: CompileProfile;
   /** Concurrency budget `k` (`_budget` tokens). Default 1. Forced to 1 when the k-safety check fails. */
   readonly budget?: number;
   /**

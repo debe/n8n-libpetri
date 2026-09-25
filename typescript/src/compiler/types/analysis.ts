@@ -8,6 +8,17 @@ import type { NodeDescription, NodeTypeShape, OnError, ToolConnection } from './
 import type { EdgeRef } from './netmap.js';
 
 /**
+ * The engine a net is compiled for (ADR 0012 §1):
+ * - `v1`: n8n's `WorkflowExecute` loop, the target every net had before the profile existed;
+ * - `engineV2`: `@n8n/engine`'s durable step scheduler, whose successor rule is
+ *   `decideSuccessors` (`packages/@n8n/engine/src/execution/settlement.ts`).
+ *
+ * One compiler serves both, and each target still gets one net for execution and verification:
+ * the profile changes what the compiler emits, never how many nets it builds.
+ */
+export type CompileProfile = 'v1' | 'engineV2';
+
+/**
  * How a node's input side is compiled:
  * - `direct`: at most one producer edge (README "Per-node gadget");
  * - `or`: one input index with several empty-capable producer edges (README "OR-inputs");
@@ -144,6 +155,53 @@ export interface AnalysedNode {
   readonly failure: FailureChain | null;
 }
 
+/**
+ * Which rows an edge connects once a loop member has one row per pass: `EdgeClass`
+ * (`@n8n/engine` `execution/iteration-mapping.ts`), assigned by `classifyEdge`'s rule:
+ * - `plain`: neither end in a loop, both rows at iteration 0;
+ * - `entry`: into a batch node from outside its loop, target iteration 0 only;
+ * - `intra`: both ends in one loop, source and target at the same pass;
+ * - `back`: the loop's return edge, pass `i` into the batch node's pass `i + 1`;
+ * - `exit`: out of a loop through the batch node's done slot, from the loop's terminal row.
+ *   An edge from one loop into the next is `exit`, not `entry`, as `classifyEdge` decides.
+ */
+export type V2EdgeClass = 'plain' | 'entry' | 'intra' | 'back' | 'exit';
+
+/**
+ * One batch loop: `WorkflowLoop` (`@n8n/engine` `graph/loops.ts`), by node name, over the
+ * analysis's {@link EdgeRef}s. Only a loop `validateLoops` accepts reaches an analysis, so it
+ * has exactly one back edge and at most one entry edge, and its exits all leave the batch
+ * node's done slot.
+ */
+export interface V2Loop {
+  /** The batch node the back edge returns to: the loop's entry. */
+  readonly batchNode: string;
+  /** The batch node's strongly connected component over every edge, the batch node included. */
+  readonly members: ReadonlySet<string>;
+  /** The return edges into the batch node (`isBackEdge`): exactly one. */
+  readonly backEdges: readonly EdgeRef[];
+  /** Forward edges into the batch node from outside the loop: none, or one. */
+  readonly entryEdges: readonly EdgeRef[];
+  /** Forward edges from a member to a node outside the loop. */
+  readonly exitEdges: readonly EdgeRef[];
+}
+
+/**
+ * What an `engineV2` analysis adds (`tasks/v2-profile-plan.md` decisions 6 and 9): the trigger,
+ * the batch loops with n8n's back edges derived again, and every edge's class. Absent (`null`)
+ * on a `v1` analysis.
+ */
+export interface EngineV2Analysis {
+  /** The one start node, v2's `trigger` step. */
+  readonly trigger: string;
+  /** One per batch node, in canvas order of the batch node. */
+  readonly loops: readonly V2Loop[];
+  /** Each loop member's loop. A node is in at most one: nesting is refused. */
+  readonly loopOf: ReadonlyMap<string, V2Loop>;
+  /** Every edge's class, by {@link EdgeRef.id}. */
+  readonly edgeClass: ReadonlyMap<number, V2EdgeClass>;
+}
+
 export interface MultiProducerInput {
   readonly node: string;
   readonly inputIndex: number;
@@ -151,6 +209,12 @@ export interface MultiProducerInput {
 }
 
 export interface WorkflowAnalysis {
+  /**
+   * The target this analysis was made for (`AnalysisOptions.profile`, default `v1`). It is
+   * hashed, and `compile` refuses an analysis whose profile differs from the one it was asked
+   * for, so a v1 analysis never builds an engine v2 net or the reverse.
+   */
+  readonly profile: CompileProfile;
   /** The primary start node (`startNodes[0]`): n8n's `nodeExecutionStack[0]`. */
   readonly startNode: string;
   /** Every start node: the primary first, then the others in canvas order, no duplicates. */
@@ -169,7 +233,11 @@ export interface WorkflowAnalysis {
   readonly sccs: readonly (readonly string[])[];
   /** Nodes in a non-trivial SCC or carrying a self-loop: producers "in a cycle". */
   readonly cyclic: ReadonlySet<string>;
-  /** Nodes reachable from the union of the start nodes. */
+  /**
+   * Nodes reachable from the union of the start nodes. Under `engineV2` it is the trigger and
+   * its descendants over every edge (`getDescendantNodeIds`), which is also the node set v2
+   * owes rows for (`countExpectedSettledSteps`) and so the compiled node set (decision 9).
+   */
   readonly reachable: ReadonlySet<string>;
   /** Longest path (tree edges) from any start node's SCC; unreachable nodes get 0. */
   readonly depth: ReadonlyMap<string, number>;
@@ -193,5 +261,10 @@ export interface WorkflowAnalysis {
   readonly agentsOf: ReadonlyMap<string, readonly string[]>;
   /** Any node compiles in the `tool` form: the workflow has agent tool dispatch. */
   readonly hasAgents: boolean;
+  /**
+   * The engine v2 facts (loops, edge classes, trigger) of an `engineV2` analysis; `null` under
+   * `v1`. Not hashed: it is derived from the nodes, edges and start node, which are.
+   */
+  readonly engineV2: EngineV2Analysis | null;
   readonly diagnostics: readonly string[];
 }

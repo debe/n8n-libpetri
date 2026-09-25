@@ -82,6 +82,30 @@ export interface NodeDescription {
    * than picking a precedence a workflow author cannot see.
    */
   readonly executionPolicy?: ExecutionPolicy;
+  /**
+   * What engine v2 reads from a Split In Batches node (`tasks/v2-profile-plan.md` decision 11).
+   * Only an `engineV2` input carries it; the v1 compiler never reads it and it is not part of
+   * the structural hash, because whether a node is v2's `batch` step is decided by `type` and
+   * `typeVersion` (decision 5) and the batch size changes no place or transition — a loop is
+   * folded, so the number of passes is data, not structure (decision 6).
+   */
+  readonly batch?: BatchDescription;
+}
+
+/**
+ * A batch node's configuration as engine v2 sees it: `BatchStepConfig` in
+ * `@n8n/engine` `graph/workflow-graph.ts`, which `toBatchConfig` in
+ * `node-engine-compatibility` `v1-workflow-converter.ts` builds from the node's parameters.
+ * Deliberately just the size for now: a converted graph (stage 1, decision 10) has already had
+ * an expression-valued `options` and `reset` refused by that converter, so the fields that
+ * would record them arrive with the converter port (step 13).
+ */
+export interface BatchDescription {
+  /**
+   * Items per pass. A whole number ≥ 1 when literal (`isBatchStepConfig`); `'expression'` when
+   * the parameter is an expression, which `toBatchConfig` refuses.
+   */
+  readonly batchSize: number | 'expression';
 }
 
 /** One `main` connection `from.outputIndex → to.inputIndex`, by node name. */

@@ -49,13 +49,26 @@ export type TransitionRole =
  * attempt's failure until its step acts on it. It is `retry`'s analogue and classifies like it
  * — pending work, so a quiescent marking holding one is a stranding unless the class is a
  * designed terminal, where the codec writes it back.
+ *
+ * An `engineV2` net has its own three (`tasks/v2-profile-plan.md` decisions 3 and 5), besides
+ * `running`, `done`, `skipped`, `ok` and `halt`, which mean there what they mean in a v1 net:
+ * - `arrived`: `e{id}/arrived`, one unit when edge `id`'s source step has settled, live or not
+ *   (`decideNodeFate`'s "every step its incoming edges read has settled", rule 3 of
+ *   `packages/@n8n/engine/src/execution/settlement.ts`). The trigger's synthetic arrival is one
+ *   too, with no `edge`;
+ * - `live`: `X/live`, one unit per incoming edge whose source completed and filled the edge's
+ *   slot (`isLive`, rule 2). `X_start` takes them all, `X_skip` is inhibited by any;
+ * - `ended`: `B/ended`, a batch loop's end marker, written by the batch node's terminal pass — a
+ *   skip, a run that filled no loop slot, or a failed run (`isTerminalStep`,
+ *   `execution/loop-ledger.ts`; decision 5).
  */
 export type PlaceRole =
   | 'in-data' | 'in-empty' | 'edge-data' | 'edge-empty' | 'nil' | 'ready' | 'hasdata' | 'ran' | 'free'
   | 'idle' | 'running' | 'ok' | 'routed' | 'done' | 'skipped' | 'retry' | 'tries' | 'waiting' | 'stopped'
   | 'budget' | 'halt' | 'pause' | 'failed'
   | 'in-tool' | 'routed-request' | 'queue' | 'drained' | 'outstanding' | 'response'
-  | 'dispatched' | 'rounds' | 'calls' | 'running-failed';
+  | 'dispatched' | 'rounds' | 'calls' | 'running-failed'
+  | 'arrived' | 'live' | 'ended';
 
 /** `tree`: the two ends are in different SCCs; `cycle`: both ends share one SCC. */
 export type EdgeKind = 'tree' | 'cycle';
@@ -220,3 +233,104 @@ export interface PlaceInfo {
 
 /** A {@link PlaceInfo} before the canonical place object is known (the gadget's own record). */
 export type PendingPlace = Omit<PlaceInfo, 'place'>;
+
+/**
+ * One edge of an `engineV2` net (`tasks/v2-profile-plan.md` decision 3): its `arrived` place and
+ * the consumer's `live` place, which a live settlement of the source also writes.
+ */
+export interface SettlementEdge {
+  readonly edge: EdgeRef;
+  /** `e{id}/arrived`: the source step has settled. */
+  readonly arrived: Place<unknown>;
+  /** `edge.to`'s `X/live`: written beside `arrived` when the source filled the edge's slot. */
+  readonly live: Place<unknown>;
+}
+
+/** One connected output slot of an `engineV2` node. */
+export interface SettlementOutput {
+  readonly index: number;
+  /** The slot's edges in edge order, every one live or every one dead (`isLive`). */
+  readonly edges: readonly SettlementEdge[];
+  /** `X/ok_o`, which `X_run` writes and `X_route_o` routes, under split routing; `null` otherwise. */
+  readonly ok: Place<unknown> | null;
+}
+
+/**
+ * Whether a node's run can end in a failure, which halts the execution (decision 8):
+ * - `never`: the trigger, which `ExecutionStartHandler` records `completed` at birth (decision 7);
+ * - `possible`: every node that runs an executor.
+ *
+ * A `wait` or `subworkflow` step, which v2 has no executor for, is refused at compile time
+ * (`v2-unsupported-step`), so no node has a run that always fails.
+ */
+export type SettlementFailure = 'never' | 'possible';
+
+/**
+ * The flat-net names of an `engineV2` node's transitions: `X_start`, `X_skip` (none on the
+ * trigger, which nothing can skip), `X_run`, and one `X_route_o` per connected output under split
+ * routing. On a batch node `start` / `skip` are `B_start_entry` / `B_skip_entry`, the pass-0 pair;
+ * the back-edge pair is {@link SettlementBatch}`.transitions`.
+ */
+export interface SettlementTransitions {
+  readonly start: string;
+  readonly skip: string | null;
+  readonly run: string;
+  readonly routes: readonly string[];
+}
+
+/**
+ * What a batch node adds to its {@link SettlementGadget} (`tasks/v2-profile-plan.md` decision 5):
+ * the two edges into its slot 0, which never apply at one pass (`resolveInputReads`,
+ * `execution/step-ready-handler.ts`), the start and skip of the back edge, and the loop's end
+ * marker.
+ */
+export interface SettlementBatch {
+  /** The one edge into the batch node from outside its loop (`entry`, or `exit` of an earlier loop): pass 0. */
+  readonly entry: SettlementEdge;
+  /** The loop's one return edge (`isBackEdge`): pass `p` of its source decides pass `p + 1`. */
+  readonly back: SettlementEdge;
+  /** `B/ended`, written by the terminal pass. */
+  readonly ended: Place<unknown>;
+  /** `B_start_back` and `B_skip_back`. */
+  readonly transitions: { readonly startBack: string; readonly skipBack: string };
+}
+
+/**
+ * One node of an `engineV2` net (`tasks/v2-profile-plan.md` decisions 3, 4, 7 and 8), over the
+ * flat net's canonical places. It is not a {@link NodeGadget}: an `engineV2` node has no budget,
+ * idle marker, input form, retry or agent side, and the v1 consumers read those, so the two are
+ * kept apart by type rather than by an empty field (decision 14).
+ */
+export interface SettlementGadget {
+  readonly node: string;
+  readonly id: string;
+  readonly type: string;
+  readonly typeVersion: number;
+  /** v2's one `trigger` step. */
+  readonly isTrigger: boolean;
+  readonly failure: SettlementFailure;
+  /** The trigger's seeded synthetic arrival `T/in`; `null` on every other node. */
+  readonly in: Place<unknown> | null;
+  /** `X/live`; `null` on the trigger, which nothing feeds. */
+  readonly live: Place<unknown> | null;
+  /** The incoming edges `X_start` and `X_skip` wait on, in edge order. */
+  readonly incoming: readonly SettlementEdge[];
+  readonly running: Place<unknown>;
+  /** `X/done`, written by every run; `null` on a loop member (decision 6). */
+  readonly done: Place<unknown> | null;
+  /** `X/skipped`, written by `X_skip`; `null` on the trigger and on a loop member. */
+  readonly skipped: Place<unknown> | null;
+  /**
+   * `collapsed`: `X_run` routes every connected output in its own `Out` spec; `split`: it writes
+   * `X/ok_o` per connected output, and `X_route_o` routes each (decision 4); `batch`: `B_run` fills
+   * the loop slot, the done slot or neither, never both (`runBatchStep`, decision 5).
+   */
+  readonly routing: 'collapsed' | 'split' | 'batch';
+  /** The connected output slots, ascending. */
+  readonly outputs: readonly SettlementOutput[];
+  readonly transitions: SettlementTransitions;
+  /** The batch node of the loop this node is a member of (decision 6), itself on a batch node; `null` outside a loop. */
+  readonly loop: string | null;
+  /** A batch node's entry and back pair and end marker; `null` on every other node. */
+  readonly batch: SettlementBatch | null;
+}

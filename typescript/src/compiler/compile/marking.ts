@@ -1,7 +1,8 @@
 /**
  * The markings a compiled net starts from: the shared marking every execution carries (budget,
  * idle markers, retry and agent budgets, pre-filled join slots, seeded `skipped` markers) and
- * the initial marking, which adds the trigger data at the start node.
+ * the initial marking, which adds the trigger data at the start node. An `engineV2` net has
+ * neither budget nor markers to seed: {@link settlementInitialMarkingOf}.
  */
 import { tokenOf } from 'libpetri';
 import type { Place, Token } from 'libpetri';
@@ -125,4 +126,14 @@ export function initialMarkingOf(marking: Marking, g: NodeGadget, triggerItems: 
     default: assertNever(g, 'gadget form');
   }
   return marking;
+}
+
+/**
+ * The initial marking of an `engineV2` net (`tasks/v2-profile-plan.md` decision 7): one unit on
+ * the trigger's synthetic `T/in`, which is `ExecutionStartHandler` creating the trigger's row.
+ */
+export function settlementInitialMarkingOf(netMap: NetMap, trigger: string): Marking {
+  const g = netMap.settlement(trigger);
+  if (g.in === null) throw new InternalCompilerError(`internal: the trigger '${trigger}' has no in place`);
+  return new Map([[g.in, units(1)]]);
 }

@@ -7,6 +7,9 @@ import type { BudgetRestriction, WorkflowAnalysis } from '../types.js';
  * for a cyclic workflow or one where an input index has more than one producer.
  */
 export function kSafety(analysis: WorkflowAnalysis): BudgetRestriction | null {
+  // Engine v2 has no concurrency budget to restrict (`compile/options.ts` refuses one, and the
+  // settlement gadget has no `_budget`): a batch loop is a cycle, but nothing is forced to 1.
+  if (analysis.profile === 'engineV2') return null;
   if (analysis.hasCycle) {
     return {
       reason: 'cyclic',

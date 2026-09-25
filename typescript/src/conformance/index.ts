@@ -29,3 +29,7 @@ export { attribute, descendantsOf, orInputNodesOf, strandedNodesOf, type Attribu
 export { diffFixture, type DiffResult } from './differ.js';
 export { renderDiffReport } from './differ-report.js';
 export { fixturesOf, runDifferCli, type DifferCliIo } from './differ-cli.js';
+export {
+  BATCH_OUTPUT_NAMES, graphToDescription, SPLIT_IN_BATCHES_TYPE, SPLIT_IN_BATCHES_TYPE_VERSION, V2_STEP_NODE_TYPES, V2GraphError,
+  type V2Edge, type V2Graph, type V2GraphInput, type V2Node, type V2StepType,
+} from './v2/graph.js';

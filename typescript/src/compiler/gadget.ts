@@ -86,9 +86,14 @@
  * for every `$('Y')` reference (read arcs, CORE-032). Places that stay inside the node keep
  * their prefixed names (MOD-012). Actions are bound after composition on the flat net
  * (CORE-042), so the body carries libpetri's default `passthrough()` until then.
+ *
+ * Under the `engineV2` profile none of the above applies: {@link buildNodeGadget} sends every node
+ * to the settlement gadget (`gadget/settlement/`) instead, and that is the only place the two
+ * targets' gadgets part (`tasks/v2-profile-plan.md` decision 2, ADR 0012 Consequences).
  */
 import type { Place, SubnetDef } from 'libpetri';
 import type { AnalysedNode, EdgeSlot, NodeGadget, PendingPlace, SharedPlaces, TransitionInfo, WorkflowAnalysis } from './types.js';
+import { InternalCompilerError } from './errors.js';
 import { buildAgentRound, declareAgentPlaces } from './gadget/agent-round.js';
 import { createGadgetContext, type ReferencePort, type ToolPort } from './gadget/context.js';
 import { buildFailureSteps, buildRetryGadget, declareFailureChain, declareRetryPlaces } from './gadget/failure-chain.js';
@@ -98,8 +103,10 @@ import { buildOutcomeBranches, buildOutputSide, buildRouteAndDone, buildRun, bui
 import {
   buildSubnetDef, declareMarkers, declareReferencePorts, declareSharedPorts, declareToolPorts,
 } from './gadget/ports.js';
+import { buildSettlementGadget, type SettlementBuild, type SettlementHost } from './gadget/settlement/index.js';
 
 export type { ReferencePort, ToolPort } from './gadget/context.js';
+export type { SettlementBuild, SettlementHost } from './gadget/settlement/index.js';
 export { readySlot } from './gadget/input-side.js';
 export { SPLIT_ROUTING_ABOVE } from './gadget/output-side.js';
 
@@ -126,12 +133,45 @@ export interface GadgetBuild {
   materialise(lookup: (finalName: string) => Place<unknown>): NodeGadget;
 }
 
+/** The host places a v1 node's gadget binds to: its edge slots, its synthetic `in`, the shared places. */
+export interface V1NodeHost {
+  readonly profile: 'v1';
+  readonly edgeSlots: ReadonlyMap<number, EdgeSlot>;
+  readonly syntheticIn: Place<unknown> | null;
+  readonly shared: SharedPlaces;
+}
+
+/** The host places an `engineV2` node's settlement gadget binds to. */
+export interface SettlementNodeHost extends SettlementHost {
+  readonly profile: 'engineV2';
+}
+
 /**
- * Builds one node's gadget. The phases run in a fixed order because the order of declaration is
+ * Builds one node's gadget for the analysis's profile: the v1 per-node gadget, or the `engineV2`
+ * settlement gadget (`gadget/settlement/`). This is the one switch between the two
+ * (`tasks/v2-profile-plan.md` decision 2); the host places come tagged with the profile they were
+ * made for, and a mismatch is a compiler bug.
+ */
+export function buildNodeGadget(a: AnalysedNode, analysis: WorkflowAnalysis, host: V1NodeHost): GadgetBuild;
+export function buildNodeGadget(a: AnalysedNode, analysis: WorkflowAnalysis, host: SettlementNodeHost): SettlementBuild;
+export function buildNodeGadget(
+  a: AnalysedNode,
+  analysis: WorkflowAnalysis,
+  host: V1NodeHost | SettlementNodeHost,
+): GadgetBuild | SettlementBuild {
+  if (host.profile !== analysis.profile) {
+    throw new InternalCompilerError(`internal: node '${a.node.name}' has ${host.profile} host places for a ${analysis.profile} analysis`);
+  }
+  if (host.profile === 'engineV2') return buildSettlementGadget(a, analysis, host);
+  return buildV1NodeGadget(a, analysis, host.edgeSlots, host.syntheticIn, host.shared);
+}
+
+/**
+ * Builds one node's v1 gadget. The phases run in a fixed order because the order of declaration is
  * the order of the flat net (MOD-010, MOD-020): places and ports first, then the transitions,
  * then the `SubnetDef` and the `materialise` that reports the composed gadget.
  */
-export function buildNodeGadget(
+function buildV1NodeGadget(
   a: AnalysedNode,
   analysis: WorkflowAnalysis,
   edgeSlots: ReadonlyMap<number, EdgeSlot>,

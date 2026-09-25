@@ -17,11 +17,16 @@
  * markings and derived place collections (`compiled-workflow.ts`, `marking.ts`,
  * `derived-places.ts`).
  *
+ * Under the `engineV2` profile each stage builds its engine v2 counterpart
+ * (`tasks/v2-profile-plan.md` step 5): the settlement gadget per compiled node, its host places,
+ * its `NetMap`, its initial marking and its placeholder actions.
+ *
  * Declaration order is canvas order: nodes are composed sorted by `(y, x)` ascending and
  * each gadget declares its transitions in a fixed order, so libpetri's declaration-order
  * tiebreak (EXEC-002 AC3) reproduces n8n's sibling order.
  */
 import { placeholderActions } from './actions.js';
+import { settlementPlaceholderActions } from './actions/settlement.js';
 import { readySlot } from './gadget.js';
 import { structuralHash } from './hash.js';
 import type { CompileOptions, CompiledWorkflow, WorkflowDescription } from './types.js';
@@ -52,9 +57,11 @@ export function compile(workflow: WorkflowDescription, options: CompileOptions =
   const restriction = kSafety(analysis);
   const effectiveBudget = restriction === null ? requested : 1;
 
-  const { structural, builds, shared } = composeNet(workflow, analysis);
-  const map0 = mapNet(structural, shared, builds);
-  const fallback = placeholderActions();
+  const composed = composeNet(workflow, analysis);
+  const { structural } = composed;
+  const map0 = mapNet(composed);
+  // The placeholders speak the gadget's roles, so they follow the profile the gadgets did.
+  const fallback = analysis.profile === 'engineV2' ? settlementPlaceholderActions() : placeholderActions();
   const user = options.actions;
   const net = bindActions(structural, map0, (info, map) => user?.(info, map) ?? fallback(info, map));
 

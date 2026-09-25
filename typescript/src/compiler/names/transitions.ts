@@ -26,6 +26,14 @@ export const TRANSITION = {
   resume: 'resume',
   callsOut: 'calls_out',
   roundsOut: 'rounds_out',
+  /**
+   * An `engineV2` batch node's start and skip on its entry edge (pass 0) and on its back edge
+   * (every later pass), sharing `B/live` (`tasks/v2-profile-plan.md` decision 5).
+   */
+  startEntry: 'start_entry',
+  skipEntry: 'skip_entry',
+  startBack: 'start_back',
+  skipBack: 'skip_back',
 } as const;
 
 /** The start twin reading the `k`-th reference's `skipped`: `start_unmet_${k}`. */

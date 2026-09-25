@@ -10,7 +10,7 @@
  */
 import type { Place } from 'libpetri';
 import type { FlatNet, PInvariant } from 'libpetri/verification';
-import type { NetMapView, NodeGadget } from '../compiler/index.js';
+import { assertProfile, type NetMapView, type NodeGadget } from '../compiler/index.js';
 
 /**
  * libpetri's canonical report lines (VER-013 fixes them byte for byte across the four
@@ -84,6 +84,9 @@ export function renderInvariant(invariant: PInvariant, flat: FlatNet): string {
 export function budgetSemiflowOf(
   invariants: readonly PInvariant[], flat: FlatNet, map: NetMapView, budget: number,
 ): PInvariant | null {
+  // An `engineV2` net has no `_budget` (`tasks/v2-profile-plan.md` decisions 3 and 18): the
+  // question is not "no law found", so it is refused rather than answered `null`.
+  assertProfile('budgetSemiflowOf', 'v1', map.profile);
   for (const invariant of invariants) {
     const terms = invariantTerms(invariant, flat);
     const w = terms.get(map.shared.budget.name) ?? 0;

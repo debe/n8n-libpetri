@@ -7,8 +7,10 @@
  *
  * `analyse()` orchestrates the phases, each in `analysis/`; the failure vocabulary it reads per
  * node is in `failure-chain.ts`. What the compiler barrel takes from here is re-exported below.
+ * Under the `engineV2` profile the phases after node and connection validation are
+ * `analysis/engine-v2/`'s instead (ADR 0012 §1).
  */
-import type { WorkflowAnalysis, WorkflowDescription } from './types.js';
+import type { CompileProfile, WorkflowAnalysis, WorkflowDescription } from './types.js';
 import { CompileError } from './errors.js';
 import { canonicaliseConnections } from './analysis/connections.js';
 import { findDeadInputs } from './analysis/dead-inputs.js';
@@ -20,7 +22,9 @@ import { classifyReferences } from './analysis/references.js';
 import { decompose } from './analysis/scc.js';
 import { skipObservableNodes } from './analysis/skip-observers.js';
 import { wireTools } from './analysis/tools.js';
-import { requirePositiveInt, validateNodes } from './analysis/validate.js';
+import { profileOf, requirePositiveInt, validateNodes } from './analysis/validate.js';
+import { analyseEngineV2 } from './analysis/engine-v2/analyse.js';
+import { v2TriggerOf } from './analysis/engine-v2/shape.js';
 
 export { retryParamsOf } from './failure-chain.js';
 export { isAllRequired, joinFormOf, requiredInputsOf } from './analysis/inputs.js';
@@ -65,6 +69,13 @@ export const DEFAULT_MAX_AGENT_TOOL_CALLS = 64;
 
 /** Options `analyse` reads. Kept separate from `CompileOptions`, which carries the action binder. */
 export interface AnalysisOptions {
+  /**
+   * The engine the analysis is for (ADR 0012 §1); default `v1`. Recorded on the analysis and
+   * hashed. Under `engineV2` the agent budgets below are refused: v2 has no agent round, it
+   * fails an agent at its first tool call (`V1StepExecutor`,
+   * `packages/@n8n/node-engine-compatibility/src/v1-step-executor.ts`).
+   */
+  readonly profile?: CompileProfile;
   /** Fallback seed for `A/rounds`; default {@link DEFAULT_MAX_AGENT_ROUNDS}. */
   readonly maxAgentRounds?: number;
   /** Default seed for `A/calls`; default {@link DEFAULT_MAX_AGENT_TOOL_CALLS}. */
@@ -76,9 +87,20 @@ export function analyse(workflow: WorkflowDescription, options: AnalysisOptions 
   // an unknown key it ignored — carried forward so the CLI and the scheduler report it beside
   // the analysis's own findings instead of the adapter dropping it on the floor.
   const diagnostics: string[] = [...(workflow.diagnostics ?? [])];
+  const profile = profileOf(options.profile, 'analyse');
+  if (profile === 'engineV2' && (options.maxAgentRounds !== undefined || options.maxAgentToolCalls !== undefined)) {
+    throw new CompileError('invalid-options',
+      'analyse: maxAgentRounds / maxAgentToolCalls seed the agent round, which the engineV2 profile does not have');
+  }
   if (workflow.nodes.length === 0) throw new CompileError('empty-workflow', 'compile: workflow has no nodes');
-  const { primaryStart, startNodes, raws, rawByName } = validateNodes(workflow, diagnostics);
+  // The one profile decision of the analysis (ADR 0012 Consequences): both targets validate the
+  // nodes and connections alike, and diverge after that — engine v2 has none of the phases
+  // below and refuses what n8n's own validator refuses (`analysis/engine-v2/`).
+  const trigger = profile === 'engineV2' ? v2TriggerOf(workflow) : null;
+  const validated = validateNodes(workflow, diagnostics);
+  const { primaryStart, startNodes, raws, rawByName } = validated;
   const raw = canonicaliseConnections(workflow, rawByName, diagnostics);
+  if (trigger !== null) return analyseEngineV2({ workflow, validated, raw, trigger }, diagnostics);
   const { toolConnections, toolsOf, agentsOf, mainEdges } = wireTools(workflow, rawByName, raw, diagnostics);
   const { succ, sccOf, sccs, cyclic, edges, incoming, outgoing } = decompose(raws, mainEdges);
   const reachable = reachableFromStarts(startNodes, succ, toolConnections);
@@ -96,9 +118,9 @@ export function analyse(workflow: WorkflowDescription, options: AnalysisOptions 
   const skipObservable = skipObservableNodes(analysed, incoming, cyclic, referenced);
 
   return {
-    startNode: primaryStart, startNodes, startNodeSet: new Set(startNodes),
+    profile, startNode: primaryStart, startNodes, startNodeSet: new Set(startNodes),
     nodes: analysed, byName, edges, incoming, outgoing, sccOf, sccs, cyclic, reachable,
     depth, maxDepth, hasCycle: cyclic.size > 0, multiProducerInputs, referenced, seededSkipped,
-    skipObservable, toolConnections, agentsOf, hasAgents: toolConnections.length > 0, diagnostics,
+    skipObservable, toolConnections, agentsOf, hasAgents: toolConnections.length > 0, engineV2: null, diagnostics,
   };
 }

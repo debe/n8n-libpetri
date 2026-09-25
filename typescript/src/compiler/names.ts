@@ -20,11 +20,11 @@
 export { qualified } from './names/qualified.js';
 export {
   SHARED_PLACE, PLACE, AGENT_PLACE, inPlaceOf, skippedPlaceOf, freeOf, readyOf, readyVariantOf, hasdataOf, ranOf,
-  nilOf, okOf, routedOf, runningOf, failedOf, timedOutOf,
+  nilOf, okOf, routedOf, runningOf, failedOf, timedOutOf, arrivedPlaceOf, livePlaceOf,
 } from './names/places.js';
 export {
   emptyTwinOf, edgeInPortOf, consumerPortOf, edgeOutPortOf, refDonePortOf, refSkippedPortOf, toolInPortOf,
-  agentResponsePortOf,
+  agentResponsePortOf, arrivedPortOf, successorLivePortOf,
 } from './names/ports.js';
 export {
   TRANSITION, startUnmetOf, attemptRunOf, routeOf, skipCombinationOf, clearOf, armOf, deadlineOf, attemptStepOf,

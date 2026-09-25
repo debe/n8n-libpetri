@@ -7,7 +7,7 @@
  */
 import { tokenOf, type Place, type Token } from 'libpetri';
 import type { IExecuteData, IRunData } from 'n8n-workflow';
-import type { CompiledWorkflow, NodeGadget } from '../compiler/index.js';
+import { assertProfile, type CompiledWorkflow, type NodeGadget } from '../compiler/index.js';
 import { assertNever } from '../internal/assert.js';
 import type { ExecutionDataState } from '../n8n/host.js';
 import type { EntryPayload } from '../scheduler/payloads.js';
@@ -39,11 +39,17 @@ interface DecodeState {
   readonly pendingNodes: Set<string>;
 }
 
+/**
+ * n8n's `executionData` as a marking of `compiled`. A v1 codec: an `engineV2` net is refused with
+ * `ProfileMismatchError` (`tasks/v2-profile-plan.md` decision 14); its marking comes from engine
+ * v2's step rows instead.
+ */
 export function decodeExecutionData(
   compiled: CompiledWorkflow,
   executionData: ExecutionDataState,
   options: DecodeOptions = {},
 ): Map<Place<unknown>, Token<unknown>[]> {
+  assertProfile('decodeExecutionData', 'v1', compiled.netMap.profile);
   const diag = options.onDiagnostic ?? noop;
   const marking = compiled.sharedMarking();
   const hasRun = hasRunIn(compiled, options.runData);

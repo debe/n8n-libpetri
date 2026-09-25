@@ -40,7 +40,7 @@
  *    pending state was written back, which is the state n8n's loop leaves behind.
  */
 import type { ExecutionBaseError, IRunExecutionData, Workflow } from 'n8n-workflow';
-import type { CompiledWorkflow, WorkflowDescription } from '../compiler/index.js';
+import { assertProfile, type CompiledWorkflow, type WorkflowDescription } from '../compiler/index.js';
 import { describeWorkflow } from '../n8n/adapter.js';
 import type { SchedulerHooks, SchedulerHost, WorkflowScheduler } from '../n8n/host.js';
 import type { ExecutionEnv, SchedulerState } from './actions.js';
@@ -110,9 +110,16 @@ export class PetriScheduler implements WorkflowScheduler {
    * on a miss, and the program itself compiles lazily on first access (CONC-020). The
    * analysis and the hash are computed once per call, for the key, and a miss compiles on
    * both rather than analysing and hashing the description again.
+   *
+   * The scheduler drives v1 nets only. Its own compiles are v1 by construction, but a cache is
+   * the caller's and may hold anything under a key, so what comes back is checked: an `engineV2`
+   * net is refused with `ProfileMismatchError` (`tasks/v2-profile-plan.md` decision 14) before
+   * `run()` decodes, executes or writes anything back.
    */
   compileDescription(description: WorkflowDescription): CompiledWorkflow {
-    return compileCached(this.cache, description, this.budget, this.options);
+    const compiled = compileCached(this.cache, description, this.budget, this.options);
+    assertProfile('PetriScheduler', 'v1', compiled.netMap.profile);
+    return compiled;
   }
 
   /** Everything a `run()` leaves behind is reset here (see {@link resetState}). */

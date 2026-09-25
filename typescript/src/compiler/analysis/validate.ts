@@ -6,7 +6,9 @@
 import { CompileError } from '../errors.js';
 import { retryParamsOf } from '../failure-chain.js';
 import { nonNegativeInt, positiveInt } from '../policy.js';
-import type { NodeDescription, NodeTypeShape, OnError, RetryParams, WorkflowDescription } from '../types.js';
+import type {
+  CompileProfile, NodeDescription, NodeTypeShape, OnError, RetryParams, WorkflowDescription,
+} from '../types.js';
 import { isAllRequired, requiredInputsOf } from './inputs.js';
 
 function compareCanvas(a: NodeDescription, b: NodeDescription): number {
@@ -40,6 +42,17 @@ export function raising(
 }
 export const requireNonNegativeInt = raising(nonNegativeInt, 'non-negative');
 export const requirePositiveInt = raising(positiveInt, 'positive');
+
+/**
+ * The profile an option names, default `v1`. Checked at run time too, because the value can
+ * come from a JavaScript caller or a flag: an unknown profile compiled as `v1` would build a
+ * net for an engine nobody asked for.
+ */
+export function profileOf(requested: CompileProfile | undefined, where: string): CompileProfile {
+  const profile: unknown = requested ?? 'v1';
+  if (profile === 'v1' || profile === 'engineV2') return profile;
+  throw new CompileError('invalid-options', `${where}: profile must be 'v1' or 'engineV2', got ${String(profile)}`);
+}
 
 export interface RawNode {
   readonly node: NodeDescription;

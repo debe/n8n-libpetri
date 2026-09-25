@@ -4,12 +4,30 @@
  * gadget descriptors the scheduler drives. Place objects are the canonical ones of the
  * flat net (CORE-002); transition objects are looked up by name on the bound net, so a
  * `NetMap` can be re-pointed at a re-bound net (CORE-042) without rebuilding its indexes.
+ *
+ * The map of an `engineV2` net (`tasks/v2-profile-plan.md` decision 14) has no `NodeGadget`s and
+ * no `_budget` / `_pause`: its nodes are {@link SettlementGadget}s, served by `settlement(name)`,
+ * and `_halt` is its one shared place. The transition and place lookups serve both profiles; the
+ * gadget accessors serve one each and throw `InternalCompilerError` on the other's map
+ * (`shared`, `nodes`, `node`, `hasNode`, `tryNode` are v1's; `settlements`, `settlement` are
+ * `engineV2`'s). An empty answer would be wrong rather than empty: every v1 consumer reads a
+ * workflow with no gadgets as one with no nodes. The consumers refuse the other profile at their
+ * entry (`ProfileMismatchError`), so reaching one of these throws is a bug past that check.
  */
-import type { PetriNet, Transition } from 'libpetri';
+import type { PetriNet, Place, Transition } from 'libpetri';
 import { CompileError, InternalCompilerError } from './errors.js';
 import type {
-  NetMapView, NodeGadget, PlaceInfo, PlaceRole, SharedPlaces, TransitionInfo, TransitionInfoOf, TransitionRole,
+  CompileProfile, NetMapView, NodeGadget, PlaceInfo, PlaceRole, SettlementGadget, SharedPlaces, TransitionInfo,
+  TransitionInfoOf, TransitionRole,
 } from './types.js';
+
+/** What an `engineV2` net's map holds instead of the v1 gadgets and shared places. */
+export interface SettlementNodes {
+  /** `_halt`, the one shared place of an `engineV2` net. */
+  readonly halt: Place<unknown>;
+  /** One per compiled node, in declaration (canvas) order. */
+  readonly gadgets: readonly SettlementGadget[];
+}
 
 /**
  * The key of a `(node, role, port)` lookup. `port` is `null` for an info that carries none
@@ -28,10 +46,17 @@ function transitionPort(t: TransitionInfo): number | null {
 }
 
 export class NetMap implements NetMapView {
-  readonly shared: SharedPlaces;
-  readonly nodes: readonly NodeGadget[];
+  readonly profile: CompileProfile;
   readonly transitions: readonly TransitionInfo[];
   readonly places: readonly PlaceInfo[];
+  readonly halt: Place<unknown>;
+
+  // `private`, not `#private`: a view made with `Object.create(netMap, …)` must still read them.
+  private readonly nodeGadgets: readonly NodeGadget[];
+  private readonly settlementGadgets: readonly SettlementGadget[];
+  private readonly sharedPlaces: SharedPlaces | null;
+  private readonly settlementNodes: SettlementNodes | null;
+  private readonly settlementsByName = new Map<string, SettlementGadget>();
 
   private readonly transitionsByName = new Map<string, TransitionInfo>();
   private readonly transitionsByNode = new Map<string, TransitionInfo[]>();
@@ -42,18 +67,33 @@ export class NetMap implements NetMapView {
   private readonly nodesByName = new Map<string, NodeGadget>();
   private readonly transitionObjects = new Map<string, Transition>();
 
+  /**
+   * A v1 map takes the shared places and the node gadgets; an `engineV2` map takes `null`, no node
+   * gadgets, and its {@link SettlementNodes}.
+   */
   constructor(
     net: PetriNet,
-    shared: SharedPlaces,
+    shared: SharedPlaces | null,
     nodes: readonly NodeGadget[],
     transitions: readonly TransitionInfo[],
     places: readonly PlaceInfo[],
+    settlement: SettlementNodes | null = null,
   ) {
-    this.shared = shared;
-    this.nodes = nodes;
+    const halt = shared === null ? settlement?.halt : settlement === null ? shared.halt : undefined;
+    if (halt === undefined) {
+      throw new InternalCompilerError('NetMap: a map has either the v1 shared places or engineV2 settlement nodes');
+    }
+    if (settlement !== null && nodes.length > 0) throw new InternalCompilerError('NetMap: an engineV2 map has v1 node gadgets');
+    this.profile = settlement === null ? 'v1' : 'engineV2';
+    this.sharedPlaces = shared;
+    this.settlementNodes = settlement;
+    this.halt = halt;
+    this.settlementGadgets = settlement?.gadgets ?? [];
+    this.nodeGadgets = nodes;
     this.transitions = transitions;
     this.places = places;
     for (const g of nodes) this.nodesByName.set(g.node, g);
+    for (const g of this.settlementGadgets) this.settlementsByName.set(g.node, g);
     for (const t of transitions) {
       if (this.transitionsByName.has(t.name)) throw new InternalCompilerError(`NetMap: duplicate transition '${t.name}'`);
       this.transitionsByName.set(t.name, t);
@@ -83,23 +123,69 @@ export class NetMap implements NetMapView {
     }
   }
 
+  /**
+   * `_budget`, `_halt` and `_pause`. A v1 accessor: an `engineV2` net has no budget and no pause,
+   * so asking its map is a compiler bug, not a question with an empty answer.
+   */
+  get shared(): SharedPlaces {
+    if (this.sharedPlaces === null) {
+      throw new InternalCompilerError('NetMap.shared: an engineV2 net has no _budget or _pause; read NetMap.halt');
+    }
+    return this.sharedPlaces;
+  }
+
+  /** Node gadgets in declaration (canvas) order. A v1 accessor. */
+  get nodes(): readonly NodeGadget[] {
+    this.requireV1('nodes');
+    return this.nodeGadgets;
+  }
+
+  /** Settlement gadgets in declaration (canvas) order. An `engineV2` accessor. */
+  get settlements(): readonly SettlementGadget[] {
+    this.requireEngineV2('settlements');
+    return this.settlementGadgets;
+  }
+
   /** The same map over a re-bound net (same names, new `Transition` objects). */
   rebind(net: PetriNet): NetMap {
-    return new NetMap(net, this.shared, this.nodes, this.transitions, this.places);
+    return new NetMap(net, this.sharedPlaces, this.nodeGadgets, this.transitions, this.places, this.settlementNodes);
+  }
+
+  /** The settlement gadget of `name` in an `engineV2` net; throws for a node the net does not compile. */
+  settlement(name: string): SettlementGadget {
+    this.requireEngineV2('settlement');
+    const g = this.settlementsByName.get(name);
+    if (g === undefined) throw new CompileError('unknown-node', `NetMap: no settlement gadget for node '${name}'`, name);
+    return g;
   }
 
   node(name: string): NodeGadget {
+    this.requireV1('node');
     const g = this.nodesByName.get(name);
     if (g === undefined) throw new CompileError('unknown-node', `NetMap: unknown node '${name}'`, name);
     return g;
   }
 
   hasNode(name: string): boolean {
+    this.requireV1('hasNode');
     return this.nodesByName.has(name);
   }
 
   tryNode(name: string): NodeGadget | undefined {
+    this.requireV1('tryNode');
     return this.nodesByName.get(name);
+  }
+
+  private requireV1(accessor: string): void {
+    if (this.profile !== 'v1') {
+      throw new InternalCompilerError(`NetMap.${accessor}: an engineV2 net has no NodeGadgets; read NetMap.settlement(s)`);
+    }
+  }
+
+  private requireEngineV2(accessor: string): void {
+    if (this.profile !== 'engineV2') {
+      throw new InternalCompilerError(`NetMap.${accessor}: a v1 net has no SettlementGadgets; read NetMap.node(s)`);
+    }
   }
 
   transition(name: string): TransitionInfo | undefined {

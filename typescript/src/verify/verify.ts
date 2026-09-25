@@ -117,7 +117,7 @@
 import { performance } from 'node:perf_hooks';
 import type { Place, Token } from 'libpetri';
 import { MarkingState, flatten } from 'libpetri/verification';
-import { compile } from '../compiler/index.js';
+import { assertProfile, compile } from '../compiler/index.js';
 import type { CompiledWorkflow, WorkflowDescription } from '../compiler/index.js';
 import { runFamilies } from './families/run-families.js';
 import { assembleReport } from './report/assemble.js';
@@ -159,7 +159,7 @@ export function selectProperties(options: VerifyOptions): readonly PropertyName[
     : [...DEFAULT_PROPERTIES, 'mutual-exclusion'];
 }
 
-/** Compiles `workflow` exactly as the scheduler does, then verifies the net it produced. */
+/** Compiles `workflow` exactly as the scheduler does (profile `v1`), then verifies the net it produced. */
 export async function verify(
   workflow: WorkflowDescription, options: VerifyOptions = {},
 ): Promise<VerificationReport> {
@@ -197,10 +197,19 @@ export async function verify(
  * Staging is skipped entirely when the caller set `maxClasses` (their number, not ours) and on
  * a **cyclic** workflow, whose space is unbounded: it always truncates, so a first pass could
  * only ever narrow its `bounded` verdict and never save a second one.
+ *
+ * ## Profile
+ *
+ * The six families are v1's: they read `NodeGadget`s, `_budget`, `X/tries` and the v1 rest
+ * roles. An `engineV2` net is refused with `ProfileMismatchError` before anything runs
+ * (`tasks/v2-profile-plan.md` decision 14), not reported on: a report of v1 families over a net
+ * with none of their places would close with every check vacuous. Its own families are
+ * `families/v2-settlement.ts` (step 12).
  */
 export async function verifyCompiled(
   compiled: CompiledWorkflow, options: VerifyOptions = {},
 ): Promise<VerificationReport> {
+  assertProfile('verifyCompiled', 'v1', compiled.netMap.profile);
   assertLibpetriSurface();
   const started = performance.now();
   const properties = selectProperties(options);

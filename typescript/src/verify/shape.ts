@@ -9,7 +9,7 @@
  */
 import type { Place } from 'libpetri';
 import type { FlatNet } from 'libpetri/verification';
-import type { CompiledWorkflow, NetMapView } from '../compiler/index.js';
+import { assertProfile, type CompiledWorkflow, type NetMapView } from '../compiler/index.js';
 import type { TruncationShape } from './state-class.js';
 import type { MutualExclusionRequest } from './types.js';
 
@@ -26,8 +26,13 @@ import type { MutualExclusionRequest } from './types.js';
  * n8n can never start there, so a dead one is a real finding (the `Orphan` fixture).
  *
  * Returns node name → the entry point it belongs to (an entry point maps to itself).
+ *
+ * v1 only: under `engineV2` a node the trigger does not reach is not compiled at all
+ * (`tasks/v2-profile-plan.md` decision 9), so there is nothing to excuse, and an `engineV2` net
+ * throws `ProfileMismatchError` rather than get an answer about nodes it does not contain.
  */
 export function alternativeEntryReach(compiled: CompiledWorkflow): Map<string, string> {
+  assertProfile('alternativeEntryReach', 'v1', compiled.netMap.profile);
   const analysis = compiled.analysis;
   const starts = new Set(compiled.startNodes);
   const found = new Map<string, string>();

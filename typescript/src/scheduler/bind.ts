@@ -4,7 +4,7 @@
  * `X_exhausted`, `X_retry_wait` and the per-output `X_route_o`.
  */
 import type { Place, TransitionAction } from 'libpetri';
-import type { ActionBinder, NetMapView, NodeGadget, RouteTransition, RunTransition } from '../compiler/index.js';
+import { assertProfile, type ActionBinder, type NetMapView, type NodeGadget, type RouteTransition, type RunTransition } from '../compiler/index.js';
 import { assertNever } from '../internal/assert.js';
 import { carried, nextAttempt } from './attempt-tokens.js';
 import { envOf } from './env.js';
@@ -86,7 +86,8 @@ function routeAction(g: NodeGadget, info: RouteTransition): TransitionAction {
 
 /**
  * The scheduler's binder. Structural roles (`skip`, `arm`, `clear`, `sink`, `done`) keep the
- * compiler's placeholders (`null`).
+ * compiler's placeholders (`null`). It drives v1 gadgets only, and refuses an `engineV2` map
+ * (`ProfileMismatchError`, `tasks/v2-profile-plan.md` decision 14).
  *
  * Only `X_run`, `X_exhausted` and a terminal `onFailure` step await anything (the node run and
  * the hooks). Every other action here is `async` solely because libpetri's `TransitionAction`
@@ -94,6 +95,7 @@ function routeAction(g: NodeGadget, info: RouteTransition): TransitionAction {
  */
 export function schedulerActions(): ActionBinder {
   return (info, map) => {
+    assertProfile('schedulerActions', 'v1', map.profile);
     const g = map.node(info.node);
     switch (info.role) {
       case 'start': return startAction(g, map);

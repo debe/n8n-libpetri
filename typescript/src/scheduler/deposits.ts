@@ -9,7 +9,7 @@
  */
 import type { Place } from 'libpetri';
 import type { ISourceData } from 'n8n-workflow';
-import type { NetMapView, NodeGadget, SharedPlaces, ToolGadget } from '../compiler/index.js';
+import { assertProfile, type NetMapView, type NodeGadget, type SharedPlaces, type ToolGadget } from '../compiler/index.js';
 import { assertNever } from '../internal/assert.js';
 import { InternalSchedulerError } from './errors.js';
 import type { Outcome } from './outcomes.js';
@@ -102,8 +102,13 @@ export function hasHaltBranch(g: NodeGadget): boolean {
   return g.onError === 'stopWorkflow' || g.attempts.length > 0;
 }
 
-/** The tokens `outcome` deposits on `g`'s branch for it; throws only on an invariant of the compiled net broken. */
+/**
+ * The tokens `outcome` deposits on `g`'s branch for it; throws only on an invariant of the compiled
+ * net broken, or on an `engineV2` map (`ProfileMismatchError`, `tasks/v2-profile-plan.md` decision
+ * 14), whose runs deposit unit tokens with no budget, pause or data.
+ */
 export function deposits(g: NodeGadget, map: NetMapView, outcome: Outcome, run?: RunPayload): Deposit[] {
+  assertProfile('deposits', 'v1', map.profile);
   const shared = map.shared;
   switch (outcome.kind) {
     case 'ok':

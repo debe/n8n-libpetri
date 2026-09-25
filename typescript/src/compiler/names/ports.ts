@@ -48,3 +48,20 @@ export function toolInPortOf(tool: number): string {
 export function agentResponsePortOf(agent: number): string {
   return `resp_${agent}`;
 }
+
+/**
+ * The one port an `engineV2` gadget binds edge `edgeId`'s `arrived` host place through, whether
+ * it consumes the arrival, writes it, or both (a batch node's self loop): `arrived_e${edgeId}`.
+ */
+export function arrivedPortOf(edgeId: number): string {
+  return `arrived_e${edgeId}`;
+}
+
+/**
+ * The port an `engineV2` producer writes a successor's `live` place through: `live_${id}`. The
+ * node's own `live` keeps {@link PLACE}`.live`, and a node that writes its own (a batch node's self
+ * loop) binds it once, under that name.
+ */
+export function successorLivePortOf(id: string): string {
+  return `live_${id}`;
+}

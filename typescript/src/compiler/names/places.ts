@@ -34,6 +34,16 @@ export const PLACE = {
   routed: 'routed',
   retry: 'retry',
   tries: 'tries',
+  /**
+   * Engine v2's per-node count of live incoming edges (`tasks/v2-profile-plan.md` decision 3): a
+   * host place, because every producer writes it. Only the `engineV2` settlement gadget has one.
+   */
+  live: 'live',
+  /**
+   * `B/ended`: an `engineV2` batch node's "the loop has ended" marker, written by its terminal
+   * pass (`isTerminalStep`, decision 5). Local to the batch node, the only writer.
+   */
+  ended: 'ended',
 } as const;
 
 /** An agent's round places (README "Agent tool dispatch"). */
@@ -59,6 +69,20 @@ export const AGENT_PLACE = {
 /** `X/in`: the direct form's edge place, or the synthetic one of a node with no producer. */
 export function inPlaceOf(id: string): string {
   return qualified(id, PLACE.in);
+}
+
+/**
+ * `e${edgeId}/arrived`: engine v2's "this edge's source step has settled" (decision 3). A host
+ * place per edge, named after the edge rather than its consumer, since producer and consumer bind
+ * it alike. No node gadget declares a local place of that name, so no node prefix collides.
+ */
+export function arrivedPlaceOf(edgeId: number): string {
+  return qualified(`e${edgeId}`, 'arrived');
+}
+
+/** `X/live`: the {@link PLACE}`.live` host place of an `engineV2` node. */
+export function livePlaceOf(id: string): string {
+  return qualified(id, PLACE.live);
 }
 
 /** `X/skipped`: written by `X_skip`, or a host-level marker a referencing twin reads. */

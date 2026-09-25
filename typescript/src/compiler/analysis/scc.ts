@@ -58,7 +58,7 @@ interface TarjanFrame {
  * recursion made an explicit frame stack, so a long chain of nodes cannot overflow the call
  * stack; the visit order — and so every SCC id — is exactly the recursive one's.
  */
-function tarjan(
+export function tarjan(
   names: readonly string[],
   succ: ReadonlyMap<string, readonly string[]>,
 ): { sccOf: Map<string, number>; sccs: string[][] } {

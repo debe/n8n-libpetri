@@ -22,6 +22,7 @@
  * context resolves them by name (CORE-002), so no MOD-031 alias is involved.
  */
 import { assertNever } from '../internal/assert.js';
+import { assertProfile } from './errors.js';
 import { callsOutReenterAction, dispatchAction, doneRequestAction, reenterAction, roundsOutAction } from './actions/agent-round.js';
 import { attemptAction, deadlineAction, retryWaitAction } from './actions/failure.js';
 import { armAction, skipAction } from './actions/input-side.js';
@@ -32,9 +33,14 @@ import type { ActionBinder } from './types.js';
 
 export type { RoutingMode, RoutingPolicy } from './actions/routing.js';
 
-/** Binds a structural action for every role that declares an `Out` spec; sinks and `clear` keep passthrough. */
+/**
+ * Binds a structural action for every role that declares an `Out` spec; sinks and `clear` keep
+ * passthrough. A v1 binder: an `engineV2` map is refused (`ProfileMismatchError`, decision 14 of
+ * `tasks/v2-profile-plan.md`); `settlementActions` binds that net.
+ */
 export function structuralActions(policy: RoutingPolicy): ActionBinder {
   return (info, map) => {
+    assertProfile('structuralActions', 'v1', map.profile);
     const g = map.node(info.node);
     switch (info.role) {
       case 'start': return startAction(g);

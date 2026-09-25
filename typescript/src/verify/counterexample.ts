@@ -96,10 +96,11 @@ export function renderNodePath(cex: Counterexample): string {
  * Roles whose `PlaceInfo.port` is an **input** index; every other ported role (`ok`,
  * `routed`, `nil`) carries an output index (`compiler/types.ts`). Getting this wrong would
  * print "Switch input 3" for a token on the fourth *output*, which is the kind of wrong that
- * sends a reader to the wrong end of the node.
+ * sends a reader to the wrong end of the node. An `engineV2` edge's `arrived` place belongs to
+ * the edge's consumer and carries its input slot.
  */
 const INPUT_SIDE_ROLES: ReadonlySet<PlaceRole> = new Set<PlaceRole>([
-  'in-data', 'in-empty', 'edge-data', 'edge-empty', 'ready', 'hasdata', 'ran', 'free',
+  'in-data', 'in-empty', 'edge-data', 'edge-empty', 'ready', 'hasdata', 'ran', 'free', 'arrived',
 ]);
 
 /**

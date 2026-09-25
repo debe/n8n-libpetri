@@ -101,7 +101,7 @@
 import { performance } from 'node:perf_hooks';
 import type { PetriNet } from 'libpetri';
 import type { MarkingState, StateClassGraph } from 'libpetri/verification';
-import type { NetMapView } from '../compiler/index.js';
+import { assertProfile, type NetMapView } from '../compiler/index.js';
 import { messageOf } from '../internal/errors.js';
 import { rethrowIfBug } from './rethrow-if-bug.js';
 import { buildStateClassGraph } from './state-space/build.js';
@@ -128,8 +128,11 @@ export type { TruncationShape } from './state-space/truncation.js';
  * whole reason it is cheaper than the SMT route: the pipeline the SMT route re-pays per
  * query (flatten, structural pre-check, P-invariants) has no analogue here.
  *
- * Construction never throws: a rejected net (CORE-043) or any other build failure leaves
- * {@link error} set and {@link usable} false, so every caller falls back to the SMT route.
+ * Construction never throws on a v1 net: a rejected net (CORE-043) or any other build failure
+ * leaves {@link error} set and {@link usable} false, so every caller falls back to the SMT route.
+ * An `engineV2` net is refused with `ProfileMismatchError` before anything is built: the rest
+ * roles every stranding is classified by (`state-space/roles.ts`) are v1's, and an `engineV2`
+ * net's `arrived` / `live` tokens would come back as stranded work.
  *
  * What the classes say — peaks, co-markings, strandings — is {@link ExploredClasses}
  * (`state-space/explored-classes.ts`); this class adds how the exploration ran.
@@ -209,7 +212,8 @@ export class StateSpace extends ExploredClasses {
   }
 
   /**
-   * Builds the graph, bounded by `maxClasses`. Timed, and never throws. **The single seam
+   * Builds the graph, bounded by `maxClasses`. Timed, and never throws on a v1 `map`; any other
+   * profile throws `ProfileMismatchError` (see the class note). **The single seam
    * where the graph is constructed** (`state-space/build.ts`) — see the class note on swapping
    * in a reduced builder.
    *
@@ -232,6 +236,7 @@ export class StateSpace extends ExploredClasses {
     maxClasses: number = DEFAULT_MAX_CLASSES,
     loops: ReadonlySet<string> = new Set(),
   ): StateSpace {
+    assertProfile('StateSpace.explore', 'v1', map.profile);
     const started = performance.now();
     // The cap the caller asked for, lowered to what the heap can hold: a class cap bounds
     // the class count, and only this bounds the memory (see {@link effectiveMaxClasses}).
