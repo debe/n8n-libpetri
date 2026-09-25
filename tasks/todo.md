@@ -748,14 +748,16 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       2026-09-11), four of them impedance against n8n's own types. Worth doing in both repositories
       together rather than here alone
 
-- [ ] **libpetri 7.0.0 (released 2026-09-25): bump and re-run every proof.** Its soundness
-      fixes can move earlier `proven` verdicts: ν Route B under alwaysAvailable/bounded(k)
-      (VER-006 AC8), ν Route A and environment injection (VER-006 AC7), the structural deadlock
-      shortcut on dead nets (VER-020 AC4), and the ν-join consuming a correlated place off-key
-      (NU-051 AC7). Kept separate from the n8n re-pin so the two measurements do not mix: suite,
-      z3 gate, the 200-template verify survey, and `docs/verification.md` for anything that moved.
-      New: terminal places (EXEC-042, `.terminal(place)`, `terminationReason`), a candidate for
-      the halt/quiescence path
+- [x] **libpetri 7.0.0 (released 2026-09-25): bumped, every proof re-run, nothing moved.**
+      `^7.0.0` is the floor because of [VER-020] AC4. The whole-net `deadlockFree` fallback
+      runs with enumeration off, and 75 of the 279 testbed checks are proven there by method
+      `structural`; all of them held. The ν fixes cannot reach us (no `matchSpec`, no environment
+      places). The survey, the forced fallback and conformance are identical to 6.0.0
+      ([`docs/conformance-2.41.3.md`](../docs/conformance-2.41.3.md))
+- [ ] **Terminal places (EXEC-042) for the halt/quiescence path.** `_halt` is a terminal marker
+      today, enforced by inhibitors we generate. `.terminal(place)` would make the run end on
+      the deposit, and the verifier would apply the inhibitors and sink excuse itself. Decide
+      whether it replaces our generated inhibitors, and measure class counts before and after
 
 ### 4b. Upstream (n8n)
 

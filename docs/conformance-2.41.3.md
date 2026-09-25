@@ -136,3 +136,22 @@ net. Shapes guessed from connections: 235 of about 5,133 nodes, previously 236.
 
 A `violated` here is a witness in the priority- and value-blind abstraction (VER-004), not a
 proof about n8n.
+
+## libpetri 7.0.0 on the same pin
+
+The bump was measured separately from the re-pin, so the two effects stay apart. Registry
+7.0.0, same machine, compared with the 6.0.0 numbers above:
+
+- Suite 1075/1075, and typecheck clean.
+- Conformance at k = 1, 2 and 4, execution-engine and core: the same headlines and the same
+  regression sets.
+- Survey: 200/200. Outcome, structural hash, budget, and every verdict and reason are identical
+  once the timings in the explanation text are stripped.
+- A first survey run showed 3 timeouts. It overlapped another project's z3-heavy test run
+  (5-minute load average 68). Run alone, the three affected workflows take the same time and
+  peak memory on 6.0.0 and 7.0.0 (for example 19.6 s / 900 MB against 19.7 s / 899 MB). The
+  rerun on a quiet machine had no timeouts. **Survey timeouts depend on load; check the load
+  before believing one.**
+- Forced SMT fallback on the 11 testbed workflows: 279 checks identical in verdict, route and
+  method. See [`verification.md`](verification.md), "SMT fallback".
+

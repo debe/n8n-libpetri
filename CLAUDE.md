@@ -57,8 +57,8 @@ libpetri requirement IDs (`IO-015`, `EXEC-003`, `MOD-010`, …).
 
 ### libpetri
 
-`libpetri@^6.0.0`, an ordinary registry dependency. **6.0.0 is the floor** because the verifier
-calls its surface directly: `sinkPlacesWhen` conditional sinks [VER-014], the linear
+`libpetri@^7.0.0`, an ordinary registry dependency. The verifier's **surface** dates from 6.0.0,
+and 7.0.0 is the floor for a soundness fix (below). The verifier calls that surface directly: `sinkPlacesWhen` conditional sinks [VER-014], the linear
 state-equation bound [VER-015], the state equation with firing counters [VER-016], bounded
 enumeration [VER-017] with `enumerationMaxClasses`, the state-equation and firing-bound phases
 [VER-018] / [VER-019], open-net contracts [VER-022], `semiflowInvariants('auto')`,
@@ -83,6 +83,22 @@ by `all()` / `atLeast()` an upper bound in the HORN encoding, so its scripts cha
 2026-09-17 against released 6.0.0: suite 1075/1075 across 79 files, typecheck clean, and the
 200-template survey compiles and verifies 200/200 with no timeouts. Nothing moved for the
 shapes we have — that is not a general result, and a new timed shape is not covered by it.
+
+**Why 7.0.0 is the floor.** 7.0.0 fixed [VER-020] AC4: with enumeration off, the structural
+deadlock shortcut could prove a net that is dead at its initial marking. Our whole-net
+`deadlockFree` fallback runs in exactly that configuration (`enumerationMaxClasses(0)`), and 75
+of the 279 checks on the testbed workflows are proven there by method `structural`. No method
+marks the fix, so `assertLibpetriSurface` still probes the 6.0.0 surface and `package.json`
+carries the floor. The ν fixes in the same release (VER-006 AC7/AC8, NU-051 AC7) cannot reach
+us: we compile no `matchSpec` and no environment places (`assertMatchBlind`). Measured
+2026-09-25 against released 7.0.0, compared with 6.0.0 on the same machine:
+- suite 1075/1075;
+- the 200-template survey identical in outcome, hash, budget and every verdict;
+- the forced SMT fallback on the 11 testbed workflows identical in verdict, route and method
+  (279 checks);
+- conformance identical at k = 1, 2 and 4.
+
+Nothing moved. Terminal places ([EXEC-042]) and `terminationReason()` are not used yet.
 
 `scripts/link-libpetri.sh` points `node_modules/libpetri` at a sibling libpetri checkout, for
 the periods when this repository is again the first consumer of an unreleased surface. It is

@@ -239,6 +239,16 @@ proves the two-tool agent at `maxToolCalls` 64 in seconds where it was `unknown`
 state graph is still faster where it closes, and it is what decides a truncated cyclic graph's
 `bounded` verdict; the fallback is what closes a truncated acyclic one.
 
+**The structural method, and the libpetri 7.0.0 soundness fix (2026-09-25).** The fallback asks
+`deadlockFree` with `enumerationMaxClasses(0)`. libpetri answers some of those queries by method
+`structural`, which is Commoner's siphon/trap check. Before 7.0.0 that check could miss the empty
+siphon and prove a net that is dead at its initial marking ([VER-020] AC4). Measured with
+`--smt-fallback force` on the 11 testbed workflows at k = 4: 279 checks, 75 of them proven by
+`structural`. On 6.0.0 and 7.0.0 the results are identical in verdict, route and method, so no
+proof here rested on the bug. The testbed workflows are a sample, not a proof about every
+workflow. That is why 7.0.0 is the floor: a `structural` proof on 6.x cannot be told apart from
+one the bug produced.
+
 ## Current measurements
 
 Recorded on the repository's verifier measurement harness:

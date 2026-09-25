@@ -14,6 +14,12 @@ All notable changes to this project are documented here. The format follows
   `SettlementPolicy` seam second, and the upstream offer leads with the differential.
 
 ### Changed
+- **libpetri `^7.0.0`** (was `^6.0.0`). 7.0.0 fixes a soundness bug in the structural
+  deadlock shortcut [VER-020] that our whole-net `deadlockFree` fallback runs through. Measured
+  against 6.0.0, nothing moved: survey, forced SMT fallback on the testbed workflows (279
+  checks), conformance at k = 1, 2 and 4, and the suite.
+  `assertLibpetriSurface`'s remedy names 7.0.0.
+
 - **The n8n pin is now the release `n8n@2.41.3`** (`7f7a8ac`, 2026-09-25). The previous pin
   was master `441970b` (2026-09-04). Every release from `n8n@2.39.0` on contains `441970b`, so
   a release tag can now be the pin. The pin is defined once, in `scripts/n8n-pin.sh`, and

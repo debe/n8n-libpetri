@@ -2,7 +2,7 @@
  * The install this project cannot run on, refused with a message that says so (`tasks/todo.md`).
  *
  * The range once asked for `libpetri@^5.0.0` while a registry install could satisfy it with a
- * package predating VER-014 / VER-016 / VER-017. The floor is `^6.0.0` and right, so this guards
+ * package predating VER-014 / VER-016 / VER-017. The floor is `^7.0.0` and right, so this guards
  * a downgrade or a stale lock rather than the default configuration. Every SMT query would then throw — loudly
  * since `rethrowIfBug`, but from several frames inside a query, reading as a bug in this
  * project rather than as an install that predates the API. This check names the gap instead.
@@ -28,7 +28,7 @@ describe('the libpetri surface this verifier requires', () => {
       // Not a verdict and not a warning: an install this verifier cannot report honestly on.
       expect(() => assertLibpetriSurface()).toThrow(/proofs quietly missing/);
       // And it says how to get back to a usable install rather than leaving the reader to guess.
-      expect(() => assertLibpetriSurface()).toThrow(/npm install libpetri@\^6\.0\.0/);
+      expect(() => assertLibpetriSurface()).toThrow(/npm install libpetri@\^7\.0\.0/);
     } finally {
       proto['sinkPlacesWhen'] = saved.sinkPlacesWhen;
       proto['stateEquation'] = saved.stateEquation;

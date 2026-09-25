@@ -41,6 +41,15 @@ import type { SolverInfo } from './types.js';
  * They shipped in libpetri 6.0.0 alongside VER-022 open-net contracts, which is why the floor
  * moved there from 5.1.0. A `^5` install satisfies neither, and the failure it produces without
  * this check is not an error but a report whose proofs are quietly absent.
+ *
+ * **The declared floor is 7.0.0, and no method marks it.** 7.0.0 fixed [VER-020] AC4: with
+ * enumeration off, the structural deadlock shortcut could return `Proven` for a net that is dead
+ * at its initial marking. That is the configuration of the whole-net `deadlockFree` fallback
+ * (`routing/smt.ts`, `enumerationMaxClasses(0)`), and 75 of the 279 checks on the testbed
+ * workflows are proven there by method `structural`. All 75 held on 7.0.0 (measured 2026-09-25),
+ * so none relied on the bug, but on 6.x a proof by that method could not be trusted. A bug fix
+ * has no method to probe, so this check still tests the 6.0.0 surface and `package.json`
+ * carries the floor. The remedy it names is 7.0.0.
  */
 const REQUIRED_VERIFIER_METHODS = [
   'sinkPlacesWhen', 'stateEquation', 'enumerationMaxClasses', 'stateEquationPhase', 'firingBound',
@@ -58,7 +67,8 @@ export function assertLibpetriSurface(): void {
     `the installed libpetri is too old for this verifier: SmtVerifier is missing ${missing.join(', ')}. ` +
     'This surface is VER-014 conditional sinks, VER-016 the state equation, VER-017 bounded ' +
     "enumeration and `semiflowInvariants('auto')`, plus VER-018 / VER-019, the state-equation " +
-    'and firing-bound phases. All of it is in libpetri 6.0.0; run `npm install libpetri@^6.0.0` ' +
+    'and firing-bound phases. All of it is in libpetri 6.0.0, and 7.0.0 is the floor because of a ' +
+    'soundness fix in the structural deadlock shortcut [VER-020]; run `npm install libpetri@^7.0.0` ' +
     'rather than relaxing this check. Without the phases the report does not fail — it closes ' +
     'with the proofs quietly missing.',
   );

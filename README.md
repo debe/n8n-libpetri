@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2024-5fa04e)](typescript/package.json)
-[![libpetri](https://img.shields.io/badge/libpetri-%5E6.0.0-1f6feb)](https://github.com/debe/libpetri)
+[![libpetri](https://img.shields.io/badge/libpetri-%5E7.0.0-1f6feb)](https://github.com/debe/libpetri)
 [![License](https://img.shields.io/badge/license-Apache--2.0-1f6feb)](LICENSE)
 
 **n8n-libpetri is a compiler and a scheduling kernel.** The compiler turns an n8n workflow into
