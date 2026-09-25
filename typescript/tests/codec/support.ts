@@ -112,7 +112,7 @@ export function slotsOf<T>(byNode: Record<string, Record<number, T>> | null | un
 // ==================== legacy consumer shape ====================
 
 /**
- * What `stack-scheduler.ts` (n8n `441970b`) reads off the state: `entry.node` is the live
+ * What `stack-scheduler.ts` (`n8n@2.41.3`) reads off the state: `entry.node` is the live
  * `workflow.nodes[name]`, `entry.data.main` an array of item arrays or `null`, `entry.source`
  * `null` or `{ main: (ISourceData | null)[] }`, `runIndex` unset (`computeRunIndex`), and
  * `waitingExecution[node][k].main` / `waitingExecutionSource[node][k].main` one slot per

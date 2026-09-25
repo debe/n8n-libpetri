@@ -3,7 +3,7 @@
  * `WorkflowDescription`, a `FakeHost` implementing the 30 `SchedulerHost` members with
  * canned `runNode` outputs per node, fake lifecycle hooks, and a recorder of every host
  * call and hook in order (`calls`). The host methods mirror what `WorkflowExecute` does at
- * n8n `441970b` closely enough for `runData`, `source` and `pairedItem` to come out in
+ * `n8n@2.41.3` closely enough for `runData`, `source` and `pairedItem` to come out in
  * n8n's shape; the recorder is what the ordering tests and the differ read.
  *
  * It lives under `conformance/` because both engines run on it: the `PetriScheduler`

@@ -1,6 +1,6 @@
 /**
  * How the `FakeHost` mirror treats a node that failed, as `WorkflowExecute` does at n8n
- * `441970b`: the error `reportNodeExecutionError` hands the loop, the output a failed node
+ * `n8n@2.41.3`: the error `reportNodeExecutionError` hands the loop, the output a failed node
  * continues with, and the item errors `normalizeNodeErrors` turns into json.
  */
 import type { ExecutionBaseError, IExecuteData, INode, INodeExecutionData } from 'n8n-workflow';

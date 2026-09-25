@@ -1,6 +1,6 @@
 /**
  * The actions bound to the compiled net — the whole of n8n's execution loop that is not
- * scheduling. Every line of `stack-scheduler.ts` (n8n `441970b`, patch 0001) that touches
+ * scheduling. Every line of `stack-scheduler.ts` (`n8n@2.41.3`, patch 0001) that touches
  * the host is mirrored here, in the same order, on the transition whose firing corresponds
  * to it; the stack machinery (`isExecutionStackNotEmpty`, `popExecutionStack`,
  * `addNodeToBeExecuted`, the sibling sort, the R6 stuck-join fallback) is what the net

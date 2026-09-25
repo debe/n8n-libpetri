@@ -1,7 +1,7 @@
 /**
  * The host n8n's ported loop runs on: {@link FakeHost} with the scheduling half of
  * `WorkflowExecute` switched on. Line numbers are of `workflow-execute.ts` at the pinned
- * commit `441970b`; `stack-reference.ts` is the port that drives it.
+ * release `n8n@2.41.3`; `stack-reference.ts` is the port that drives it.
  */
 import type {
   EngineRequest, IConnection, IExecuteData, INode, INodeExecutionData, IRunData, ITaskMetadata, Workflow,

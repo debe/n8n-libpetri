@@ -202,6 +202,28 @@
 
 ---
 
+## M9: Re-pin to n8n@2.41.3 (2026-09-25)
+- [x] The pin moves from master `441970b` to the release `n8n@2.41.3` (`7f7a8ac`), defined once
+      in `scripts/n8n-pin.sh`. Every release from `n8n@2.39.0` on contains `441970b`, so the old
+      reason for pinning master ("the release tag predates the helper extraction") no longer holds
+- [x] Patches 0001/0002 rebased with offset-only changes. Upstream's one change in the patched
+      files, #38348 (tool nodes of an agent upstream of the destination), sits in the
+      `runNodeFilter` prelude before the scheduler is entered. We read the filter through
+      `host.isNodeFilteredOut`, so nothing on our side needed mirroring. `stack-scheduler.ts` is
+      byte-identical
+- [x] Classifier: new pattern `destination-tools` for #38348's loop-driving case, so there are
+      45 loop-driving cases (was 44). The fixture `tests/conformance/fixtures/baseline.junit.xml`
+      is the new baseline (1715 cases), and the pinned counts in `classify`, `junit` and
+      `matrix` tests were re-pinned
+- [x] `scripts/check-n8n-drift.sh`: a read-only dry-run of the patches against the pin,
+      `stable`, `beta`, the newest release and master, and the commits since the pin that touch
+      the seam and engine v2
+- [x] Measured: see [`docs/conformance-2.41.3.md`](../docs/conformance-2.41.3.md)
+- [x] Live testbed on the new pin: `diff-engines.sh` (legacy, k = 1, k = 4) and a queue-mode
+      boot with two runs. Data is identical everywhere and no edge inverted
+- [x] Node-type catalogue re-extracted (+14 keys, none changed), and the 200-template survey
+      rerun: 200/200, and every verdict, hash and budget is identical to the 2026-09-17 rows
+
 ## Open
 
 One list, most valuable first. Each item says what it is, why it is not done, and what closing
@@ -726,6 +748,15 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       2026-09-11), four of them impedance against n8n's own types. Worth doing in both repositories
       together rather than here alone
 
+- [ ] **libpetri 7.0.0 (released 2026-09-25): bump and re-run every proof.** Its soundness
+      fixes can move earlier `proven` verdicts: ν Route B under alwaysAvailable/bounded(k)
+      (VER-006 AC8), ν Route A and environment injection (VER-006 AC7), the structural deadlock
+      shortcut on dead nets (VER-020 AC4), and the ν-join consuming a correlated place off-key
+      (NU-051 AC7). Kept separate from the n8n re-pin so the two measurements do not mix: suite,
+      z3 gate, the 200-template verify survey, and `docs/verification.md` for anything that moved.
+      New: terminal places (EXEC-042, `.terminal(place)`, `terminationReason`), a candidate for
+      the halt/quiescence path
+
 ### 4b. Upstream (n8n)
 
 Nothing here blocks anything shipped: `patches/n8n/0001` and `0002` are unchanged by ADR 0009
@@ -788,10 +819,12 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
 - [ ] `packages/cli`'s **integration suite** needs a live database and has never been run: 397 of its
       1501 test files (94 `*.integration.test.ts` under `src/`, 250 under `test/integration/`, 53
       under `test/migration/`)
-- [ ] Exactly one `packages/cli` file cannot be instrumented
-      (`src/modules/agents/__tests__/agent-sse-stream.test.ts` mocks `n8n-workflow` without
-      `NodeHelpers`); the shim reports it as a diagnostic and leaves it on the injected
-      `StackScheduler`. It is the one place where a "libpetri" case is really a legacy case
+- [ ] Two `packages/cli` files cannot be instrumented, and the shim reports each as a diagnostic
+      and leaves it on the injected `StackScheduler`:
+      `src/modules/agents/__tests__/agent-sse-stream.test.ts` mocks `n8n-workflow` without
+      `NodeHelpers`, and, since the `n8n@2.41.3` pin, `src/__tests__/crash-journal.test.ts`
+      (2 cases) mocks `n8n-core` without `setWorkflowSchedulerFactory`. They are the only places
+      where a "libpetri" case is really a legacy case
 - [ ] `--scope=all` deliberately excludes `cli`: it needs its own `pnpm install` and a multi-minute
       turbo build, so a full-coverage CI leg has to invoke `--scope=cli` separately
 - [x] ~~The **classifier counts the six out-of-scope AI-agent "waiting tools" cases as
@@ -885,3 +918,27 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       what this repository imports: `FakeHost`, `StackReferenceScheduler`, the report's `cell` and
       the matrix types left the barrel and stay importable from their modules. The package is
       private, so nothing outside the repository is affected today
+
+### 8. Engine v2 (ADR 0012)
+
+The plan is in [`docs/adr/0012-engine-v2-target.md`](../docs/adr/0012-engine-v2-target.md).
+Model first, seam second, upstream alongside both.
+
+- [ ] **Pin a master SHA for v2 work** next to the release pin: v2 moves too fast for a
+      release tag, and suspend/resume exists only on master. Read at `c88df6f9c7` so far
+- [ ] **Compiler profile `engineV2`**: no ordering priorities, no retry or error-output gadgets,
+      whole-execution failure sink, batch loop as the only admitted cycle. It rejects exactly what
+      `V1WorkflowConverter` + `validateExecutableGraph` reject
+- [ ] **Differential harness `src/conformance/v2/`** against n8n's own `decideSuccessors`,
+      `decisionKeys` and `countExpectedSettledSteps`: seeded settlement interleavings times
+      live/dead outputs. Corpus: `m1-acceptance` workflows, our fixtures, the survey filtered by
+      the converter
+- [ ] **Verification families under the profile**: the reachable settled set against
+      `countExpectedSettledSteps`
+- [ ] **Stateless planner spike** (`tasks/spike-v2-planner.mts`): does a `StepSummary` row set
+      determine a marking?
+- [ ] **Patches 0003/0004** (`SettlementPolicy` extract, then runtime option), only after the
+      above is green. The gate is the engine tests, `m1-acceptance`, and Playwright `engine-v2:e2e`
+- [ ] **Upstream, in this order**: read the contribution terms (CLA, Sustainable Use License);
+      offer the property test for `settlement.ts`; then the seam RFC; restate the §4b asks for
+      v2 (`onFailure` as v2's missing retry model)

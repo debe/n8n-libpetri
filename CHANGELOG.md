@@ -5,7 +5,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `scripts/check-n8n-drift.sh`: a read-only dry-run of the patches in a throwaway index
+  against the pin, `stable`, `beta`, the newest release and master. It also lists what touched
+  the seam and n8n's engine v2 since the pin.
+- ADR 0012 (**proposed**): engine v2 (`packages/@n8n/engine`) as a second compilation target.
+  The model and the differential against n8n's own `decideSuccessors` come first, a
+  `SettlementPolicy` seam second, and the upstream offer leads with the differential.
+
 ### Changed
+- **The n8n pin is now the release `n8n@2.41.3`** (`7f7a8ac`, 2026-09-25). The previous pin
+  was master `441970b` (2026-09-04). Every release from `n8n@2.39.0` on contains `441970b`, so
+  a release tag can now be the pin. The pin is defined once, in `scripts/n8n-pin.sh`, and
+  `bootstrap-n8n.sh` and `verify-patch.sh` source it.
+  - Patches 0001/0002 rebased with offset-only changes, and `stack-scheduler.ts` is
+    byte-identical.
+  - Upstream's #38348 (tool nodes of an agent upstream of the destination node) changes only
+    the `runNodeFilter` prelude, which the net reads through `host.isNodeFilteredOut`.
+  - The classifier gains the pattern `destination-tools` for #38348's loop-driving case, so
+    there are 45 loop-driving cases, up from 44. It passes under the net.
+  - Execution-engine and core both reach **41/45 loop-driving cases at k = 1**. The four misses
+    are the same four classified regressions as at `441970b`.
+  - The k = 2 and k = 4 legs regress the same three cases against k = 1 as before.
+  - Measured in [`docs/conformance-2.41.3.md`](docs/conformance-2.41.3.md).
+
 - **A skip stops at the last node that reads it** (ADR 0002, amendment). A skipped node used to
   forward `empty` down every outgoing tree edge, so an unselected branch skipped node by node to
   its end. Only a join or OR slot, a `$('X')` reference, a cycle or a loop reads a skip, so a

@@ -473,8 +473,8 @@ gets into the process, what the columns decide, and what the harness cannot see.
 
 ## Building and testing
 
-The integration targets n8n commit `441970b211d13a3ce547916b2b8ee93677b620e9`. The pinned
-checkout lives in the ignored `.n8n/` directory and receives two small, rebasable patches. This
+The integration targets the n8n release `n8n@2.41.3` (commit
+`7f7a8ac25b87db6c30e2b3651bb8c5d3b21cdb85`, set in `scripts/n8n-pin.sh`). The pinned checkout lives in the ignored `.n8n/` directory and receives two small, rebasable patches. This
 repository carries no n8n fork.
 
 The TypeScript package requires Node 24 or newer.

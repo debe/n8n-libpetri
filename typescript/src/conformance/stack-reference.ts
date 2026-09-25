@@ -1,6 +1,6 @@
 /**
  * The n8n side of the differ: a port of n8n's own scheduler loop
- * (`packages/core/src/execution-engine/stack-scheduler.ts` at the pinned commit `441970b`)
+ * (`packages/core/src/execution-engine/stack-scheduler.ts` at the pinned release `n8n@2.41.3`)
  * plus the one `WorkflowExecute` member it drives that `FakeHost` deliberately
  * refuses, `addNodeToBeExecuted` (`workflow-execute.ts:445-851`). Running it against the
  * same `FakeHost` the `PetriScheduler` runs against is what makes the two engines

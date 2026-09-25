@@ -1,6 +1,6 @@
 /**
  * One attempt of a node: the mirror of n8n's loop body (`stack-scheduler.ts` lines 49–268 at
- * `441970b`, patch 0001), in the same order, on the `X_run` / `X_exhausted` firing that
+ * `n8n@2.41.3`, patch 0001), in the same order, on the `X_run` / `X_exhausted` firing that
  * corresponds to it. The retry loop is unrolled into the net: every attempt is its own firing,
  * and whether a try is left is the net's decision (`X/tries`, or the `onFailure` chain).
  *

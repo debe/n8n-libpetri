@@ -1,6 +1,6 @@
 /**
  * The child enqueue of n8n's scheduler (`stack-scheduler.ts:271-347` at the pinned commit
- * `441970b`): queue the successors of the node that just ran. `stack-reference.ts` is the
+ * `n8n@2.41.3`): queue the successors of the node that just ran. `stack-reference.ts` is the
  * loop that calls it; line numbers are of that n8n file.
  */
 import type { IConnection, INode, INodeExecutionData, Workflow } from 'n8n-workflow';

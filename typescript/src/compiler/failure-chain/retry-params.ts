@@ -3,7 +3,7 @@ import type { NodeDescription, RetryParams } from '../types.js';
 
 /**
  * n8n's retry parameters as `WorkflowExecute.getRetryParams` reads them
- * (`workflow-execute.ts` @ `441970b`, lines 1801–1811):
+ * (`workflow-execute.ts` @ `n8n@2.41.3`, lines 1805–1815):
  * `maxTries = min(5, max(2, node.maxTries || 3))`,
  * `waitBetweenTries = min(5000, max(0, node.waitBetweenTries || 1000))`.
  * `0`, `undefined` and `NaN` are falsy and take the default; out-of-range values are

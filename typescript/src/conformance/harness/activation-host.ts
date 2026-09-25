@@ -1,6 +1,6 @@
 /**
  * The members of the `FakeHost` mirror the loop calls between popping an entry and running
- * its node (`stack-scheduler.ts:49-120` at n8n `441970b`): the stop check, the task's start,
+ * its node (`stack-scheduler.ts:49-120` at `n8n@2.41.3`): the stop check, the task's start,
  * the input's lineage, the run index, the filters, the retry parameters and the pinned
  * output. Each mirrors its `workflow-execute.ts` namesake; `FakeHost` is the whole host.
  */
@@ -54,7 +54,7 @@ export abstract class ActivationHost extends StackHost {
 
   getRetryParams(executionData: IExecuteData): [number, number] {
     this.record('getRetryParams', executionData.node.name);
-    // `metadata.resumeError` postdates n8n-workflow 2.16's typings (it exists at 441970b).
+    // `metadata.resumeError` postdates n8n-workflow 2.16's typings (it exists at the pin).
     const isResumedError = (executionData.metadata as { resumeError?: unknown } | undefined)?.resumeError !== undefined;
     if (executionData.node.retryOnFail !== true || isResumedError) return [1, 0];
     return [

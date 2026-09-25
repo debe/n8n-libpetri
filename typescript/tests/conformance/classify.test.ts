@@ -41,9 +41,10 @@ describe('LOOP_DRIVING_PATTERNS', () => {
       LOOP_DRIVING_PATTERNS.map((p) => [p.id, loopDriving.filter((c) => classifyCase(c).pattern === p.id).length]),
     );
     expect(counts).toEqual({
-      'execution-order': 19, 'hook-order': 6, 'branch-order': 4, 'respond-layout': 4, waiting: 9, partial: 2,
+      'execution-order': 19, 'hook-order': 6, 'branch-order': 4, 'respond-layout': 4, waiting: 9,
+      'destination-tools': 1, partial: 2,
     });
-    expect(loopDriving).toHaveLength(44);
+    expect(loopDriving).toHaveLength(45);
   });
 
   it('claims all eight webhook-respond-branch-order cases: every one of them calls run()', () => {
@@ -134,7 +135,7 @@ describe('LOOP_DRIVING_PATTERNS', () => {
 
   it('never marks a case outside the loop-driving files', () => {
     const outside = cases.filter((c) => !LOOP_DRIVING_FILE.test(c.file));
-    expect(outside.length).toBe(1657 - 208 - 8);
+    expect(outside.length).toBe(1715 - 209 - 8);
     expect(outside.some((c) => classifyCase(c).loopDriving)).toBe(false);
     // The name would match; the file rule is what keeps it out.
     expect(classifyCase({ file: 'src/execution-engine/__tests__/webhook-context.test.ts', name: 'webhook responseNode branch ordering > x' }))

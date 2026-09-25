@@ -1,5 +1,5 @@
 /**
- * Reading one `runNode` result (`stack-scheduler.ts` at `441970b`, patch 0001): whether it is an
+ * Reading one `runNode` result (`stack-scheduler.ts` at `n8n@2.41.3`, patch 0001): whether it is an
  * agent's `EngineRequest`, whether it is a soft failure (lines 98–100), and its output
  * post-processing (lines 163–186).
  */

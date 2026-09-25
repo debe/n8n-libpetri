@@ -1,6 +1,6 @@
 /**
  * The slots an agent's tool round reserves, and the results read back from them: n8n's
- * `initializeNodeRunData` entry and `rewireOutputLogTo` tag per action (n8n `441970b`), and
+ * `initializeNodeRunData` entry and `rewireOutputLogTo` tag per action (`n8n@2.41.3`), and
  * `collectSubNodeResults` reading each tool's result at the index its slot was reserved at.
  * `tool-round.ts` plans the round; `FakeHost` records the calls and applies the writes.
  */

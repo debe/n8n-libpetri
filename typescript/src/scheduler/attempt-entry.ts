@@ -1,6 +1,6 @@
 /**
  * The per-entry steps of one attempt, before n8n's node `try` (`stack-scheduler.ts` lines
- * 49–101 at `441970b`, patch 0001): the stop poll, the attempt-0 setup, the run index, the
+ * 49–101 at `n8n@2.41.3`, patch 0001): the stop poll, the attempt-0 setup, the run index, the
  * filtered-out and input checks, and the retry read. `nodeExecuteBefore` (lines 95–97) sits
  * between the checks and the retry read and stays in the loop body (`run-loop.ts`), which
  * awaits it where n8n does.

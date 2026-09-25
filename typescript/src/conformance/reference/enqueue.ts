@@ -1,6 +1,6 @@
 /**
  * The enqueue half of n8n's loop: `addNodeToBeExecuted` (`workflow-execute.ts:445-851` at
- * the pinned commit `441970b`), v1 path only. The module doc of `stack-reference.ts` says
+ * the pinned release `n8n@2.41.3`), v1 path only. The module doc of `stack-reference.ts` says
  * why the ancestor-forcing block (`workflow-execute.ts:610-778`) is not ported.
  */
 import type { IConnection, IExecuteData, INode, INodeExecutionData, Workflow } from 'n8n-workflow';

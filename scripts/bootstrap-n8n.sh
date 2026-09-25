@@ -44,10 +44,9 @@ set -euo pipefail
 
 # --- constants -------------------------------------------------------------------------------
 N8N_REPO="https://github.com/n8n-io/n8n.git"
-# master, 2026-09-04T16:58:49Z, "feat(core): Log a decision audit line when a policy blocks an
-# action (no-changelog) (#37880)". Pinned by full sha: `git fetch <sha>` needs the full object id
-# (GitHub serves any reachable sha via upload-pack; abbreviations are not resolved server-side).
-N8N_COMMIT="441970b211d13a3ce547916b2b8ee93677b620e9"
+# The pin (N8N_TAG, N8N_COMMIT) lives in n8n-pin.sh, shared with verify-patch.sh.
+# shellcheck source=n8n-pin.sh
+. "$(dirname "${BASH_SOURCE[0]}")/n8n-pin.sh"
 COREPACK_VERSION="${COREPACK_VERSION:-0.36.0}"
 # The package whose turbo `build` (with `^build`) yields everything packages/core's tests load.
 BUILD_TARGET="n8n-nodes-base"
@@ -196,7 +195,7 @@ setup_pnpm() {
     echo "pnpm            $got (packageManager=$pin)"
     echo "pnpm shim       $SHIM_DIR/pnpm -> $(readlink "$SHIM_DIR/pnpm")"
     echo "git             $(git --version)"
-    echo "n8n commit      $N8N_COMMIT"
+    echo "n8n commit      $N8N_COMMIT ($N8N_TAG)"
   } > "$RESULTS/bootstrap-env.txt"
 }
 
@@ -277,7 +276,7 @@ NODE
 mkdir -p "$RESULTS"
 touch "$TIMINGS"
 log "repo $ROOT"
-log "n8n  $N8N_DIR @ $N8N_COMMIT"
+log "n8n  $N8N_DIR @ $N8N_TAG ($N8N_COMMIT)"
 log "scope $SCOPE ($SCOPE_PKG, filter '${N8N_TEST_FILTER:-<whole package>}') → baseline$SCOPE_SUFFIX.junit.xml"
 T_ALL=$(date +%s)
 step checkout checkout

@@ -1,6 +1,6 @@
 /**
  * `X_exhausted`: the after-loop handling of a node's last attempt (`stack-scheduler.ts` at
- * `441970b`, patch 0001), for n8n's own retry counter and for a terminal `onFailure` step alike.
+ * `n8n@2.41.3`, patch 0001), for n8n's own retry counter and for a terminal `onFailure` step alike.
  * The failure the attempt left on its retry token is recorded through the same path n8n's loop
  * takes when it leaves the try loop with that failure (`record.ts`).
  */

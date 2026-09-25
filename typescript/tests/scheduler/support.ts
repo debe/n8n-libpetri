@@ -1,6 +1,6 @@
 /**
  * Harness for the scheduler suite. The fake `Workflow`, the `FakeHost` mirror of
- * `WorkflowExecute` at n8n `441970b`, the node scripts and the fake hooks moved to
+ * `WorkflowExecute` at `n8n@2.41.3`, the node scripts and the fake hooks moved to
  * `src/conformance/harness.ts` in milestone M3, where the differ (`src/conformance/differ.ts`)
  * needs them too; they are re-exported here unchanged, so this module's surface is what it
  * always was. What stays is the scheduler-specific part: `execute()`, which wires a fresh
@@ -138,7 +138,7 @@ export function ranNodes(calls: readonly string[]): string[] {
 
 /**
  * The per-node host-call sequence of a successful run, read off `stack-scheduler.ts`
- * (n8n `441970b`, patch 0001) with the stack machinery left out (`isExecutionStackNotEmpty`,
+ * (`n8n@2.41.3`, patch 0001) with the stack machinery left out (`isExecutionStackNotEmpty`,
  * `popExecutionStack`, `addNodeToBeExecuted` are the loop's own bookkeeping the net
  * stands in for). Line numbers refer to that file.
  */

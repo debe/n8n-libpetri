@@ -97,7 +97,9 @@ scripts/run-conformance.sh    # run the execution-engine suite under both engine
 scripts/verify-patch.sh       # re-apply patches to the pinned commit; fails on drift
 ```
 
-Pinned n8n commit: `441970b` (master; the release tag predates n8n's helper extraction).
+Pinned n8n: the release `n8n@2.41.3` (`7f7a8ac`), defined once in `scripts/n8n-pin.sh`.
+`scripts/check-n8n-drift.sh` reports, read-only, whether the patches still apply to `stable`,
+`beta`, the newest release and master, and what touched the seam or engine v2 since the pin.
 
 ### Node-type catalogue (`scripts/node-types/`)
 

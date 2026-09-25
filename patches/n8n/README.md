@@ -1,7 +1,7 @@
 # n8n integration patches
 
-Two `git format-patch` files add a scheduler seam to n8n commit
-`441970b211d13a3ce547916b2b8ee93677b620e9`. They do not add Petri-net code to n8n and do
+Two `git format-patch` files add a scheduler seam to the n8n release `n8n@2.41.3`
+(`7f7a8ac25b87db6c30e2b3651bb8c5d3b21cdb85`, set in `scripts/n8n-pin.sh`). They do not add Petri-net code to n8n and do
 not modify tests.
 
 | Patch | Change | Intended behaviour change |
@@ -80,7 +80,7 @@ scripts/run-conformance.sh --skip-patch --engines=legacy
 ```
 
 The recorded verification result is identical to the unpatched baseline: 75 files and
-1,657 execution-engine cases pass in both runs. The comparison normalises timestamps,
+1,715 execution-engine cases pass in both runs. The comparison normalises timestamps,
 durations, host names, captured absolute paths and parallel suite completion order. It still
 compares every suite name, case name and outcome.
 
@@ -112,7 +112,7 @@ git add packages/core/src/execution-engine/scheduler-registry.ts \
 git commit
 
 git format-patch -2 -o ../patches/n8n
-git reset 441970b211d13a3ce547916b2b8ee93677b620e9
+git reset 7f7a8ac25b87db6c30e2b3651bb8c5d3b21cdb85   # N8N_COMMIT from scripts/n8n-pin.sh
 cd ..
 ```
 
@@ -125,3 +125,26 @@ scripts/run-conformance.sh --skip-patch --engines=legacy
 
 Keep the `0001-` and `0002-` ordering. Do not edit generated patches by hand. If one stops
 applying, rebase the source commits on the new pin and export them again.
+
+## Re-pin
+
+`scripts/check-n8n-drift.sh` says whether a candidate ref still takes the patches. To move:
+
+```bash
+cd .n8n
+git checkout -- packages/core/src && git clean -fd -- packages/core/src
+git checkout -b regen <old pin>
+git am ../patches/n8n/0001-*.patch ../patches/n8n/0002-*.patch
+git rebase <new pin>
+git format-patch -2 -o ../patches/n8n   # then rename back to the 0001-/0002- names
+git checkout --detach <new pin> && git branch -D regen
+```
+
+Then update `scripts/n8n-pin.sh` and run `scripts/bootstrap-n8n.sh`, which builds and takes a
+new baseline. After that, `verify-patch.sh --typecheck --build` and the conformance legs. A
+clean rebase shows only that the text applies. Check that no upstream change fell inside the
+extracted loop: `stack-scheduler.ts` must still match what upstream's `workflow-execute.ts`
+has in its loop at the new pin.
+
+History: the patches were first written against master `441970b` (2026-09-04). On 2026-09-25
+they moved to `n8n@2.41.3`, and the rebase changed only offsets.

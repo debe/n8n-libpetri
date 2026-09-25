@@ -1,7 +1,7 @@
 /**
  * `FakeHost`: the 30 `SchedulerHost` members with canned `runNode` outputs per node and a
  * recorder of every host call in order (`calls`). The methods mirror what `WorkflowExecute`
- * does at n8n `441970b` closely enough for `runData`, `source` and `pairedItem` to come out
+ * does at `n8n@2.41.3` closely enough for `runData`, `source` and `pairedItem` to come out
  * in n8n's shape.
  *
  * The mirror is layered in the order n8n's loop calls it: `HostState` holds the run's state

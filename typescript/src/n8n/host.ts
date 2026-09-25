@@ -4,7 +4,7 @@
  * process that hosts both (the conformance run's vitest setup shim), and `n8n-workflow` is
  * a type-only devDependency. The shapes below mirror
  * `patches/n8n/0001-extract-scheduler-loop.patch` (`workflow-scheduler.ts`) and
- * `0002-scheduler-registry.patch` (`scheduler-registry.ts`) at n8n `441970b`; the
+ * `0002-scheduler-registry.patch` (`scheduler-registry.ts`) at `n8n@2.41.3`; the
  * conformance run type-checks the real thing against n8n's own `WorkflowExecute`.
  *
  * `SchedulerHost` is the `Pick<WorkflowExecute, …>` of the patch: the 30 members the

@@ -83,6 +83,18 @@ export const LOOP_DRIVING_PATTERNS: readonly LoopDrivingPattern[] = [
       '(ADR 0008) — so no headline needs an "excluding out-of-scope" restatement.',
   },
   {
+    id: 'destination-tools',
+    pattern: /^run\(\) destination filtering$/,
+    title: /^runs the tool nodes of an agent upstream\b/,
+    rationale:
+      'Added with the n8n@2.41.3 pin (n8n #38348). The case runs trigger -> agent -> merge ' +
+      'with a tool on the agent, destination `merge`, and asserts that the tool ran and that ' +
+      "the agent's last run carries its result: an `ai_tool` round (ADR 0008) under a " +
+      'run-node filter, which is the loop. The block\'s other case asserts only on the ' +
+      "`runNodeFilter` the prelude computes before the scheduler is entered, so the title " +
+      'narrows the block to this one.',
+  },
+  {
     id: 'partial',
     pattern: /^runPartialWorkflow2$/,
     title: /^increments partial execution index\b/,

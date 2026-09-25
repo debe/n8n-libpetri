@@ -2,7 +2,7 @@
  * The waiting slots of n8n's loop: `IRunExecutionData.executionData.waitingExecution` and
  * its sources, as `addNodeToBeExecuted` (`workflow-execute.ts:426-608`) and the waiting-node
  * pass (`stack-scheduler.ts:511-516`) read and write them. Line numbers are
- * of those n8n files at the pinned commit `441970b`; `stack-reference.ts` is the port.
+ * of those n8n files at the pinned release `n8n@2.41.3`; `stack-reference.ts` is the port.
  */
 import type { IExecuteData, INode } from 'n8n-workflow';
 import type { Arrival, ReferenceExecutionState } from './state.js';

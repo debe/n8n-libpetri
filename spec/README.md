@@ -1,6 +1,6 @@
 # Requirement mapping
 
-This table maps n8n execution concepts at commit `441970b` to the libpetri primitives and
+This table maps n8n execution concepts at the pinned release `n8n@2.41.3` to the libpetri primitives and
 requirements used by the implementation. It is a traceability index, not a second
 architecture document.
 

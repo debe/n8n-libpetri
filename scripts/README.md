@@ -7,6 +7,8 @@ ignored `conformance-results/` directory.
 |---|---|
 | `bootstrap-n8n.sh` | Fetch, install, build and test the pinned unpatched n8n commit. |
 | `verify-patch.sh` | Reset the patch scope, apply both integration patches and optionally build it. |
+| `check-n8n-drift.sh` | Read-only: dry-run the patches against the pin, `stable`, `beta`, the newest release and master, and list what touched the seam or engine v2 since the pin. |
+| `n8n-pin.sh` | The pin (`N8N_TAG`, `N8N_COMMIT`), sourced by the three scripts above. |
 | `run-conformance.sh` | Run selected n8n suites under the legacy or Petri scheduler and compare junit results. |
 | `testbed/` | Boot the real n8n editor with the Petri scheduler installed, seed two demo workflows, and compare both engines in a live server. See [`testbed/README.md`](testbed/README.md). |
 
@@ -22,7 +24,7 @@ scripts/bootstrap-n8n.sh
 The default run:
 
 1. creates a shallow checkout at
-   `441970b211d13a3ce547916b2b8ee93677b620e9` in `.n8n/`;
+   the pinned release (`scripts/n8n-pin.sh`, currently `n8n@2.41.3`) in `.n8n/`;
 2. resolves the pnpm version from n8n's `packageManager` field through corepack;
 3. installs the workspace closure of `n8n-nodes-base` plus the repository root;
 4. builds that closure through turbo;
@@ -77,6 +79,18 @@ scripts/bootstrap-n8n.sh --scope=cli --full-install
 A warm full bootstrap takes roughly 90 seconds with a cold turbo cache. An unchanged rerun
 takes about 20 seconds; a test-only rerun about 14 seconds on the recorded machine. Treat
 these as operational estimates, not benchmarks.
+
+## Drift check
+
+```bash
+scripts/check-n8n-drift.sh             # fetches tags and master first
+scripts/check-n8n-drift.sh --no-fetch
+```
+
+Each ref is read into a throwaway index (`GIT_INDEX_FILE` in a temp dir) and the patches are
+applied to it in order, so the checkout, `HEAD` and the working tree are never touched. It exits
+1 when any ref does not apply. A re-pin starts here: move `scripts/n8n-pin.sh`, rebase the
+patches as `patches/n8n/README.md` describes, then bootstrap and run the conformance legs.
 
 ## Patch verification
 

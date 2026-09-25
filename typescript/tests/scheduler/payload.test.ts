@@ -8,7 +8,7 @@
  * `:786-800`). Above k = 1 two consumers of one output run at the same time, so the question
  * is what either of them may *write* through that shared reference.
  *
- * The answer at n8n `441970b` is: nothing. `addPairedItemLineage`
+ * The answer at `n8n@2.41.3` is: nothing. `addPairedItemLineage`
  * (`workflow-execute.ts:1742-1782`) does not stamp `pairedItem` in place — it `map`s to a new
  * array of `{ ...item, pairedItem }` shallow copies and `stack-scheduler.ts:65` assigns that
  * to `executionData.data`, so every activation reads and writes its own item objects.

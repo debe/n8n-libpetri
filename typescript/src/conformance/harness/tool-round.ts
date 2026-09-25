@@ -1,6 +1,6 @@
 /**
  * An agent's tool round as the `FakeHost` mirror plans it: the stack entries `handleRequest`
- * (`requests-response.ts:238` at n8n `441970b`) builds for an agent's `EngineRequest`, and the
+ * (`requests-response.ts:238` at `n8n@2.41.3`) builds for an agent's `EngineRequest`, and the
  * slots that plan reserves (`tool-slots.ts`). Pure over its arguments; `FakeHost` records the
  * call and applies the writes.
  */

@@ -1,5 +1,5 @@
 /**
- * The `pairedItem` bookkeeping `WorkflowExecute` does around a node run (n8n `441970b`): the
+ * The `pairedItem` bookkeeping `WorkflowExecute` does around a node run (`n8n@2.41.3`): the
  * lineage stamped on a node's input, the pairing of its output items, and the one item
  * `alwaysOutputData` puts into an empty output. `FakeHost` records each call and delegates
  * here.

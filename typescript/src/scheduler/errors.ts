@@ -31,7 +31,7 @@ export function asExecutionError(error: unknown): ExecutionBaseError {
 
 /**
  * n8n's error for `$('Y')` on a node that has not run (`workflow-data-proxy.ts`, line 496
- * at `441970b`: an `ExpressionError` with the `messageTemplate` below). Raised before
+ * at `n8n@2.41.3`: an `ExpressionError` with the `messageTemplate` below). Raised before
  * `runNode` when the running token came through an `X_start_unmet` twin (README
  * "Expression references"), so the node fails under its own `onError` policy exactly as it
  * would have failed inside the expression.

@@ -59,21 +59,24 @@ npm run build
 
 ### Pinned n8n
 
-Commit: `441970b211d13a3ce547916b2b8ee93677b620e9`.
+Release `n8n@2.41.3`, commit `7f7a8ac25b87db6c30e2b3651bb8c5d3b21cdb85` (`scripts/n8n-pin.sh`).
+Until 2026-09-25 the pin was master `441970b`. The move is measured in
+[`conformance-2.41.3.md`](conformance-2.41.3.md).
 
 | Surface | Legacy | Petri | Interpretation |
 |---|---:|---:|---|
-| execution-engine | 1,657/1,657 | 1,653/1,657 | 4 classified regressions |
-| core | 2,124/2,124 | 2,120/2,124 | Same 4 regressions |
-| workflow | 9,603/9,603 | Patch-neutral | Scheduler is not entered |
-| cli | 20,328/20,328 | 20,328/20,328 | Registered, never entered |
+| execution-engine | 1,715/1,715 | 1,711/1,715 | 41/45 loop-driving; 4 classified regressions |
+| core | 2,198/2,198 | 2,194/2,198 | Same 4 regressions |
+| workflow | 9,783 (2 skipped) | Patch-neutral | Scheduler is not entered |
+| cli | 23,108; no reproducible failure (2 runs, 2 unrelated flakes) | 23,108/23,108 | Registered, never entered |
 
 Three exercise recorded semantic differences: stuck-join handling and OR/join ordering. The
 fourth is an `EngineRequest` naming a node with no `ai_tool` connection to its agent
-(divergence #22), which only a hand-built request can produce. The broader run covered 32,055
+(divergence #22), which only a hand-built request can produce. The broader run covered 35,089
 cases without finding another failure class.
 
-The exact case matrix is in [`conformance-final.md`](conformance-final.md). Do not infer
+The exact case matrix at this pin is in [`conformance-2.41.3.md`](conformance-2.41.3.md); the
+M4 report at `441970b` is [`conformance-final.md`](conformance-final.md). Do not infer
 full n8n compatibility from the summary table.
 
 The `cli` row still reads "registered, never entered", and that is still true *of that suite*:

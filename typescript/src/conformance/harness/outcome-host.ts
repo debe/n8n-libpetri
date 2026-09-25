@@ -1,6 +1,6 @@
 /**
  * The members of the `FakeHost` mirror the loop calls once a node has run
- * (`stack-scheduler.ts:190-267` at n8n `441970b`): pairing its output items, reporting and
+ * (`stack-scheduler.ts:190-267` at `n8n@2.41.3`): pairing its output items, reporting and
  * handling its failure, and recording its task. Each mirrors its `workflow-execute.ts`
  * namesake; `FakeHost` is the whole host.
  */

@@ -21,7 +21,8 @@
 # Env:   N8N_DIR (default <repo>/.n8n), PATCH_DIR (default <repo>/patches/n8n)
 set -euo pipefail
 
-N8N_COMMIT="441970b211d13a3ce547916b2b8ee93677b620e9"
+# shellcheck source=n8n-pin.sh
+. "$(dirname "${BASH_SOURCE[0]}")/n8n-pin.sh"
 # Paths the patches touch; only these are reset, node_modules/dist/.turbo are never touched.
 PATCH_SCOPE=(packages/core/src)
 
@@ -58,7 +59,7 @@ patches=("$PATCH_DIR"/*.patch)
 shopt -u nullglob
 [ ${#patches[@]} -gt 0 ] || die "no patches in $PATCH_DIR"
 
-log "resetting ${PATCH_SCOPE[*]} in $N8N_DIR to $N8N_COMMIT"
+log "resetting ${PATCH_SCOPE[*]} in $N8N_DIR to $N8N_TAG ($N8N_COMMIT)"
 reset_scope
 if ! git -C "$N8N_DIR" diff --quiet HEAD -- ; then
   log "warning: tracked files outside ${PATCH_SCOPE[*]} are modified in $N8N_DIR; they are left alone"
@@ -69,7 +70,7 @@ for p in "${patches[@]}"; do
   # git apply reads format-patch output (mail header and signature are skipped).
   if ! check=$(git -C "$N8N_DIR" apply --check "$p" 2>&1); then
     printf '%s\n' "$check" >&2
-    die "$name does not apply to $N8N_COMMIT (drift)"
+    die "$name does not apply to $N8N_TAG ($N8N_COMMIT) (drift)"
   fi
   git -C "$N8N_DIR" apply "$p"
   log "applied $name: $(grep -c '^diff --git' "$p") file(s)"

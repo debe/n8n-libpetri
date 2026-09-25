@@ -1,6 +1,6 @@
 /**
  * The try loop of n8n's scheduler (`stack-scheduler.ts:102-212` at the pinned commit
- * `441970b`): run one activation's node, up to its retry count. `stack-reference.ts` is the
+ * `n8n@2.41.3`): run one activation's node, up to its retry count. `stack-reference.ts` is the
  * loop around it; line numbers are of that n8n file.
  */
 import type {

@@ -1,7 +1,7 @@
 /**
  * The junit reader against hand-written documents covering the XML subset vitest emits,
  * and against the real unpatched baseline (`fixtures/baseline.junit.xml`, produced by
- * `scripts/bootstrap-n8n.sh` on n8n `441970b`).
+ * `scripts/bootstrap-n8n.sh` on `n8n@2.41.3`).
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -132,18 +132,18 @@ noise
   });
 });
 
-describe('the real baseline (n8n 441970b, unpatched)', () => {
+describe('the real baseline (n8n@2.41.3, unpatched)', () => {
   const report = parseJunit(readFileSync(FIXTURE, 'utf8'));
   const cases = allCases(report);
 
-  it('has 75 files and 1657 cases, none failed or skipped', () => {
+  it('has 75 files and 1715 cases, none failed or skipped', () => {
     expect(report.suites).toHaveLength(75);
-    expect(cases).toHaveLength(1657);
-    expect(report.tests).toBe(1657);
+    expect(cases).toHaveLength(1715);
+    expect(report.tests).toBe(1715);
     expect(report.failures).toBe(0);
     expect(report.errors).toBe(0);
     expect(cases.filter((c) => c.status !== 'pass')).toEqual([]);
-    expect(report.suites.reduce((a, s) => a + s.tests, 0)).toBe(1657);
+    expect(report.suites.reduce((a, s) => a + s.tests, 0)).toBe(1715);
     expect(report.suites.every((s) => s.cases.length === s.tests)).toBe(true);
   });
 
@@ -153,13 +153,13 @@ describe('the real baseline (n8n 441970b, unpatched)', () => {
     expect(new Set(report.suites.map((s) => s.name)).size).toBe(75);
   });
 
-  it('holds the four workflow-execute files with 208 cases', () => {
+  it('holds the four workflow-execute files with 209 cases', () => {
     const we = report.suites.filter((s) => /workflow-execute/.test(s.name));
     expect(we.map((s) => [s.name.replace('src/execution-engine/__tests__/', ''), s.tests])).toEqual([
       ['workflow-execute-node-error-reporting.test.ts', 16],
       ['workflow-execute-process-process-run-execution-data.test.ts', 21],
       ['workflow-execute-run-node.test.ts', 46],
-      ['workflow-execute.test.ts', 125],
+      ['workflow-execute.test.ts', 126],
     ]);
   });
 
@@ -169,9 +169,9 @@ describe('the real baseline (n8n 441970b, unpatched)', () => {
     expect(cases.find((c) => c.name === 'WorkflowExecute > v1 execution order > should run node twice when it has two input connections')).toBeDefined();
   });
 
-  it('keys 1657 cases uniquely, numbering the six repeated names', () => {
+  it('keys 1715 cases uniquely, numbering the six repeated names', () => {
     const keys = caseKeys(cases);
-    expect(keys.size).toBe(1657);
+    expect(keys.size).toBe(1715);
     const repeats = [...keys.keys()].filter((k) => /#\d+$/.test(k));
     expect(repeats).toHaveLength(6);
     expect(repeats.every((k) => k.endsWith('#2'))).toBe(true);

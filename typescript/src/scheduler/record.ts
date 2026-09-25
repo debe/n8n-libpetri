@@ -1,5 +1,5 @@
 /**
- * The recording path of one attempt (`stack-scheduler.ts` lines 193–268 at `441970b`, patch
+ * The recording path of one attempt (`stack-scheduler.ts` lines 193–268 at `n8n@2.41.3`, patch
  * 0001): the success post-processing, then the after-loop recording that writes the task data,
  * decides the branch and runs `nodeExecuteAfter`. It is the end of one n8n loop iteration.
  */
