@@ -39,8 +39,16 @@ What v2 leaves out or does differently from v1, each read in the source:
 - A failed step fails the whole execution. `onError: continueRegularOutput` passes items
   through inside the step executor. `continueErrorOutput` is rejected.
 - There is **no retry**: `api.types.ts` says "has no retry mechanism".
-- `ai_tool` and every other non-`main` connection is rejected by the converter. Sub-workflow
-  and `wait` step types throw `UnimplementedError`.
+- **Agents are accepted, and then fail at their first tool call.** The converter roots the
+  graph at the fired trigger through `main` connections only (`rootAt`). Sub-nodes such as
+  models, tools and memory are only ever the *source* of `ai_*` connections, so they are dropped
+  before the connection-type check runs, and the agent becomes an ordinary `v1-node` step. When
+  it returns a tool call, `V1StepExecutor` throws `EngineRequestNotSupportedError`
+  (`v1-step-executor.ts`), and `continueOnFail` cannot catch it. v2 has no counterpart yet to
+  ADR 0008's round. (This corrects the first reading of the converter, which said it rejects
+  `ai_tool`: `UnsupportedConnectionTypeError` fires only for an `ai_*` connection leaving a node
+  the trigger reaches through `main`.) Sub-workflow and `wait` step types throw
+  `UnimplementedError`.
 - The only loop is Split In Batches v3 with a literal batch size. A cycle without a batch node
   is rejected (`graph/loops.ts`, `validate-executable-graph.ts`).
 - A v1 node runs through `V1StepExecutor` (`node-engine-compatibility`), which calls
@@ -153,5 +161,37 @@ Playwright `engine-v2:e2e` parity project. `verify-patch.sh`'s scope grows to
 
 ## Evidence
 
-None yet. This ADR is a plan. It is accepted when §2's differential runs green on the corpus
-and the stateless spike answers yes or no.
+**The reference side of §2 exists: `tasks/spike-v2-settlement.mts` (2026-09-25).** It runs the
+event loop `StepSettledHandler` runs, on n8n's own compiled `decideSuccessors`, `decisionKeys`,
+`countExpectedSettledSteps`, `deriveLoops`, `exitSourcesInto` and `validateExecutableGraph`,
+loaded from the pinned checkout. It uses no database and no queue, and the next event is drawn
+at random from every pending `step:ready` and `step:settled`. The v2 core is identical at
+`n8n@2.41.3` and master `c88df6f9c7`, so the release pin serves the v2 work too.
+
+Measured on the 200-template corpus plus the 11 testbed workflows, one graph per trigger that
+can fire, 20 behaviours × 20 orders each:
+
+| | |
+|---|---:|
+| (workflow, fired trigger) entries | 310 |
+| accepted by converter + `validateExecutableGraph` | 209 (20 with a batch loop) |
+| of those, in a workflow with an `ai_tool` connection | 85, which fail at the first tool call |
+| randomized runs | 83,600 |
+| drained without finishing, finished with a queued step, or settled ≠ expected | **0** |
+| failure-free behaviours whose fates differ between orders | **0** |
+
+So on this corpus n8n's settlement rule is confluent and completes, as `settlement.ts` claims.
+It is a sampled result, not a proof. That is precisely the gap the formal model in §2 would
+close, and it is the property test §4 offers.
+
+What the converter refuses, by kind, over the 101 rejected entries:
+
+- 32: more than one edge into input slot 0 (converging branches). v1 and our net handle this
+  pattern (ADR 0003's arm form).
+- 29: a cycle without a batch node, or other loop shapes.
+- 23: `onError: continueErrorOutput`.
+- 9: a Merge mode that needs every input.
+- 8: other shapes.
+
+Still open: the net side of the differential (the profile), and the stateless-planner spike.
+

@@ -926,8 +926,15 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
 The plan is in [`docs/adr/0012-engine-v2-target.md`](../docs/adr/0012-engine-v2-target.md).
 Model first, seam second, upstream alongside both.
 
-- [ ] **Pin a master SHA for v2 work** next to the release pin: v2 moves too fast for a
-      release tag, and suspend/resume exists only on master. Read at `c88df6f9c7` so far
+- [x] ~~Pin a master SHA for v2 work~~: not needed. The v2 core (`settlement.ts`,
+      `completion.ts`, `iteration-mapping.ts`, `graph/`) is identical at `n8n@2.41.3` and master
+      `c88df6f9c7`. Only suspend/resume is master-only, and the drift script lists engine commits
+- [x] **Reference side of the differential**: `tasks/spike-v2-settlement.mts` drives n8n's own
+      settlement code. 310 entries, 209 accepted, 83,600 randomized runs, 0 non-confluent, 0
+      unfinished (ADR 0012, Evidence)
+- [ ] **v2 has no tool-call round**: the converter accepts agents (sub-nodes are dropped by
+      `rootAt`), and `V1StepExecutor` throws `EngineRequestNotSupportedError` at the first tool
+      call. That affects 85 of the 209 accepted entries. ADR 0008's round is the model to offer
 - [ ] **Compiler profile `engineV2`**: no ordering priorities, no retry or error-output gadgets,
       whole-execution failure sink, batch loop as the only admitted cycle. It rejects exactly what
       `V1WorkflowConverter` + `validateExecutableGraph` reject
