@@ -978,6 +978,19 @@ Model first, seam second, upstream alongside both.
       a batch step. Only the unit tests and the exhaustive spike cover that case
 - [ ] **Public surface**: decide whether `decodeStepRows`, `planFromMarking`, the reference and
       the differential are exported. None is today
+- [ ] **Next libpetri release (libpetri-87 changes, announced 2026-09-28, unreleased).**
+      Checked against 4502c97:
+      - timeout forwards (IO-014 AC6): our only one, `gadget/run.ts:66`, forwards from
+        `one(att.running)`, so the count stays 1;
+      - `all()`/`atLeast()` timeout forwards: we have none;
+      - the three-or-more-place MutualExclusion change: we use the two-place API;
+      - deadline reaping (TIME-013): we use no `deadline()`/`window()` timing, only `delayed()`.
+        Asked upstream to confirm that `Out.timeout` action timeouts are outside it.
+      One real item: a violation at the initial marking now comes with trace `[]`, and
+      `decodeCounterexample` returns `null` for that, so the witness is lost. Asked upstream
+      whether the empty trace will carry the initial state; otherwise special-case it here. On
+      release, rerun the suite, the survey, the forced SMT fallback (279 checks) and conformance
+      at k = 1/2/4, and record anything that moves in `docs/verification.md`
 - [ ] **libpetri state-space cache** (VER-017 amendment, unreleased): when it ships, wire it
       into `routing/smt.ts` `verifierFor` and `collect-invariants.ts`. Measure it on the
       forced-fallback testbed run (279 checks, about 890 s), not on the survey, which runs with
