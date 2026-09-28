@@ -986,11 +986,16 @@ Model first, seam second, upstream alongside both.
       - the three-or-more-place MutualExclusion change: we use the two-place API;
       - deadline reaping (TIME-013): we use no `deadline()`/`window()` timing, only `delayed()`.
         Asked upstream to confirm that `Out.timeout` action timeouts are outside it.
-      One real item: a violation at the initial marking now comes with trace `[]`, and
-      `decodeCounterexample` returns `null` for that, so the witness is lost. Asked upstream
-      whether the empty trace will carry the initial state; otherwise special-case it here. On
-      release, rerun the suite, the survey, the forced SMT fallback (279 checks) and conformance
-      at k = 1/2/4, and record anything that moves in `docs/verification.md`
+      Upstream answered both questions (2026-09-28) in our favour, and nothing needs to change
+      here:
+      - an initially violating net returns transitions `[]` and trace `[M0]`, confirmed, so
+        `decodeCounterexample` still prints the violating marking. The coloured Route A encoding
+        does not synthesise `[M0]` yet, but we compile no `matchSpec`;
+      - reapability is the transition's own `deadline`/`window` timing only. `delayed()` and
+        every `Out.timeout` branch are not reapable, so our verdicts and SMT scripts do not
+        change.
+      On release, rerun the suite, the survey, the forced SMT fallback (279 checks) and
+      conformance at k = 1/2/4, and record anything that moves in `docs/verification.md`
 - [ ] **libpetri state-space cache** (VER-017 amendment, unreleased): when it ships, wire it
       into `routing/smt.ts` `verifierFor` and `collect-invariants.ts`. Measure it on the
       forced-fallback testbed run (279 checks, about 890 s), not on the survey, which runs with
