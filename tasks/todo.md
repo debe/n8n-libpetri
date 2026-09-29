@@ -1000,15 +1000,19 @@ Model first, seam second, upstream alongside both.
       linked working-tree build (b46a486b49fb on f04d128, so not comparable with registry
       numbers).** libpetri applies `splitInFlight` only inside `SmtVerifier`. Our primary route
       calls `StateClassGraph.build` directly (`verify/state-space/build.ts`), so it would stay
-      atomic and say nothing. We asked upstream to either apply the split in `build` or document
-      that direct callers must split first. Probe with the split applied on our route:
+      atomic and say nothing. Upstream decided (2026-09-29): `build` stays atomic, and a
+      direct caller **must call `splitInFlight(net)` first**. VER-010 and the `build` docs will
+      say so. `refused` means the graph cannot follow the executor, so treat it as `unknown`. Probe with the split applied on our route:
       - survey: 197/199 workflows with identical verdicts;
       - 2 workflows truncated both ways moved from `violated` to `unknown` (the witness went
         past the cap);
       - 1 timeout under load, not confirmed;
       - class counts on closed graphs: median 1.12×, maximum 1.37×;
       - the testbed nets with closed graphs have identical verdicts.
-      On release: apply the split on the graph route (or accept that `build` does it), re-pin the
+      On release: in `buildStateClassGraph` (`verify/state-space/build.ts`), call
+      `splitInFlight` before `StateClassGraph.build`, with `refused` becoming `unknown` with a
+      named reason. Make sure the `inflight:` places are known to the classification (the probe
+      showed they never rest, because `complete:` is immediate). Then re-pin the
       20 class-count tests, and update the spike's unit-semiflow assertion (the invariant gains
       `inflight:X_run`). Record all of it in `docs/verification.md`
 - [ ] **libpetri state-space cache** (VER-017 amendment, unreleased): when it ships, wire it
