@@ -996,6 +996,21 @@ Model first, seam second, upstream alongside both.
         change.
       On release, rerun the suite, the survey, the forced SMT fallback (279 checks) and
       conformance at k = 1/2/4, and record anything that moves in `docs/verification.md`
+- [ ] **libpetri round 2: in-flight split (VER-004), unreleased, measured 2026-09-29 on a
+      linked working-tree build (b46a486b49fb on f04d128, so not comparable with registry
+      numbers).** libpetri applies `splitInFlight` only inside `SmtVerifier`. Our primary route
+      calls `StateClassGraph.build` directly (`verify/state-space/build.ts`), so it would stay
+      atomic and say nothing. We asked upstream to either apply the split in `build` or document
+      that direct callers must split first. Probe with the split applied on our route:
+      - survey: 197/199 workflows with identical verdicts;
+      - 2 workflows truncated both ways moved from `violated` to `unknown` (the witness went
+        past the cap);
+      - 1 timeout under load, not confirmed;
+      - class counts on closed graphs: median 1.12×, maximum 1.37×;
+      - the testbed nets with closed graphs have identical verdicts.
+      On release: apply the split on the graph route (or accept that `build` does it), re-pin the
+      20 class-count tests, and update the spike's unit-semiflow assertion (the invariant gains
+      `inflight:X_run`). Record all of it in `docs/verification.md`
 - [ ] **libpetri state-space cache** (VER-017 amendment, unreleased): when it ships, wire it
       into `routing/smt.ts` `verifierFor` and `collect-invariants.ts`. Measure it on the
       forced-fallback testbed run (279 checks, about 890 s), not on the survey, which runs with
