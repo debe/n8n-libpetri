@@ -61,20 +61,23 @@ npm run build
 
 ### Pinned n8n
 
-Release `n8n@2.41.3`, commit `7f7a8ac25b87db6c30e2b3651bb8c5d3b21cdb85` (`scripts/n8n-pin.sh`).
-Until 2026-09-25 the pin was master `441970b`. The move is measured in
-[`conformance-2.41.3.md`](conformance-2.41.3.md).
+n8n master `944afe5` (2026-10-02), commit `944afe5c889f130ac07c1831dd88fa7c7103a5c1`
+(`scripts/n8n-pin.sh`). Engine v2 is the primary target and v1 is frozen (ADR 0013). Earlier
+pins were the release `n8n@2.41.3` ([`conformance-2.41.3.md`](conformance-2.41.3.md)) and
+master `441970b`. The resync is measured in [`conformance-master.md`](conformance-master.md).
+
+The frozen v1 path, as a regression check:
 
 | Surface | Legacy | Petri | Interpretation |
 |---|---:|---:|---|
-| execution-engine | 1,715/1,715 | 1,711/1,715 | 41/45 loop-driving; 4 classified regressions |
-| core | 2,198/2,198 | 2,194/2,198 | Same 4 regressions |
-| workflow | 9,783 (2 skipped) | Patch-neutral | Scheduler is not entered |
-| cli | 23,108; no reproducible failure (2 runs, 2 unrelated flakes) | 23,108/23,108 | Registered, never entered |
+| execution-engine | 1,756/1,756 | 1,752/1,756 | 41/45 loop-driving; the same 4 classified regressions |
+| core | 2,258/2,258 | 2,254/2,258 | The same 4 regressions |
+| workflow | 10,662 (2 skipped) | Patch-neutral | Scheduler is not entered |
+| cli | 25,297 (1 baseline flake) | 25,296/25,297 | Registered, never entered |
 
 Three exercise recorded semantic differences: stuck-join handling and OR/join ordering. The
 fourth is an `EngineRequest` naming a node with no `ai_tool` connection to its agent
-(divergence #22), which only a hand-built request can produce. The broader run covered 35,089
+(divergence #22), which only a hand-built request can produce. The broader run covered 38,217
 cases without finding another failure class.
 
 The exact case matrix at this pin is in [`conformance-2.41.3.md`](conformance-2.41.3.md); the

@@ -1,6 +1,6 @@
 /**
  * An `onFailure` chain driven through `FakeHost`, the mirror of `WorkflowExecute` at n8n
- * `n8n@2.41.3` (ADR 0009).
+ * n8n master `944afe5` (ADR 0009).
  *
  * The retry suite beside this one is the baseline: `retryOnFail` is the all-`retry` chain, and
  * the first case here is deliberately its twin so the two can be read together. What the chain

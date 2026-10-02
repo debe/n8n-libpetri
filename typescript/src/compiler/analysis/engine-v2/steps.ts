@@ -1,5 +1,5 @@
 /**
- * The engine v2 step types that have no executor at the pin `n8n@2.41.3`: `wait` and
+ * The engine v2 step types that have no executor at the pin, n8n master `944afe5`: `wait` and
  * `subworkflow`. `StepReadyHandler.executorFor` (`@n8n/engine` `execution/step-ready-handler.ts`)
  * runs `v1-node` steps and throws `UnimplementedError` for anything else but `batch`, before the
  * step's `try`, so such a step is never settled: it stays `running`. The compiler owns their node

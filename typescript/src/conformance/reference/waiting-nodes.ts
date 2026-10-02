@@ -1,6 +1,6 @@
 /**
  * The waiting-node pass of n8n's scheduler (`stack-scheduler.ts:355-518` at the pinned
- * release `n8n@2.41.3`) — R6: once the stack is empty, run the multi-input nodes that are still
+ * the pin, n8n master `944afe5`) — R6: once the stack is empty, run the multi-input nodes that are still
  * waiting with whatever data they have, one at a time. `stack-reference.ts` is the loop that
  * calls it; line numbers are of that n8n file.
  */

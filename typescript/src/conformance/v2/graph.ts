@@ -7,7 +7,7 @@
  * and the port of those steps (stage 2, step 13) is measured against it rather than trusted.
  *
  * The graph types are local mirrors of `@n8n/engine` `graph/workflow-graph.ts` (`GraphNode`,
- * `GraphEdge`, `WorkflowGraph`) at the pin `n8n@2.41.3`: `src/` never imports `.n8n`
+ * `GraphEdge`, `WorkflowGraph`) at the pin, n8n master `944afe5`: `src/` never imports `.n8n`
  * (decision 15), and a structural mirror lets a `tasks/` script pass n8n's own graph straight in.
  *
  * What the description keeps and what it drops:
@@ -216,7 +216,7 @@ function describe(node: V2Node, slots: SlotUse, index: number): { node: NodeDesc
     default: {
       // A step type added after the pin reaches here from a `tasks/` script passing n8n's graph.
       const unknown: never = node.type;
-      throw new V2GraphError(`graphToDescription: node '${node.name}' has step type '${String(unknown)}', which n8n@2.41.3 does not have`);
+      throw new V2GraphError(`graphToDescription: node '${node.name}' has step type '${String(unknown)}', which the pinned n8n (master 944afe5) does not have`);
     }
   }
 }

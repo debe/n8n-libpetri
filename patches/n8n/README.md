@@ -1,7 +1,7 @@
 # n8n integration patches
 
-Two `git format-patch` files add a scheduler seam to the n8n release `n8n@2.41.3`
-(`7f7a8ac25b87db6c30e2b3651bb8c5d3b21cdb85`, set in `scripts/n8n-pin.sh`). They do not add Petri-net code to n8n and do
+Two `git format-patch` files add a scheduler seam to n8n master `944afe5`
+(`944afe5c889f130ac07c1831dd88fa7c7103a5c1`, set in `scripts/n8n-pin.sh`). They do not add Petri-net code to n8n and do
 not modify tests.
 
 | Patch | Change | Intended behaviour change |
@@ -112,7 +112,7 @@ git add packages/core/src/execution-engine/scheduler-registry.ts \
 git commit
 
 git format-patch -2 -o ../patches/n8n
-git reset 7f7a8ac25b87db6c30e2b3651bb8c5d3b21cdb85   # N8N_COMMIT from scripts/n8n-pin.sh
+git reset 944afe5c889f130ac07c1831dd88fa7c7103a5c1   # N8N_COMMIT from scripts/n8n-pin.sh
 cd ..
 ```
 
@@ -147,4 +147,9 @@ extracted loop: `stack-scheduler.ts` must still match what upstream's `workflow-
 has in its loop at the new pin.
 
 History: the patches were first written against master `441970b` (2026-09-04). On 2026-09-25
-they moved to `n8n@2.41.3`, and the rebase changed only offsets.
+they moved to `n8n@2.41.3`, and on 2026-10-02 to master `944afe5` (ADR 0013). Both rebases
+changed only offsets.
+
+**The pin is a master commit, and release tags are not ancestors of master.** To move
+between them, rebase only the two patch commits: `git rebase --onto <new pin> HEAD~2`. A plain
+`git rebase <new pin>` from a release-branch pin replays the release branch's own commits.

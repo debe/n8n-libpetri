@@ -2,7 +2,7 @@
  * Every place n8n refuses a workflow on its way to an engine v2 graph, and the `CompileError`
  * code the `engineV2` profile refuses it with (`tasks/v2-profile-plan.md` decision 11, step 13).
  *
- * The throw sites are those of the pin `n8n@2.41.3`:
+ * The throw sites are those of the pin, n8n master `944afe5`:
  * - `v1-workflow-converter.ts` (`@n8n/node-engine-compatibility` `src/`): `V1WorkflowConverter`
  *   and `toBatchConfig`, ported in `root.ts` and `nodes.ts`;
  * - `loops.ts` (`@n8n/engine` `src/graph/`): `validateLoops`, ported in `shape.ts`;

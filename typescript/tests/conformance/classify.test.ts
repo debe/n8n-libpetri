@@ -135,7 +135,7 @@ describe('LOOP_DRIVING_PATTERNS', () => {
 
   it('never marks a case outside the loop-driving files', () => {
     const outside = cases.filter((c) => !LOOP_DRIVING_FILE.test(c.file));
-    expect(outside.length).toBe(1715 - 209 - 8);
+    expect(outside.length).toBe(1756 - 209 - 8);
     expect(outside.some((c) => classifyCase(c).loopDriving)).toBe(false);
     // The name would match; the file rule is what keeps it out.
     expect(classifyCase({ file: 'src/execution-engine/__tests__/webhook-context.test.ts', name: 'webhook responseNode branch ordering > x' }))

@@ -3,7 +3,7 @@
  * (`tasks/v2-profile-plan.md` steps 4 and 13; `analysis/engine-v2/root.ts`, `nodes.ts`,
  * `shape.ts`, each site mapped in `refusals.ts`). Each case names the n8n throw site it mirrors;
  * the message cites it too, so a refusal can be traced back to n8n's own rule. Throw sites, at
- * the pin `n8n@2.41.3`:
+ * the pin, n8n master `944afe5`:
  * - `v1-workflow-converter.ts` (`@n8n/node-engine-compatibility`): `resolveFiredTrigger`,
  *   `toGraphNode`, `assertSupportedMergeMode`, `toBatchConfig`, `validateSupportedConnectionType`,
  *   `markBackEdges` / `resolveSingleBatchEntry`;

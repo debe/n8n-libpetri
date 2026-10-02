@@ -2,7 +2,7 @@
  * The reference side of the engine v2 differential (`tasks/v2-profile-plan.md` decision 13 and 15,
  * step 9; ADR 0012 §2): the event loop engine v2's `StepSettledHandler` and `StepReadyHandler` run
  * (`packages/@n8n/engine/src/execution/step-settled-handler.ts`, `step-ready-handler.ts` at the
- * pin `n8n@2.41.3`), with no database and no queue, and the answer R(S) the net's planner is
+ * pin n8n master `944afe5`), with no database and no queue, and the answer R(S) the net's planner is
  * compared with.
  *
  * **Nothing here decides.** Every settlement decision is n8n's own code, handed in as a

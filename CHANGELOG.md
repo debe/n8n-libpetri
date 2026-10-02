@@ -32,6 +32,16 @@ All notable changes to this project are documented here. The format follows
   `SettlementPolicy` seam second, and the upstream offer leads with the differential.
 
 ### Changed
+- **The pin is now n8n master `944afe5` (2026-10-02), and engine v2 is primary (ADR 0013).**
+  - v1 is frozen, not deleted.
+  - Patches 0001/0002 rebased with offset-only changes (`--onto`, since a release tag is not
+    an ancestor of master).
+  - Frozen v1 path: execution-engine and core both 41/45 loop-driving, the same four
+    regressions, legacy identical to baseline.
+  - Engine v2: decision core unchanged. Acceptance, differential and exhaustive check give
+    0 disagreements at master. The golden was re-recorded and only its version label moved.
+  - Measured in `docs/conformance-master.md`.
+
 - **libpetri `^7.0.0`** (was `^6.0.0`). 7.0.0 fixes a soundness bug in the structural
   deadlock shortcut [VER-020] that our whole-net `deadlockFree` fallback runs through. Measured
   against 6.0.0, nothing moved: survey, forced SMT fallback on the testbed workflows (279

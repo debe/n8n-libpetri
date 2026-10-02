@@ -1,7 +1,7 @@
 /**
  * Stage 2 of the engine v2 input (`tasks/v2-profile-plan.md` decision 10, step 13): the port of
  * `V1WorkflowConverter.convert` (`@n8n/node-engine-compatibility` `v1-workflow-converter.ts`,
- * at the pin `n8n@2.41.3`) onto a compiler description. Stage 1 compiles the graph n8n's own
+ * at the pin, n8n master `944afe5`) onto a compiler description. Stage 1 compiles the graph n8n's own
  * converter produced (`conformance/v2/graph.ts`); this builds the same graph from the workflow,
  * so a description from the live adapter or a JSON export compiles to the net n8n's graph
  * would — measured against n8n's converter on the template corpus by `tasks/v2-acceptance.mts`.

@@ -1,7 +1,7 @@
 /**
  * The port of `V1WorkflowConverter.convert` (`tasks/v2-profile-plan.md` step 13,
  * `analysis/engine-v2/root.ts`), function by function. Each case cites the n8n rule it is
- * written from, at the pin `n8n@2.41.3`:
+ * written from, at the pin, n8n master `944afe5`:
  * - `isTriggerNodeType` (`n8n-workflow` `node-helpers.ts`): a type in `TRIGGER_NODE_TYPES`, or one
  *   whose name contains `trigger` in any case;
  * - `resolveFiredTrigger`: the named node among the enabled ones, which must be a trigger
@@ -108,7 +108,7 @@ describe('dedupeEdges', () => {
   });
 
   // Review finding: n8n keys by node id with a `|` separator, so ids holding `|` collide. Measured
-  // against n8n@2.41.3: T, A (id 'x|y'), B ('z'), C ('x'), D ('y|z'); T -> A, T -> C, A -> B, C -> D
+  // against the pinned n8n: T, A (id 'x|y'), B ('z'), C ('x'), D ('y|z'); T -> A, T -> C, A -> B, C -> D
   // is accepted with edges T -> A, T -> C, C -> D — A -> B is lost, and B never runs.
   it('keys by node id with n8n\'s `|` separator, so ids holding `|` collide and the later edge stays', () => {
     const ids: Record<string, string> = { T: 't', A: 'x|y', B: 'z', C: 'x', D: 'y|z' };

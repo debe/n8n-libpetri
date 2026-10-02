@@ -24,7 +24,7 @@ scripts/bootstrap-n8n.sh
 The default run:
 
 1. creates a shallow checkout at
-   the pinned release (`scripts/n8n-pin.sh`, currently `n8n@2.41.3`) in `.n8n/`;
+   the pin (`scripts/n8n-pin.sh`, currently n8n master `944afe5`) in `.n8n/`;
 2. resolves the pnpm version from n8n's `packageManager` field through corepack;
 3. installs the workspace closure of `n8n-nodes-base` plus the repository root;
 4. builds that closure through turbo;

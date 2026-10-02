@@ -921,6 +921,20 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       the matrix types left the barrel and stay importable from their modules. The package is
       private, so nothing outside the repository is affected today
 
+### 9. Engine v2 primary (ADR 0013)
+
+- [x] Resync to n8n master `944afe5`: patches, baselines, frozen v1 conformance, and the v2
+      acceptance, differential and exhaustive checks (`docs/conformance-master.md`)
+- [ ] **(a)** Master's `waiting` step status and `cancelPendingSteps` (queued *and* waiting
+      cancelled) in the decoder, the planner, the reference loop and divergence row 31
+- [ ] **(b)** Make `engineV2` the default profile in `compile` and the verify CLI, with every
+      v1 consumer passing `profile: 'v1'` explicitly
+- [ ] **(c)** Seam patches 0003/0004 against master: extract a `SettlementPolicy`, then make it
+      injectable through `createEngineRuntime`. The gate is n8n's engine and compatibility tests
+- [ ] **(d)** A net-backed `SettlementPolicy` (`decodeStepRows` + `planFromMarking`)
+- [ ] **(e)** A live v2 testbed: n8n with `N8N_ENABLED_MODULES=engine-v2` and the policy
+      registered. It needs a Postgres for the data plane (`N8N_ENGINE_DATABASE_URL`)
+
 ### 8. Engine v2 (ADR 0012)
 
 The plan is in [`docs/adr/0012-engine-v2-target.md`](../docs/adr/0012-engine-v2-target.md).

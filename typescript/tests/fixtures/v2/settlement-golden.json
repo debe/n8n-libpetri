@@ -1,7 +1,7 @@
 {
   "format": 1,
   "stamp": {
-    "n8n": "n8n@2.41.3",
+    "n8n": "n8n@2.42.0",
     "dist": {
       "engine/dist/execution/settlement.js": "8b7fe1d317aad4502c2c5511f79b0e712f398722c3bf7cf4895fb05b53ce0a66",
       "engine/dist/execution/iteration-mapping.js": "b020437a1dc29c5e41d4adbb8e6e6c0d84d59f9bda5d9ef2594f1ef2a3f30af5",

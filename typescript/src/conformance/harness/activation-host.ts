@@ -1,6 +1,6 @@
 /**
  * The members of the `FakeHost` mirror the loop calls between popping an entry and running
- * its node (`stack-scheduler.ts:49-120` at `n8n@2.41.3`): the stop check, the task's start,
+ * its node (`stack-scheduler.ts:49-120` at n8n master `944afe5`): the stop check, the task's start,
  * the input's lineage, the run index, the filters, the retry parameters and the pinned
  * output. Each mirrors its `workflow-execute.ts` namesake; `FakeHost` is the whole host.
  */

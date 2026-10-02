@@ -1,7 +1,7 @@
 /**
  * The junit reader against hand-written documents covering the XML subset vitest emits,
  * and against the real unpatched baseline (`fixtures/baseline.junit.xml`, produced by
- * `scripts/bootstrap-n8n.sh` on `n8n@2.41.3`).
+ * `scripts/bootstrap-n8n.sh` on n8n master `944afe5`).
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -132,25 +132,25 @@ noise
   });
 });
 
-describe('the real baseline (n8n@2.41.3, unpatched)', () => {
+describe('the real baseline (n8n master@944afe5, unpatched)', () => {
   const report = parseJunit(readFileSync(FIXTURE, 'utf8'));
   const cases = allCases(report);
 
-  it('has 75 files and 1715 cases, none failed or skipped', () => {
-    expect(report.suites).toHaveLength(75);
-    expect(cases).toHaveLength(1715);
-    expect(report.tests).toBe(1715);
+  it('has 76 files and 1756 cases, none failed or skipped', () => {
+    expect(report.suites).toHaveLength(76);
+    expect(cases).toHaveLength(1756);
+    expect(report.tests).toBe(1756);
     expect(report.failures).toBe(0);
     expect(report.errors).toBe(0);
     expect(cases.filter((c) => c.status !== 'pass')).toEqual([]);
-    expect(report.suites.reduce((a, s) => a + s.tests, 0)).toBe(1715);
+    expect(report.suites.reduce((a, s) => a + s.tests, 0)).toBe(1756);
     expect(report.suites.every((s) => s.cases.length === s.tests)).toBe(true);
   });
 
   it('names every suite after its test file and every case after its file', () => {
     expect(report.suites.every((s) => /^src\/execution-engine\/.*\.test\.ts$/.test(s.name))).toBe(true);
     expect(report.suites.every((s) => s.cases.every((c) => c.file === s.name))).toBe(true);
-    expect(new Set(report.suites.map((s) => s.name)).size).toBe(75);
+    expect(new Set(report.suites.map((s) => s.name)).size).toBe(76);
   });
 
   it('holds the four workflow-execute files with 209 cases', () => {
@@ -169,9 +169,9 @@ describe('the real baseline (n8n@2.41.3, unpatched)', () => {
     expect(cases.find((c) => c.name === 'WorkflowExecute > v1 execution order > should run node twice when it has two input connections')).toBeDefined();
   });
 
-  it('keys 1715 cases uniquely, numbering the six repeated names', () => {
+  it('keys 1756 cases uniquely, numbering the six repeated names', () => {
     const keys = caseKeys(cases);
-    expect(keys.size).toBe(1715);
+    expect(keys.size).toBe(1756);
     const repeats = [...keys.keys()].filter((k) => /#\d+$/.test(k));
     expect(repeats).toHaveLength(6);
     expect(repeats.every((k) => k.endsWith('#2'))).toBe(true);

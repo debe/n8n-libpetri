@@ -14,6 +14,7 @@
 | [0010](0010-bounds-at-the-entry.md) | Bounds at the entry, not a global concurrency counter | **proposed** — nothing built; would supersede the budget half of 0004 and the k-safety half of 0006 |
 | [0011](0011-composition-theorem.md) | The composition theorem: per-gadget contracts to a whole-workflow claim | **proposed** — proof sketch, not mechanised; measured to cover 40.5% of the template corpus |
 | [0012](0012-engine-v2-target.md) | Engine v2 as a second target: model first, seam second | **proposed**: nothing built; plan for n8n's `packages/@n8n/engine` |
+| [0013](0013-engine-v2-primary.md) | Engine v2 is the primary target; v1 is frozen | accepted (2026-10-02) |
 
 Each ADR has Context / Decision / Consequences / Evidence; Evidence names the spike under
 `typescript/tests/spikes/` that pins the behaviour it rests on.
