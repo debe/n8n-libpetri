@@ -115,11 +115,12 @@ describe('verify CLI arguments', () => {
 
   it('maps the flags onto VerifyOptions', () => {
     const parsed = parseArgs([
-      'verify', 'wf.json', '--budget', '4', '--timeout', '5000', '--property', 'budget',
+      'verify', 'wf.json', '--profile', 'v1', '--budget', '4', '--timeout', '5000', '--property', 'budget',
       '--property', 'dead-nodes', '--mutex', 'A, B', '--no-semiflows', '--json', '--out', 'o.txt',
       '--start', 'T', '--node-types', 'types.json', '--quiet', '--strict',
     ]);
     expect(parsed.options).toEqual({
+      profile: 'v1',
       budget: 4,
       timeoutMs: 5000,
       properties: ['budget', 'dead-nodes'],
@@ -132,6 +133,32 @@ describe('verify CLI arguments', () => {
     expect(parseArgs(['wf.json']).strict).toBe(false);
   });
 
+  // ADR 0013 decision 2: the CLI's default profile is engineV2, and the options always state it.
+  it('defaults to --profile engineV2, states the profile it resolved, and takes --profile v1', () => {
+    expect(parseArgs(['wf.json']).options.profile).toBe('engineV2');
+    expect(parseArgs(['wf.json', '--profile', 'engineV2']).options.profile).toBe('engineV2');
+    expect(parseArgs(['wf.json', '--profile', 'v1']).options.profile).toBe('v1');
+    expect(USAGE).toContain('profile: engineV2 by default');
+  });
+
+  it('refuses the v1-only flags without --profile v1, naming the flag that fixes it', () => {
+    expect(() => parseArgs(['wf.json', '--budget', '2'])).toThrow(/--budget .*pass --profile v1/);
+    expect(() => parseArgs(['wf.json', '--start', 'T'])).toThrow(/--start .*--profile v1/);
+    expect(parseArgs(['wf.json', '--profile', 'v1', '--budget', '2', '--start', 'T']).options.budget).toBe(2);
+  });
+
+  // Review finding: a v1 command line with --mutex or --all-pairs used to land on engineV2, where
+  // the family is recorded not applicable, and exit 0 without --strict: a requested check that
+  // never ran. Refused like --budget, named profile or default.
+  it('refuses --mutex and --all-pairs under engineV2, named or by default, naming --profile v1', () => {
+    for (const named of [[], ['--profile', 'engineV2']]) {
+      expect(() => parseArgs(['wf.json', ...named, '--mutex', 'A,B'])).toThrow(/--mutex asks the v1 mutual-exclusion family, which is not ported to engine v2; pass --profile v1/);
+      expect(() => parseArgs(['wf.json', ...named, '--all-pairs'])).toThrow(/--all-pairs asks the v1 mutual-exclusion family.*pass --profile v1/);
+    }
+    expect(parseArgs(['wf.json', '--profile', 'v1', '--mutex', 'A,B']).options.mutualExclusion).toEqual([['A', 'B']]);
+    expect(parseArgs(['wf.json', '--profile', 'v1', '--all-pairs']).options.mutualExclusion).toBe('all-pairs');
+  });
+
   it('--smt-fallback picks the mode, and only the three names are modes', () => {
     // The escape hatch for the size ceiling: above it no SmtVerifier is constructed, because
     // the pipeline's heap exhaustion aborts the process instead of returning a verdict.
@@ -142,7 +169,7 @@ describe('verify CLI arguments', () => {
   });
 
   it('--all-pairs beats individual pairs', () => {
-    expect(parseArgs(['wf.json', '--all-pairs', '--mutex', 'A,B']).options.mutualExclusion).toBe('all-pairs');
+    expect(parseArgs(['wf.json', '--profile', 'v1', '--all-pairs', '--mutex', 'A,B']).options.mutualExclusion).toBe('all-pairs');
   });
 
   it('rejects bad input with a message and the usage line', async () => {
@@ -189,7 +216,7 @@ describeZ3('verify CLI runs', () => {
   it('prints the table and exits 0 on a workflow with no finding', { timeout: CASE_TIMEOUT_MS }, async () => {
     const captured = io({ 'wf.json': DIAMOND_JSON });
     const code = await runCli(
-      ['verify', 'wf.json', '--property', 'budget', '--property', 'no-double-activation', '--timeout', '5000'],
+      ['verify', 'wf.json', '--profile', 'v1', '--property', 'budget', '--property', 'no-double-activation', '--timeout', '5000'],
       captured);
     expect(code, captured.out + captured.err).toBe(0);
     expect(captured.out).toContain('n8n-libpetri verify — cli-diamond');
@@ -204,7 +231,7 @@ describeZ3('verify CLI runs', () => {
 
   it('reports a dead node as a finding and exits 1, naming the node', { timeout: CASE_TIMEOUT_MS }, async () => {
     const captured = io({ 'wf.json': ORPHAN_JSON });
-    const code = await runCli(['verify', 'wf.json', '--property', 'dead-nodes', '--timeout', '5000', '--quiet'], captured);
+    const code = await runCli(['verify', 'wf.json', '--profile', 'v1', '--property', 'dead-nodes', '--timeout', '5000', '--quiet'], captured);
     expect(code, captured.out).toBe(1);
     expect(captured.out).toContain('Findings');
     expect(captured.out).toContain('Orphan can never run');
@@ -216,7 +243,7 @@ describeZ3('verify CLI runs', () => {
   it('--json writes the machine-readable report, --out writes to a file, and it names the guessed shapes', { timeout: CASE_TIMEOUT_MS }, async () => {
     const captured = io({ 'wf.json': DIAMOND_JSON });
     const code = await runCli(
-      ['verify', 'wf.json', '--property', 'budget', '--timeout', '5000', '--json', '--out', 'report.json', '--quiet'],
+      ['verify', 'wf.json', '--profile', 'v1', '--property', 'budget', '--timeout', '5000', '--json', '--out', 'report.json', '--quiet'],
       captured);
     expect(code).toBe(0);
     expect(captured.out).toBe('');
@@ -238,7 +265,7 @@ describeZ3('verify CLI runs', () => {
     // `dead-nodes` on the diamond: every live node's witness search exceeds the timeout, so
     // the family comes back `unknown` (docs/verification.md). Not a finding — but a gate that
     // wants proofs to stay proofs must be able to fail on it.
-    const argv = ['verify', 'wf.json', '--property', 'dead-nodes', '--timeout', '1000', '--quiet'];
+    const argv = ['verify', 'wf.json', '--profile', 'v1', '--property', 'dead-nodes', '--timeout', '1000', '--quiet'];
     const lenient = io({ 'wf.json': DIAMOND_JSON });
     expect(await runCli(argv, lenient), lenient.out).toBe(0);
 
@@ -252,7 +279,7 @@ describeZ3('verify CLI runs', () => {
     // The graph truncates on the cycle and can only bound; the fallback asks the graph's own
     // question (rest set as sinks, pause / halt widenings as conditional sinks) with the state
     // equation on and proves it, so the gate that wants proofs passes too.
-    const argv = ['verify', 'wf.json', '--property', 'proper-completion', '--max-classes', '2000',
+    const argv = ['verify', 'wf.json', '--profile', 'v1', '--property', 'proper-completion', '--max-classes', '2000',
       '--timeout', '10000', '--quiet', '--json'];
     const plain = io({ 'wf.json': CYCLE_JSON });
     expect(await runCli(argv, plain), plain.err).toBe(0);
@@ -276,7 +303,7 @@ describeZ3('verify CLI runs', () => {
     // The verdict item D exists for. It is not a finding — the plain run passes — and it is
     // not a proof either, so the gate that wants proofs fails on it and says which counts
     // are not proven.
-    const argv = ['verify', 'wf.json', '--property', 'proper-completion', '--max-classes', '2000',
+    const argv = ['verify', 'wf.json', '--profile', 'v1', '--property', 'proper-completion', '--max-classes', '2000',
       '--timeout', '1000', '--smt-fallback', 'off', '--quiet', '--json'];
     const lenient = io({ 'wf.json': CYCLE_JSON });
     expect(await runCli(argv, lenient), lenient.err).toBe(0);
@@ -310,7 +337,7 @@ describeZ3('verify CLI runs', () => {
     });
     const captured = io({ 'wf.json': DIAMOND_JSON, 'types.json': types });
     const code = await runCli(
-      ['verify', 'wf.json', '--node-types', 'types.json', '--property', 'budget', '--timeout', '5000', '--quiet'],
+      ['verify', 'wf.json', '--profile', 'v1', '--node-types', 'types.json', '--property', 'budget', '--timeout', '5000', '--quiet'],
       captured);
     expect(code).toBe(0);
     expect(captured.err).toBe('');
@@ -346,7 +373,7 @@ describe('verify CLI without a solver (VER-013)', () => {
     await withoutZ3(async () => {
       const captured = io({ 'wf.json': DIAMOND_JSON });
       const code = await runCli(
-        ['verify', 'wf.json', '--property', 'budget', '--timeout', '1000', '--quiet'], captured);
+        ['verify', 'wf.json', '--profile', 'v1', '--property', 'budget', '--timeout', '1000', '--quiet'], captured);
       expect(code, captured.out + captured.err).toBe(3);
       expect(captured.err).toContain('the SMT fallback did not run');
       expect(captured.err).toContain('LIBPETRI_Z3');
@@ -362,7 +389,7 @@ describe('verify CLI without a solver (VER-013)', () => {
     await withoutZ3(async () => {
       const captured = io({ 'wf.json': STRANDING_JSON });
       const code = await runCli(
-        ['verify', 'wf.json', '--property', 'proper-completion', '--timeout', '1000', '--quiet'], captured);
+        ['verify', 'wf.json', '--profile', 'v1', '--property', 'proper-completion', '--timeout', '1000', '--quiet'], captured);
       expect(code, captured.out + captured.err).toBe(1);
       expect(captured.out).toContain('VIOLATED');
       expect(captured.out).toContain('Findings');

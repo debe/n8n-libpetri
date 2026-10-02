@@ -48,6 +48,7 @@ describe('compileDescription: one analysis and one hash per call', () => {
     expect(c.analysis).toBe(analysed?.value);
     expect(c.structuralHash).toBe(hashed?.value);
     expect(hashSpy).toHaveBeenCalledWith(c.analysis);
+    expect(c.netMap.profile).toBe('v1');
   });
 
   it('a hit analyses and hashes once for the key, and returns the cached compile', () => {
@@ -66,7 +67,8 @@ describe('compileDescription: one analysis and one hash per call', () => {
   it("the scheduler's agent budgets reach the one analysis, and so the compiled net", () => {
     const c = scheduler({ maxAgentRounds: 7 }).compileDescription(agentAssumedRounds);
     expect(analyseSpy).toHaveBeenCalledTimes(1);
-    expect(analyseSpy.mock.calls[0]?.[1]).toEqual({ maxAgentRounds: 7 });
+    // The v1 scheduler names its profile (ADR 0013 decision 2): the compiler's default is engineV2.
+    expect(analyseSpy.mock.calls[0]?.[1]).toEqual({ profile: 'v1', maxAgentRounds: 7 });
     expect(c.analysis.byName.get('Agent')?.maxRounds).toBe(7);
     expect(c.netMap.node('Agent').agent?.maxRounds).toBe(7);
   });

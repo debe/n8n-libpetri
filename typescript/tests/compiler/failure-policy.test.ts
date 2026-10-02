@@ -96,7 +96,7 @@ describe('parseExecutionPolicy', () => {
 
 describe('resolution against the node', () => {
   it('resolves a route by output name to its index', () => {
-    const a = analyse(withPolicy({ onFailure: RETRY_THEN_ROUTE })).byName.get('A')!;
+    const a = analyse(withPolicy({ onFailure: RETRY_THEN_ROUTE }), { profile: 'v1' }).byName.get('A')!;
     expect(a.failure?.steps).toEqual([
       { attempt: 1, action: 'retry', waitMs: 1000, nextAttempt: 2 },
       { attempt: 2, action: 'route', outputIndex: 1 },
@@ -106,7 +106,7 @@ describe('resolution against the node', () => {
   it('refuses a route to an output nobody wired', () => {
     // The emission rule writes connected outputs only, so the step would have nowhere to put
     // its token — a policy that silently did nothing would be worse than one that refuses.
-    expect(() => analyse(withPolicy({ onFailure: RETRY_THEN_ROUTE }, false)))
+    expect(() => analyse(withPolicy({ onFailure: RETRY_THEN_ROUTE }, false), { profile: 'v1' }))
       .toThrow(/routes to output 1, which has no connection/);
   });
 
@@ -120,7 +120,7 @@ describe('resolution against the node', () => {
     }, false);
     let caught: unknown;
     try {
-      analyse(wf);
+      analyse(wf, { profile: 'v1' });
     } catch (e) {
       caught = e;
     }
@@ -132,7 +132,7 @@ describe('resolution against the node', () => {
   });
 
   it('refuses a route to a name the node type does not have', () => {
-    expect(() => analyse(withPolicy({ onFailure: [{ action: 'route', output: 'nope' }] })))
+    expect(() => analyse(withPolicy({ onFailure: [{ action: 'route', output: 'nope' }] }), { profile: 'v1' }))
       .toThrow(/does not name/);
   });
 
@@ -143,25 +143,25 @@ describe('resolution against the node', () => {
         retryOnFail: true, executionPolicy: { onFailure: [{ action: 'stop' }] },
       }),
     ], [conn('Trigger', 0, 'A', 0)], 'Trigger');
-    expect(() => analyse(wf)).toThrow(/onFailure and retryOnFail both set/);
+    expect(() => analyse(wf, { profile: 'v1' })).toThrow(/onFailure and retryOnFail both set/);
   });
 
   it('refuses a deadline with no chain to receive it', () => {
-    expect(() => analyse(withPolicy({ timeoutMs: 1000 })))
+    expect(() => analyse(withPolicy({ timeoutMs: 1000 }), { profile: 'v1' }))
       .toThrow(/timeoutMs needs an onFailure chain/);
   });
 });
 
 describe('the compiled chain', () => {
   it('leaves a policy-free node exactly as it was', () => {
-    const before = compile(withPolicy(undefined));
+    const before = compile(withPolicy(undefined), { profile: 'v1' });
     expect(before.netMap.node('A').attempts).toEqual([]);
     expect(before.netMap.node('A').attemptTimeoutMs).toBeNull();
     expect(before.netMap.node('A').transitions.attemptRuns).toEqual([]);
   });
 
   it('unrolls one running / failed pair per attempt, reusing X/running for the first', () => {
-    const c = compile(withPolicy({ onFailure: RETRY_THEN_ROUTE }));
+    const c = compile(withPolicy({ onFailure: RETRY_THEN_ROUTE }), { profile: 'v1' });
     const g = c.netMap.node('A');
     expect(g.attempts.map((a) => a.index)).toEqual([1, 2]);
     // The first attempt *is* the ordinary run, which is what keeps `X_start` unchanged.
@@ -174,7 +174,7 @@ describe('the compiled chain', () => {
   });
 
   it('gives the deadline its own place and a funnel into the failure', () => {
-    const c = compile(withPolicy({ timeoutMs: 30_000, onFailure: RETRY_THEN_ROUTE }));
+    const c = compile(withPolicy({ timeoutMs: 30_000, onFailure: RETRY_THEN_ROUTE }), { profile: 'v1' });
     const g = c.netMap.node('A');
     expect(g.attemptTimeoutMs).toBe(30_000);
     expect(g.attempts.map((a) => a.timedOut?.name))
@@ -186,7 +186,7 @@ describe('the compiled chain', () => {
   });
 
   it('holds the budget across a retry wait and takes the delay from the step', () => {
-    const c = compile(withPolicy({ onFailure: [{ action: 'retry', waitMs: 250 }, { action: 'stop' }] }));
+    const c = compile(withPolicy({ onFailure: [{ action: 'retry', waitMs: 250 }, { action: 'stop' }] }), { profile: 'v1' });
     const step = [...c.net.transitions].find((t) => t.name === 'id:A/attempt_1')!;
     expect(step.timing).toEqual({ type: 'delayed', afterMs: 250 });
     // `_budget` is not among its outputs: the unit stays held, as n8n's retry loop holds it.
@@ -203,13 +203,13 @@ describe('the compiled chain', () => {
       { onFailure: [{ action: 'continue' } as FailureStep] },
       { timeoutMs: 100, onFailure: [{ action: 'retry' }, { action: 'retry' }, { action: 'continue' }] as FailureStep[] },
     ]) {
-      const c = compile(withPolicy(policy));
+      const c = compile(withPolicy(policy), { profile: 'v1' });
       expect(() => PrecompiledNet.compile(c.net)).not.toThrow();
     }
   });
 
   it('counts every attempt as a place the node may be running in', () => {
-    const c = compile(withPolicy({ onFailure: RETRY_THEN_ROUTE }));
+    const c = compile(withPolicy({ onFailure: RETRY_THEN_ROUTE }), { profile: 'v1' });
     // `no-double-activation` and the mutual-exclusion pass ask "is this node running", which
     // an unrolled chain spreads across `X/running_i`.
     const names = c.runningPlaces.map((p) => p.name);
@@ -221,18 +221,18 @@ describe('the compiled chain', () => {
 describe('the scheduler binds the chain', () => {
   it('binds every attempt and deadline transition', async () => {
     const { schedulerActions } = await import('../../src/scheduler/index.js');
-    const c = compile(withPolicy({ timeoutMs: 1000, onFailure: RETRY_THEN_ROUTE }));
+    const c = compile(withPolicy({ timeoutMs: 1000, onFailure: RETRY_THEN_ROUTE }), { profile: 'v1' });
     expect(() => c.withActions(schedulerActions())).not.toThrow();
   });
 
   it('still binds a policy-free workflow', async () => {
     const { schedulerActions } = await import('../../src/scheduler/index.js');
-    expect(() => compile(withPolicy(undefined)).withActions(schedulerActions())).not.toThrow();
+    expect(() => compile(withPolicy(undefined), { profile: 'v1' }).withActions(schedulerActions())).not.toThrow();
   });
 });
 
 describe('the structural hash', () => {
-  const hashOf = (wf: WorkflowDescription): string => structuralHash(analyse(wf));
+  const hashOf = (wf: WorkflowDescription): string => structuralHash(analyse(wf, { profile: 'v1' }));
 
   it('separates two workflows that differ only in the policy', () => {
     expect(hashOf(withPolicy({ onFailure: RETRY_THEN_ROUTE })))

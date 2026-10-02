@@ -116,7 +116,7 @@
  */
 import { performance } from 'node:perf_hooks';
 import { flatten } from 'libpetri/verification';
-import { assertProfile, compile } from '../compiler/index.js';
+import { assertProfile, compile, DEFAULT_COMPILE_PROFILE } from '../compiler/index.js';
 import type { CompileProfile, CompiledWorkflow, WorkflowDescription } from '../compiler/index.js';
 import { runFamilies } from './families/run-families.js';
 import { markingStateOf } from './marking.js';
@@ -150,7 +150,7 @@ export const DEFAULT_V2_PROPERTIES: readonly PropertyName[] = ['settlement'];
  * requested pairs. A family of the other profile is kept when asked for: it is recorded as not
  * applicable (`families/not-applicable.ts`), never dropped.
  */
-export function selectProperties(options: VerifyOptions, profile: CompileProfile = 'v1'): readonly PropertyName[] {
+export function selectProperties(options: VerifyOptions, profile: CompileProfile): readonly PropertyName[] {
   if (options.properties !== undefined) {
     return PROPERTY_NAMES.filter((p) => options.properties!.includes(p));
   }
@@ -162,9 +162,10 @@ export function selectProperties(options: VerifyOptions, profile: CompileProfile
 
 /**
  * Compiles `workflow` exactly as its target does, then verifies the net it produced: profile
- * `v1` (the default) as the scheduler compiles it, with the budget; profile `engineV2` with no
- * budget option at all, which the compiler would refuse (`tasks/v2-profile-plan.md` step 2).
- * An explicit `budget` or agent bound under `engineV2` is passed through, and refused there.
+ * `engineV2` (the default, as `compile`'s, ADR 0013 decision 2) with no budget option at all,
+ * which the compiler would refuse (`tasks/v2-profile-plan.md` step 2); profile `v1`, which the
+ * six v1 families need, as the scheduler compiles it, with the budget. An explicit `budget` or
+ * agent bound under `engineV2` is passed through, and refused there.
  */
 export async function verify(
   workflow: WorkflowDescription, options: VerifyOptions = {},
@@ -173,7 +174,8 @@ export async function verify(
     ...(options.maxAgentRounds === undefined ? {} : { maxAgentRounds: options.maxAgentRounds }),
     ...(options.maxAgentToolCalls === undefined ? {} : { maxAgentToolCalls: options.maxAgentToolCalls }),
   };
-  const compiled = options.profile === 'engineV2'
+  const profile = options.profile ?? DEFAULT_COMPILE_PROFILE;
+  const compiled = profile === 'engineV2'
     ? compile(workflow, {
       profile: 'engineV2',
       ...(options.trigger === undefined ? {} : { trigger: options.trigger }),
@@ -181,7 +183,7 @@ export async function verify(
       ...agentBounds,
     })
     : compile(workflow, {
-      budget: options.budget ?? 1, ...agentBounds,
+      profile: 'v1', budget: options.budget ?? 1, ...agentBounds,
       ...(options.trigger === undefined ? {} : { trigger: options.trigger }),
     });
   return verifyCompiled(compiled, options);
@@ -235,7 +237,7 @@ export async function verifyCompiled(
   // report from an install below the floor is not one to hand out.
   assertLibpetriSurface();
   if (profile === 'engineV2') return verifySettlement(compiled, options, selectProperties(options, profile), started);
-  const properties = selectProperties(options);
+  const properties = selectProperties(options, 'v1');
   const full = options.maxClasses ?? DEFAULT_MAX_CLASSES;
   const staged = stagedCap(compiled, options, full);
 

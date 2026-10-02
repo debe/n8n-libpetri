@@ -43,7 +43,7 @@ const depthNet = (d: number) => {
 
 const timeoutMs = Number(process.argv[2] ?? 60_000);
 for (const d of [0, 1, 2]) {
-  const c = compile(depthNet(d));
+  const c = compile(depthNet(d), { profile: 'v1' });
   const p = (n: string) => c.netMap.place(n)!.place;
   const t0 = performance.now();
   const r = await SmtVerifier.forNet(c.net).initialMarking(markingStateOf(c.initialMarking(null)))

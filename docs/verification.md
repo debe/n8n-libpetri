@@ -13,25 +13,34 @@ the verifier can send undecided queries to libpetri's `SmtVerifier`, which uses 
 ```bash
 cd typescript
 npm run build
-npx n8n-libpetri verify ../workflow.json
+npx n8n-libpetri verify ../workflow.json               # profile engineV2, the default
+npx n8n-libpetri verify ../workflow.json --profile v1  # the v1 net PetriScheduler runs
 ```
+
+The default profile is `engineV2` ([ADR 0013](adr/0013-engine-v2-primary.md), decision 2), as
+it is for `compile()` and `verify()`. The six v1 families, `--budget`, `--start`, `--mutex` and
+`--all-pairs` need `--profile v1`: without it `--budget`, `--start`, `--mutex` and `--all-pairs`
+are usage errors (exit 2), and a v1 family named with `--property` is reported not applicable
+under `engineV2` (an `unknown` check, which `--strict` fails; if nothing else was decided the run
+exits 3). The v1 forms below
+therefore name the profile.
 
 Useful forms:
 
 ```bash
-# One property and a concurrency budget
-npx n8n-libpetri verify ../workflow.json \
+# One v1 property and a concurrency budget
+npx n8n-libpetri verify ../workflow.json --profile v1 \
   --budget 2 \
   --property proper-completion
 
 # Require proofs in CI
 npx n8n-libpetri verify ../workflow.json --strict --json --out verification.json
 
-# Check one exclusion pair
-npx n8n-libpetri verify ../workflow.json --mutex FetchA,FetchB
+# Check one exclusion pair (v1)
+npx n8n-libpetri verify ../workflow.json --profile v1 --mutex FetchA,FetchB
 
-# Bound or disable the state graph and control the SMT fallback
-npx n8n-libpetri verify ../workflow.json \
+# Bound or disable the state graph and control the SMT fallback (v1)
+npx n8n-libpetri verify ../workflow.json --profile v1 \
   --max-classes 50000 \
   --smt-fallback auto \
   --timeout 30000
@@ -41,17 +50,17 @@ Options:
 
 | Option | Meaning |
 |---|---|
-| `--profile v1\|engineV2` | Compile target. Default `v1`. `engineV2` runs the `settlement` family (below). |
+| `--profile engineV2\|v1` | Compile target. Default `engineV2` (ADR 0013), which runs the `settlement` family (below). `v1` runs the six v1 families. |
 | `--trigger NODE` | `engineV2` only: the trigger that fired. Default: the workflow's only trigger; required when it has several, as n8n's converter requires the name. |
-| `--budget k` | Requested concurrency budget. The compiler may lower it for unsafe shapes. Refused under `engineV2`. |
+| `--budget k` | `v1` only: requested concurrency budget. The compiler may lower it for unsafe shapes. A usage error under `engineV2`. |
 | `--property NAME` | Select a property family. Repeatable. |
 | `--max-classes n` | State-class cap. Default 200,000; zero disables graph exploration. |
 | `--smt-fallback auto\|off\|force` | Control the SMT route. Default `auto`. |
 | `--timeout ms` | Per-query SMT timeout. Default 60,000 ms. |
 | `--node-types FILE` | Supply exact node input/output shapes. |
-| `--start NODE` | Override the inferred start node. |
-| `--mutex A,B` | Check one mutual-exclusion pair. Repeatable. |
-| `--all-pairs` | Check all node pairs. This creates O(n²) queries. |
+| `--start NODE` | `v1` only: override the inferred start node. |
+| `--mutex A,B` | `v1` only: check one mutual-exclusion pair. Repeatable. A usage error under `engineV2`. |
+| `--all-pairs` | `v1` only: check all node pairs. This creates O(n²) queries. A usage error under `engineV2`. |
 | `--no-semiflows` | Disable P-semiflow strengthening. |
 | `--strict` | Fail if any result is `bounded` or `unknown`. |
 | `--json` | Emit JSON. |
@@ -82,7 +91,7 @@ Exit codes are the CI contract:
 | 0 | No violation. `bounded` and `unknown` are accepted unless `--strict` is set. |
 | 1 | A violation, or any non-proof under `--strict`. |
 | 2 | Bad arguments, unreadable input or malformed JSON. |
-| 3 | No usable Z3 installation, so the requested fallback did not run. |
+| 3 | `v1`: no usable Z3 installation, so the requested fallback did not run. `engineV2`: no check was decided (the state-class graph, its only route, did not close). |
 
 A finding outranks a missing solver. If the graph finds a violation and Z3 is unavailable,
 the process exits 1.

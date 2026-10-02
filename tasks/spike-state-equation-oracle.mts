@@ -56,12 +56,12 @@ const detail: string[] = [];
 for (const [i, f] of files.entries()) {
   let description: any;
   try {
-    description = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { nodeTypes }).description;
+    description = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { profile: 'v1', nodeTypes }).description;
   } catch { continue; }
   const opts: any = { budget: 1, smtFallback: 'auto', timeoutMs: TMO, properties: ['proper-completion'] };
 
   let a: any;
-  try { phasesOff = false; a = await verify(description, opts); } catch { continue; }
+  try { phasesOff = false; a = await verify(description, { profile: 'v1', ...opts }); } catch { continue; }
   const proved = (a.checks as any[]).filter(
     (c) => c.verdict === 'proven' && c.query?.method === 'state-equation');
   if (proved.length === 0) continue;
@@ -69,7 +69,7 @@ for (const [i, f] of files.entries()) {
   phaseProofs += proved.length;
 
   let b: any;
-  try { phasesOff = true; b = await verify(description, opts); } finally { phasesOff = false; }
+  try { phasesOff = true; b = await verify(description, { profile: 'v1', ...opts }); } finally { phasesOff = false; }
   const byKey = new Map<string, any>();
   for (const c of b.checks as any[]) byKey.set(key(c), c);
 

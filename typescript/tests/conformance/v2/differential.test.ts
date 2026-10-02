@@ -164,6 +164,39 @@ describe.each(NO_LOOP)('legs (a) and (b) on %s (stub reference)', (_name, graph)
   });
 });
 
+// ---- (a) and (b) with master's suspend and resume (ADR 0013 (a)), stub reference ----
+
+describe.each(NO_LOOP)('legs (a) and (b) on %s with steps that suspend (stub reference)', (_name, graph) => {
+  const c = compileV2(graph);
+  const waiting = (seed: number): Behaviour => ({ ...behaviourOf(seed), pWait: 0.5 });
+
+  it('(a) the planner equals R(S) at every state, waiting rows included', () => {
+    let withWaiting = 0;
+    for (const seed of SEEDS) {
+      for (let order = 0; order < 4; order++) {
+        simulate(stub, graph, waiting(seed), order, {
+          onState: (rows) => {
+            if (rows.some((r) => r.status === 'waiting')) withWaiting++;
+            expect(compareState(c, stub, graph, [], rows), `seed ${seed} order ${order}`).toEqual({ agree: true });
+          },
+        });
+      }
+    }
+    expect(withWaiting).toBeGreaterThan(0);
+  });
+
+  it('(b) a step that waited is, in the net, a run that settled later: the runs still end alike', async () => {
+    for (const seed of SEEDS) {
+      for (let order = 0; order < 3; order++) {
+        const ref = simulate(stub, graph, waiting(seed), order);
+        const net = await runV2(c, v2Actions(graph, waiting(seed), order));
+        const v = compareLockstep(stub, graph, [], c, ref, net);
+        expect(v.problems, `seed ${seed} order ${order}`).toEqual([]);
+      }
+    }
+  });
+});
+
 describe('compareState catches a disagreement', () => {
   const c = compileV2(branchDiamond);
   const row = (nodeId: string, iteration: number, status: ReferenceRow['status'], filledOutputSlots: boolean[] = []): ReferenceRow =>

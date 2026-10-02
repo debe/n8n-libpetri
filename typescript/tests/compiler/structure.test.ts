@@ -122,7 +122,7 @@ const CANVAS_ORDER: Record<keyof typeof ALL, string[]> = {
 
 describe.each(Object.entries(ALL) as [keyof typeof ALL, (typeof ALL)[keyof typeof ALL]][])('fixture %s', (name, wf) => {
   let c: CompiledWorkflow;
-  beforeAll(() => { c = compile(wf); });
+  beforeAll(() => { c = compile(wf, { profile: 'v1' }); });
 
   it('builds one flat net and PrecompiledNet.compile succeeds (CORE-043 clean)', () => {
     expect(c.net.transitions.size).toBeGreaterThan(0);

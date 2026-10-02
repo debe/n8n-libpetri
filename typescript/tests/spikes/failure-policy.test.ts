@@ -37,7 +37,7 @@ function fixture(policy: ExecutionPolicy | undefined): CompiledWorkflow {
     node('Fallback', 'set', [400, 100]),
   ], [
     conn('Trigger', 0, 'A', 0), conn('A', 0, 'Ok', 0), conn('A', 1, 'Fallback', 0),
-  ], 'Trigger'));
+  ], 'Trigger'), { profile: 'v1' });
 }
 
 const uniform = (attempts: number): FailureStep[] => [
@@ -94,7 +94,7 @@ describe('the chain is per activation, where the counter is not', () => {
     const c = compile(workflow('retry', [
       node('Trigger', 'trigger', [0, 0]),
       node('A', 'set', [200, 0], { retryOnFail: true, maxTries: 3 }),
-    ], [conn('Trigger', 0, 'A', 0)], 'Trigger'));
+    ], [conn('Trigger', 0, 'A', 0)], 'Trigger'), { profile: 'v1' });
     const tries = retryOf(c.netMap.node('A')).tries;
     const producers = [...c.net.transitions].filter(
       (t) => t.outputSpec !== null && [...enumerateBranches(t.outputSpec)].some((b) => b.has(tries)));

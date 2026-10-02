@@ -21,7 +21,7 @@ const names = (s: { nodeExecutionStack: Array<{ node: { name: string } }> }) => 
 
 describe('stack entries', () => {
   it('X/waiting is nodeExecutionStack[0] with the node\'s own executionData, ahead of every other pending entry', () => {
-    const c = compile(linear);
+    const c = compile(linear, { profile: 'v1' });
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
     const w: WaitingPayload = { kind: 'waiting', executionData: entryFor(wf.nodes.A!, [items(1)]) };
@@ -33,7 +33,7 @@ describe('stack entries', () => {
   });
 
   it('a direct-form data token becomes addNodeToBeExecuted\'s entry (live node, main[inputIndex], null below, source at main[0]); an entry payload goes back verbatim', () => {
-    const c = compile(linear);
+    const c = compile(linear, { profile: 'v1' });
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
     const a = items({ a: 1 });
@@ -49,7 +49,7 @@ describe('stack entries', () => {
   });
 
   it('order: depth descending, then canvas order, then token FIFO', () => {
-    const c = compile(fanOut); // canvas order A, Trigger, B, C; A, B, C all depth 1
+    const c = compile(fanOut, { profile: 'v1' }); // canvas order A, Trigger, B, C; A, B, C all depth 1
     const wf = fakeWorkflow(fanOut);
     const m = c.sharedMarking();
     put(m, inOf(gadget(c, 'C')), [edge(items(1), src('Trigger'))], 5);
@@ -62,7 +62,7 @@ describe('stack entries', () => {
   });
 
   it('a stopped token with ran: false, a pending retry and (cancelled) a running token are pending activations; ran: true is discarded', () => {
-    const c = compile({ ...linear, nodes: linear.nodes.map((n) => (n.name === 'B' ? { ...n, retryOnFail: true } : n)) });
+    const c = compile({ ...linear, nodes: linear.nodes.map((n) => (n.name === 'B' ? { ...n, retryOnFail: true } : n)) }, { profile: 'v1' });
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
     const stopped: StoppedPayload = { kind: 'stopped', executionData: entryFor(wf.nodes.A!, [items(1)]), ran: false };
@@ -82,7 +82,7 @@ describe('stack entries', () => {
 
 describe('join slots', () => {
   it('a complete slot is a stack entry with items or [] per input and the sources alongside (n8n\'s allDataFound)', () => {
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
@@ -101,7 +101,7 @@ describe('join slots', () => {
 
   it('a complete all-empty slot is a skip, not a run: written as a waitingExecution slot of [] (n8n\'s R6 drops it), which decodes back to the skip-ready state', () => {
     // Only `close()` can freeze one (X_skip is not pause-inhibited), so it is a cancelled-mode shape.
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
@@ -120,7 +120,7 @@ describe('join slots', () => {
   });
 
   it('a partial slot is waitingExecution[node][0] with null for the input that has not arrived, the source mirrored', () => {
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
     const b = items({ b: 1 });
@@ -135,7 +135,7 @@ describe('join slots', () => {
   });
 
   it('slots are positional: the heads pair as slot 0, the arrivals queued on the edge places as slot 1, 2, …', () => {
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
@@ -153,7 +153,7 @@ describe('join slots', () => {
   });
 
   it('an entry-headed slot is the entry verbatim (its unit companions are not slots)', () => {
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
@@ -170,7 +170,7 @@ describe('join slots', () => {
   });
 
   it('choose-branch: ready_i_data and ready_i_empty form one slot', () => {
-    const c = compile(chooseBranch);
+    const c = compile(chooseBranch, { profile: 'v1' });
     const wf = fakeWorkflow(chooseBranch);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
@@ -184,7 +184,7 @@ describe('join slots', () => {
   });
 
   it('two different entries paired in one slot is a CodecError naming the node', () => {
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
@@ -196,7 +196,7 @@ describe('join slots', () => {
 
 describe('OR rounds', () => {
   it('pending arrivals become entries; the round\'s other deliveries become [] slots (n8n\'s R6 discards them, decode counts them)', () => {
-    const c = compile(ifBothOutputs);
+    const c = compile(ifBothOutputs, { profile: 'v1' });
     const wf = fakeWorkflow(ifBothOutputs);
     const m = c.sharedMarking();
     const g = gadget(c, 'C');
@@ -213,7 +213,7 @@ describe('OR rounds', () => {
     const wf = workflow('or-partial', [
       node('T', 'trigger', [0, 0]), node('Other', 'trigger', [0, 200]), node('IF', 'if', [200, 0]), node('C', 'set', [400, 0]),
     ], [conn('T', 0, 'IF', 0), conn('IF', 0, 'C', 0), conn('IF', 1, 'C', 0), conn('Other', 0, 'C', 0)], 'T');
-    const c = compile(wf);
+    const c = compile(wf, { profile: 'v1' });
     const g = gadget(c, 'C');
     expect(g.inputs[0]!.unreachableEdges).toBe(1);
     const m = c.sharedMarking(); // ready_0 = 1 (the seed)
@@ -224,7 +224,7 @@ describe('OR rounds', () => {
   });
 
   it('a join slot holding nothing but the seeded empty of an unreachable input is not written either; with an arrival it completes into a stack entry', () => {
-    const c = compile(twoTriggers);
+    const c = compile(twoTriggers, { profile: 'v1' });
     const wf = fakeWorkflow(twoTriggers);
     expect(named(c.sharedMarking())['id:Merge/ready_1']).toBe(1);
     const lone = encodeMarking(c, live(c.sharedMarking()), emptyState(), { node: (n) => wf.nodes[n] });
@@ -246,7 +246,7 @@ describe('OR rounds', () => {
 
 describe('discards and untouched fields', () => {
   it('budget, idle, free, tries, done, skipped, ran, the hasdata counter, nil, routed, pause and a ran: true stop leave nothing behind; contextData and metadata are untouched', () => {
-    const c = compile({ ...ifBothOutputs, nodes: ifBothOutputs.nodes.map((n) => (n.name === 'End' ? { ...n, retryOnFail: true } : n)) });
+    const c = compile({ ...ifBothOutputs, nodes: ifBothOutputs.nodes.map((n) => (n.name === 'End' ? { ...n, retryOnFail: true } : n)) }, { profile: 'v1' });
     const wf = fakeWorkflow(ifBothOutputs);
     const m = c.sharedMarking(); // budget, idle, free, tries
     const g = gadget(c, 'C');
@@ -272,7 +272,7 @@ describe('discards and untouched fields', () => {
 
 describe('token shapes', () => {
   it('a unit token on X/waiting is a diagnostic naming the node and the place, not a TypeError; the token is skipped', () => {
-    const c = compile(linear);
+    const c = compile(linear, { profile: 'v1' });
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
     const a = gadget(c, 'A');
@@ -293,7 +293,7 @@ describe('undrained places', () => {
     ['X/routed', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, routedOf(gadget(c, 'A')), [null]), 'id:A/routed'],
     ['X/in_empty', (c: ReturnType<typeof compile>, m: Map<never, never>) => put(m, inEmptyOf(gadget(c, 'A')), [null]), 'id:A/in_empty'],
   ])('%s in pause mode is a CodecError naming the place', (_what, arrange, place) => {
-    const c = compile(linear);
+    const c = compile(linear, { profile: 'v1' });
     const m = c.sharedMarking();
     arrange(c, m as never);
     expect(() => encodeMarking(c, live(m), emptyState())).toThrow(CodecError);
@@ -302,7 +302,7 @@ describe('undrained places', () => {
   });
 
   it('an OR input\'s edge places are drained by the arms: a token there is undrained in pause and stranded, an arrival in cancelled', () => {
-    const c = compile(ifBothOutputs);
+    const c = compile(ifBothOutputs, { profile: 'v1' });
     const wf = fakeWorkflow(ifBothOutputs);
     const m = c.sharedMarking();
     const t = items(1);
@@ -314,7 +314,7 @@ describe('undrained places', () => {
   });
 
   it('X/retry is a pending activation in pause and cancelled, an undrained place in stranded', () => {
-    const c = compile({ ...linear, nodes: linear.nodes.map((n) => (n.name === 'B' ? { ...n, retryOnFail: true } : n)) });
+    const c = compile({ ...linear, nodes: linear.nodes.map((n) => (n.name === 'B' ? { ...n, retryOnFail: true } : n)) }, { profile: 'v1' });
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
     const retry: RetryPayload = { kind: 'retry', executionData: entryFor(wf.nodes.B!, [items(3)]), attempt: 1, taskStartedData: {} as never, reason: { kind: 'error', error: new Error('x') } };
@@ -328,7 +328,7 @@ describe('undrained places', () => {
     // `Q` has four connected outputs, above `SPLIT_ROUTING_ABOVE`, so it is the one shape
     // that still parks its outcome on `X/ok_o` between `X_run` and `X_route_o` — the window
     // `close()` (ENV-013) can catch and only mode `cancelled` can encode.
-    const c = compile(fanOut4);
+    const c = compile(fanOut4, { profile: 'v1' });
     const wf = fakeWorkflow(fanOut4);
     const m = c.sharedMarking();
     const t = items({ t: 1 });
@@ -345,7 +345,7 @@ describe('undrained places', () => {
     // The collapsed shape has no window between the run and the routing: `close()` between
     // `X_run` and `X_done` leaves the arrivals on the consumers' own edge places, which the
     // ordinary encode paths read, plus one `X/routed` unit the refund never consumed.
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const t = items({ t: 1 });
@@ -360,7 +360,7 @@ describe('undrained places', () => {
 
 describe('stranded mode (divergence #2)', () => {
   it('every pending token becomes a waitingExecution slot with a diagnostic naming node and place; the stack is emptied', () => {
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
@@ -383,7 +383,7 @@ describe('stranded mode (divergence #2)', () => {
   });
 
   it('a complete slot that could not start (a read arc never satisfied) is a stuck slot in stranded mode, a stack entry otherwise', () => {
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const m = c.sharedMarking();
     const g = gadget(c, 'Merge');
@@ -402,7 +402,7 @@ describe('stranded mode (divergence #2)', () => {
 
 describe('the live INode of an entry', () => {
   it('options.node first, then an entry already on the stack naming the node, then a name-only stub', () => {
-    const c = compile(linear);
+    const c = compile(linear, { profile: 'v1' });
     const wf = fakeWorkflow(linear);
     const m = c.sharedMarking();
     put(m, inOf(gadget(c, 'B')), [edge(items(1), src('A'))]);

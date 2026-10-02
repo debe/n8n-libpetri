@@ -60,7 +60,19 @@ ADR 0013 decision 4(a):
 - the execution status `waiting`;
 - cancellation on request.
 
-Until that lands, the decoder still refuses a `waiting` row as an unknown status.
+The first two have landed (ADR 0013 (a), `tasks/v2-profile-plan.md`). The decoder reads a
+`waiting` row as a run in flight. The reference loop and the exhaustive spike can suspend and
+resume steps (`--wait`), and a failure cancels waiting rows too. Measured:
+- the differential at 20 × 20 with `--wait 0.2`: 0 disagreements on all three legs;
+- the exhaustive spike with `--wait` (3 passes, 2M cap, ≤ 9 nodes): 161 graphs, 36,835 row sets
+  (19,762 without `--wait`), 0 disagreements.
+
+Cancellation on request is not modelled (divergence row 35). When it cancels a pending row and
+no row fails, the decoder refuses the row set. When it cancels no row (every unsettled step was
+running), the rows are ones a live execution also has: they decode, and the net plans where n8n,
+whose `StepSettledHandler` checks liveness first, plans nothing. When a running step then fails,
+the set decodes as a failure and both plan nothing. So the refusal is a partial check, and
+liveness has to come from outside the rows.
 
 `wait` and `subworkflow` steps still have no executor on master: `executorFor` throws before
 the step's `try`, "aren't built yet". So divergence row 33 holds as written.

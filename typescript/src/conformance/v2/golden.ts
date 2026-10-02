@@ -35,11 +35,30 @@ export const GOLDEN_FORMAT = 1;
 /** A row: `[index into graph.nodes, iteration, status, filledOutputSlots as '0'/'1']`. */
 export type GoldenRow = readonly [node: number, iteration: number, status: V2StepStatus, slots: string];
 
+/**
+ * The dist files decision 16's stamp hashes, by path under `packages/@n8n`. Two kinds:
+ * - the decision core the reference loop calls: `decideSuccessors` and its helpers, the
+ *   completion count, the loop ledger, `deriveLoops` and the converter;
+ * - the handlers and the step store whose semantics `simulate` (`reference.ts`) ports rather than
+ *   calls: the step statuses and liveness (`execution.types`), claim, suspend and `cancelStep`
+ *   (`step-ready-handler`), `failExecution` and the liveness check (`step-settled-handler`),
+ *   `claimStep`, `resumeStep` and `cancelPendingSteps` (`typeorm-step-store`), cancellation on
+ *   request and the resume sweep. A change there does not change n8n's recorded answers, but can
+ *   make the port, and so the recorded runs, stale; the stamp makes it a decision to re-record.
+ */
+export const GOLDEN_STAMPED_DIST: readonly string[] = [
+  'engine/dist/execution/settlement.js', 'engine/dist/execution/iteration-mapping.js', 'engine/dist/execution/completion.js',
+  'engine/dist/execution/loop-ledger.js', 'engine/dist/graph/loops.js', 'node-engine-compatibility/dist/v1-workflow-converter.js',
+  'engine/dist/execution/execution.types.js', 'engine/dist/execution/step-ready-handler.js',
+  'engine/dist/execution/step-settled-handler.js', 'engine/dist/database/typeorm-step-store.js',
+  'engine/dist/execution/cancel-execution.service.js', 'engine/dist/execution/wait-sweeper.js',
+];
+
 /** Decision 16's stamp. */
 export interface GoldenStamp {
   /** `n8n@<version>` of the checkout the answers came from. */
   readonly n8n: string;
-  /** sha256 (hex) of each dist file that decides, by path under `packages/@n8n`. */
+  /** sha256 (hex) of each of {@link GOLDEN_STAMPED_DIST}, by path under `packages/@n8n`. */
   readonly dist: Readonly<Record<string, string>>;
   /** The libpetri the recording's net ran on, and whether it was a linked checkout. */
   readonly libpetri: { readonly version: string; readonly linked: boolean };

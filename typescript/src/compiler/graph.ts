@@ -69,7 +69,8 @@ export const DEFAULT_MAX_AGENT_TOOL_CALLS = 64;
 /** Options `analyse` reads. Kept separate from `CompileOptions`, which carries the action binder. */
 export interface AnalysisOptions {
   /**
-   * The engine the analysis is for (ADR 0012 §1); default `v1`. Recorded on the analysis and
+   * The engine the analysis is for (ADR 0012 §1); default `engineV2` (ADR 0013 decision 2,
+   * `DEFAULT_COMPILE_PROFILE`); v1 callers name `'v1'`. Recorded on the analysis and
    * hashed. Under `engineV2` the agent budgets below are refused: v2 has no agent round, it
    * fails an agent at its first tool call (`V1StepExecutor`,
    * `packages/@n8n/node-engine-compatibility/src/v1-step-executor.ts`).

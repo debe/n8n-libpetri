@@ -107,7 +107,7 @@ describe('a tool shared by two agents', () => {
     // The encoder writes a round's tools *before* its agent (the stack is depth-descending, and
     // a tool sits one below its agent), so attributing during the stack walk would always see
     // an empty round map and fall back to the tool's first agent. Here that would be `A1`.
-    const c = compile(agentSharedTool);
+    const c = compile(agentSharedTool, { profile: 'v1' });
     const wf = fakeWorkflow(agentSharedTool);
     const red = newRunExecutionData(wf.nodes.Trigger!, { startItems: items({ n: 1 }) });
     const x = red.executionData!;
@@ -136,7 +136,7 @@ describe('an agent that is itself a tool', () => {
     // `B` is `A`'s tool and an agent in its own right. Paused inside `B`'s round, the stack holds
     // both re-entries; `B`'s round is its own, but its answer still goes to `A`, and the token is
     // the only place that address can live across a resume (a scheduler-side map would be gone).
-    const c = compile(agentNested);
+    const c = compile(agentNested, { profile: 'v1' });
     const wf = fakeWorkflow(agentNested);
     const red = newRunExecutionData(wf.nodes.Trigger!, { startItems: items({ n: 1 }) });
     const x = red.executionData!;
@@ -227,7 +227,7 @@ describe('a resumed execution with two pending branches and one partial Merge sl
   it('decodes to two pending entries and a half-filled join slot, encodes back to the same state (slot renumbered), and the legacy shape holds', () => {
     const wf = fakeWorkflow(twoBranches);
     const { x, a, bEntry, cEntry, red } = resumedState(wf);
-    const c = compile({ ...twoBranches, startNode: undefined, startNodes: ['B', 'C', 'T', 'A', 'W'] });
+    const c = compile({ ...twoBranches, startNode: undefined, startNodes: ['B', 'C', 'T', 'A', 'W'] }, { profile: 'v1' });
     const m = decodeExecutionData(c, x, { runData: red.resultData.runData });
     expect(named(m)['id:B/in']).toBe(1);
     expect(named(m)['id:C/in']).toBe(1);
@@ -269,7 +269,7 @@ describe('a resumed execution with two pending branches and one partial Merge sl
 
 describe('a partial slot whose missing input is fed only by unreachable producers', () => {
   it('completes on decode with the seeded empty (R6\'s null → [] substitution done once) and comes back as a stack entry', () => {
-    const c = compile(twoTriggers);
+    const c = compile(twoTriggers, { profile: 'v1' });
     const wf = fakeWorkflow(twoTriggers);
     const a = items({ a: 1 });
     const x = stateOf([], { Merge: { 0: { main: [a, null] } } }, { Merge: { 0: { main: [src('TrigA'), null] } } });
@@ -284,7 +284,7 @@ describe('a partial slot whose missing input is fed only by unreachable producer
   it('the seed is not written back once an activation has consumed it: an entry plus a slot on the seeded input round-trips exactly', () => {
     // Regression: re-queuing the seed behind the entry added a phantom `{ main: [null, []] }`
     // slot n8n never had, and stranded a token on the seeded input after the entry had run.
-    const c = compile(twoTriggers);
+    const c = compile(twoTriggers, { profile: 'v1' });
     const wf = fakeWorkflow(twoTriggers);
     const b = items({ b: 1 });
     const e = entryFor(wf.nodes.Merge!, [items({ a: 1 }), []], [src('TrigA'), null]);
@@ -312,7 +312,7 @@ describe('a partial slot whose missing input is fed only by unreachable producer
 });
 
 describe('random n8n state: encode(decode(x)) ≡ x up to slot renumbering', () => {
-  const fixtures = Object.entries(ALL).map(([name, desc]) => ({ name, desc, c: compile(desc), wf: fakeWorkflow(desc) }));
+  const fixtures = Object.entries(ALL).map(([name, desc]) => ({ name, desc, c: compile(desc, { profile: 'v1' }), wf: fakeWorkflow(desc) }));
 
   it.each(fixtures)('$name', ({ c, wf }) => {
     for (let seed = 1; seed <= 200; seed++) {
@@ -338,7 +338,7 @@ describe('random n8n state: encode(decode(x)) ≡ x up to slot renumbering', () 
 });
 
 describe('random pause markings: decode(encode(m)) ≡ m under the semantic projection', () => {
-  const fixtures = Object.entries(ALL).map(([name, desc]) => ({ name, desc, c: compile(desc), wf: fakeWorkflow(desc) }));
+  const fixtures = Object.entries(ALL).map(([name, desc]) => ({ name, desc, c: compile(desc, { profile: 'v1' }), wf: fakeWorkflow(desc) }));
 
   function checkRoundTrip(c: CompiledWorkflow, wf: Workflow, seed: number): void {
     const rng = new Rng(seed * 104_729 + 17);

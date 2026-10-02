@@ -8,7 +8,7 @@ import { analyse, compile } from '../../src/compiler/index.js';
 import type { WorkflowDescription } from '../../src/compiler/index.js';
 import { diamond, expressionRef, fanOut4, linear, loopOverItems } from '../fixtures/workflows.js';
 
-const observable = (w: WorkflowDescription): string[] => [...analyse(w).skipObservable].sort();
+const observable = (w: WorkflowDescription): string[] => [...analyse(w, { profile: 'v1' }).skipObservable].sort();
 
 describe('which nodes must hear of an upstream skip', () => {
   it('none, on a chain and on a fan-out with no join', () => {
@@ -31,7 +31,7 @@ describe('which nodes must hear of an upstream skip', () => {
 
 describe('the compiled skip', () => {
   const forwards = (w: WorkflowDescription, node: string): boolean => {
-    const g = compile(w).netMap.nodes.find((n) => n.node === node);
+    const g = compile(w, { profile: 'v1' }).netMap.nodes.find((n) => n.node === node);
     if (g === undefined) throw new Error(`no gadget for ${node}`);
     return g.skipForwards;
   };

@@ -47,21 +47,34 @@ describe('workflow JSON adapter', () => {
         { id: 'sticky-2', name: 'Note', type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [0, 200], parameters: {} },
       ],
     };
-    const { description } = describeWorkflowJson(withNotes);
+    const { description } = describeWorkflowJson(withNotes, { profile: 'v1' });
     expect(description.nodes.map((n) => n.name)).toEqual(['Webhook', 'If', 'Left', 'Right', 'Merge']);
     expect(description.startNode).toBe('Webhook');
     // The kept nodes' ids do not move when an annotation is dropped from in front of them.
-    const plain = describeWorkflowJson(EXPORT).description;
+    const plain = describeWorkflowJson(EXPORT, { profile: 'v1' }).description;
     expect(description.nodes.map((n) => n.id)).toEqual(plain.nodes.map((n) => n.id));
+  });
+
+  // ADR 0013 decision 2: the description is for the compiler's default profile, engineV2, unless
+  // v1 is named — under engineV2 no start node is picked and sticky notes are kept.
+  it('describes for engineV2 when no profile is named', () => {
+    const byDefault = describeWorkflowJson(EXPORT).description;
+    const named = describeWorkflowJson(EXPORT, { profile: 'engineV2' }).description;
+    expect(byDefault.nodes).toEqual(named.nodes);
+    expect(byDefault.connections).toEqual(named.connections);
+    expect(compile(byDefault).structuralHash).toBe(compile(named, { profile: 'engineV2' }).structuralHash);
+    expect(byDefault.startNode).toBeUndefined();
+    expect(describeWorkflowJson(EXPORT, { profile: 'v1' }).description.startNode).toBe('Webhook');
+    expect(() => describeWorkflowJson(EXPORT, { startNode: 'Webhook' })).toThrow(/under engineV2 the start node is the trigger/);
   });
 
   it('still rejects a nameless node that is not an annotation', () => {
     const broken = { ...EXPORT, nodes: [{ id: 'x', type: 'n8n-nodes-base.set', typeVersion: 3, position: [0, 0] }, ...EXPORT.nodes] };
-    expect(() => describeWorkflowJson(broken)).toThrow(/has no name/);
+    expect(() => describeWorkflowJson(broken, { profile: 'v1' })).toThrow(/has no name/);
   });
 
   it('reads nodes, main connections and the start node', () => {
-    const { description, warnings } = describeWorkflowJson(EXPORT);
+    const { description, warnings } = describeWorkflowJson(EXPORT, { profile: 'v1' });
     expect(description.name).toBe('diamond-export');
     expect(description.id).toBe('wf-1');
     expect(description.nodes.map((n) => n.name)).toEqual(['Webhook', 'If', 'Left', 'Right', 'Merge']);
@@ -73,8 +86,8 @@ describe('workflow JSON adapter', () => {
   });
 
   it('takes If, Merge and Loop Over Items from the built-in table, not from the connections', () => {
-    const shapes = describeWorkflowJson(EXPORT).description.nodeTypes;
-    const nodes = describeWorkflowJson(EXPORT).description.nodes;
+    const shapes = describeWorkflowJson(EXPORT, { profile: 'v1' }).description.nodeTypes;
+    const nodes = describeWorkflowJson(EXPORT, { profile: 'v1' }).description.nodes;
     const byName = (name: string) => shapes(nodes.find((n) => n.name === name)!);
     expect(byName('If')).toMatchObject({ inputCount: 1, outputCount: 2 });
     expect(byName('Merge')).toMatchObject({ inputCount: 2, outputCount: 1 });
@@ -89,19 +102,20 @@ describe('workflow JSON adapter', () => {
   });
 
   it('carries $() expression references through to the compiler', () => {
-    const { description } = describeWorkflowJson(EXPORT);
+    const { description } = describeWorkflowJson(EXPORT, { profile: 'v1' });
     const left = description.nodes.find((n) => n.name === 'Left')!;
     expect(description.expressionReferences?.(left)).toEqual(['Webhook']);
   });
 
   it('compiles what it produced', () => {
-    const compiled = compile(describeWorkflowJson(EXPORT).description);
+    const compiled = compile(describeWorkflowJson(EXPORT, { profile: 'v1' }).description, { profile: 'v1' });
     expect(compiled.netMap.nodes.map((g) => g.node)).toContain('Merge');
     expect(compiled.netMap.node('Merge').form).toBe('join');
   });
 
   it('a --node-types entry wins over the built-in table and over the heuristic', () => {
     const { description, warnings } = describeWorkflowJson(EXPORT, {
+      profile: 'v1',
       nodeTypes: {
         types: {
           'n8n-nodes-base.set@3': { inputCount: 1, outputCount: 1 },
@@ -134,7 +148,7 @@ describe('workflow JSON adapter', () => {
       },
     };
     const catalogue = { types: { 'n8n-nodes-base.splitInBatches@3': { inputCount: 1, outputCount: 2 } } };
-    const { description } = describeWorkflowJson(raw, { nodeTypes: catalogue });
+    const { description } = describeWorkflowJson(raw, { profile: 'v1', nodeTypes: catalogue });
     const loop = description.nodes.find((n) => n.name === 'Loop')!;
     expect(description.nodeTypes(loop).loopNode).toBe(true);
     // And the built-in's names survive: the supplied entry has none, and n8n's own type file
@@ -144,7 +158,7 @@ describe('workflow JSON adapter', () => {
 
   it('takes counts from the supplied shape but keeps the built-in names it does not carry', () => {
     const catalogue = { types: { 'n8n-nodes-base.if@2': { inputCount: 1, outputCount: 2 } } };
-    const { description } = describeWorkflowJson(EXPORT, { nodeTypes: catalogue });
+    const { description } = describeWorkflowJson(EXPORT, { profile: 'v1', nodeTypes: catalogue });
     const iff = description.nodes.find((n) => n.name === 'If')!;
     expect(description.nodeTypes(iff).outputNames).toEqual(['true', 'false']);
   });
@@ -153,7 +167,7 @@ describe('workflow JSON adapter', () => {
     // Disagreement means the two are describing different things — a newer type version, or a
     // deliberate override — and names from the other one would be a fiction.
     const catalogue = { types: { 'n8n-nodes-base.if@2': { inputCount: 1, outputCount: 3 } } };
-    const { description } = describeWorkflowJson(EXPORT, { nodeTypes: catalogue });
+    const { description } = describeWorkflowJson(EXPORT, { profile: 'v1', nodeTypes: catalogue });
     const iff = description.nodes.find((n) => n.name === 'If')!;
     expect(description.nodeTypes(iff).outputCount).toBe(3);
     expect(description.nodeTypes(iff).outputNames).toBeUndefined();
@@ -172,7 +186,7 @@ describe('workflow JSON adapter', () => {
         S: { main: [[{ node: 'X', type: 'main', index: 0 }], [{ node: 'Y', type: 'main', index: 0 }]] },
       },
     };
-    const { description, warnings } = describeWorkflowJson(raw);
+    const { description, warnings } = describeWorkflowJson(raw, { profile: 'v1' });
     const shape = (name: string) => description.nodeTypes(description.nodes.find((n) => n.name === name)!);
     expect(shape('T')).toMatchObject({ inputCount: 0, outputCount: 1 });
     expect(shape('S')).toMatchObject({ inputCount: 1, outputCount: 2 });
@@ -192,7 +206,7 @@ describe('workflow JSON adapter', () => {
         A: { main: [[{ node: 'B', type: 'main', index: 0 }], [{ node: 'E', type: 'main', index: 0 }]] },
       },
     };
-    const { description, warnings } = describeWorkflowJson(raw);
+    const { description, warnings } = describeWorkflowJson(raw, { profile: 'v1' });
     const a = description.nodes.find((n) => n.name === 'A')!;
     expect(a.onError).toBe('continueErrorOutput');
     // Two outputs are wired; the second is the appended error output, so one is declared.
@@ -216,9 +230,9 @@ describe('workflow JSON adapter', () => {
       ],
       connections: { Trig: { main: [[{ node: 'Loose', type: 'main', index: 0 }]] } },
     };
-    expect(describeWorkflowJson(raw).description.startNode).toBe('Trig');
-    expect(describeWorkflowJson(raw, { startNode: 'Loose' }).description.startNode).toBe('Loose');
-    expect(() => describeWorkflowJson(raw, { startNode: 'Nope' })).toThrow(/not a node/);
+    expect(describeWorkflowJson(raw, { profile: 'v1' }).description.startNode).toBe('Trig');
+    expect(describeWorkflowJson(raw, { profile: 'v1', startNode: 'Loose' }).description.startNode).toBe('Loose');
+    expect(() => describeWorkflowJson(raw, { profile: 'v1', startNode: 'Nope' })).toThrow(/not a node/);
   });
 
   it('recognises n8n trigger types by name and by suffix', () => {
@@ -228,12 +242,12 @@ describe('workflow JSON adapter', () => {
   });
 
   it('rejects malformed input with a message, never a stack from JSON.parse', () => {
-    expect(() => parseWorkflowJson('{')).toThrow(/not valid JSON/);
-    expect(() => describeWorkflowJson({ nodes: 'no' })).toThrow(/`nodes` array/);
-    expect(() => describeWorkflowJson({ nodes: [{ type: 'x' }] })).toThrow(/has no name/);
+    expect(() => parseWorkflowJson('{', { profile: 'v1' })).toThrow(/not valid JSON/);
+    expect(() => describeWorkflowJson({ nodes: 'no' }, { profile: 'v1' })).toThrow(/`nodes` array/);
+    expect(() => describeWorkflowJson({ nodes: [{ type: 'x' }] }, { profile: 'v1' })).toThrow(/has no name/);
     expect(() => describeWorkflowJson({
       nodes: [{ name: 'A', type: 'x', position: [0, 0] }, { name: 'A', type: 'x', position: [0, 1] }],
-    })).toThrow(/same name/);
+    }, { profile: 'v1' })).toThrow(/same name/);
   });
 
   it('gives two nodes distinct MOD-010 prefixes even when the export repeats or omits ids', () => {
@@ -244,7 +258,7 @@ describe('workflow JSON adapter', () => {
         { id: 'has/slash', name: 'C', type: 'x', position: [0, 2] },
       ],
       connections: {},
-    });
+    }, { profile: 'v1' });
     expect(description.nodes.map((n) => n.id)).toEqual(['same', 'n1', 'n2']);
   });
 
@@ -273,6 +287,7 @@ describe('what is a shape guess and what is not', () => {
       },
     };
     const { description, warnings } = describeWorkflowJson(raw, {
+      profile: 'v1',
       nodeTypes: { types: { 'n8n-nodes-base.set@3': { inputCount: 1, outputCount: 1 }, 'n8n-nodes-base.webhook': { inputCount: 0, outputCount: 1 } } },
     });
     expect(warnings).toEqual([]);
@@ -286,9 +301,9 @@ describe('what is a shape guess and what is not', () => {
         { name: 'B', type: 'x', position: [0, 1] },
       ],
       connections: {},
-    });
+    }, { profile: 'v1' });
     expect(description.nodes.map((n) => n.id)).toEqual(['n1', 'n2']);
-    expect(() => compile(description)).not.toThrow();
+    expect(() => compile(description, { profile: 'v1' })).not.toThrow();
   });
 
   it('--start must name a node the scheduler runs, not an annotation', () => {
@@ -299,7 +314,7 @@ describe('what is a shape guess and what is not', () => {
       ],
       connections: {},
     };
-    expect(() => describeWorkflowJson(raw, { startNode: 'Note' })).toThrow(/not a node/);
+    expect(() => describeWorkflowJson(raw, { profile: 'v1', startNode: 'Note' })).toThrow(/not a node/);
   });
 });
 
@@ -326,18 +341,18 @@ describe('agent tool dispatch in an exported workflow', () => {
   };
 
   it('reads the ai_tool wiring and the round budget off the export', () => {
-    const { description } = describeWorkflowJson(exported);
+    const { description } = describeWorkflowJson(exported, { profile: 'v1' });
     expect(description.toolConnections).toEqual([{ agent: 'AI Agent', tool: 'Calculator' }]);
     expect(description.nodes.find((n) => n.name === 'AI Agent')!.maxRounds).toBe(4);
 
-    const a = analyse(description);
+    const a = analyse(description, { profile: 'v1' });
     expect(a.byName.get('Calculator')!.isTool).toBe(true);
     expect(a.byName.get('AI Agent')!.tools).toEqual(['Calculator']);
     expect(a.byName.get('AI Agent')!.roundsAssumed).toBe(false);
   });
 
   it('compiles the same round the scheduler would run', () => {
-    const c = compile(describeWorkflowJson(exported).description);
+    const c = compile(describeWorkflowJson(exported, { profile: 'v1' }).description, { profile: 'v1' });
     const agent = c.netMap.node('AI Agent');
     expect(agent.transitions.dispatch).not.toBeNull();
     expect(agent.transitions.resume).not.toBeNull();
@@ -350,7 +365,7 @@ describe('agent tool dispatch in an exported workflow', () => {
       nodes: exported.nodes.map((n) => (n.name === 'AI Agent'
         ? { ...n, parameters: { options: { maxIterations: '={{ $json.limit }}' } } } : n)),
     };
-    const a = analyse(describeWorkflowJson(withExpression).description);
+    const a = analyse(describeWorkflowJson(withExpression, { profile: 'v1' }).description, { profile: 'v1' });
     expect(a.byName.get('AI Agent')!.roundsAssumed).toBe(true);
     expect(a.diagnostics.join('\n')).toMatch(/does not declare a static maxIterations/);
   });
@@ -385,9 +400,9 @@ describe('describeWorkflowJson for engine v2 (tasks/v2-profile-plan.md step 13)'
     // n8n's node set, not the scheduler's graph: the sub-node is kept, with its connection type,
     // and rootAt drops it from the graph since no main connection reaches it.
     expect(byName.get('LM')!.aiOutputs).toEqual(['ai_languageModel']);
-    expect(describeWorkflowJson(json).description.nodes.some((n) => n.name === 'LM')).toBe(false);
+    expect(describeWorkflowJson(json, { profile: 'v1' }).description.nodes.some((n) => n.name === 'LM')).toBe(false);
     // Under v1 the start node is picked as before.
-    expect(describeWorkflowJson(json).description.startNode).toBe('T');
+    expect(describeWorkflowJson(json, { profile: 'v1' }).description.startNode).toBe('T');
   });
 
   it('refuses a start node under engineV2: the fired trigger is the compile option', () => {
@@ -438,7 +453,7 @@ describe('describeWorkflowJson under engineV2 hands the port n8n\'s workflow, no
     expect(describeWorkflowJson(ghost, { profile: 'engineV2' }).description.strayConnections)
       .toEqual({ main: [{ from: 'T', to: 'Ghost' }, { from: 'Ghost', to: 'B' }], sources: [] });
     // Under v1 nothing changes: the hops are dropped with a diagnostic, as before.
-    expect(describeWorkflowJson(ghost).description.strayConnections).toBeUndefined();
+    expect(describeWorkflowJson(ghost, { profile: 'v1' }).description.strayConnections).toBeUndefined();
   });
 
   // (b) n8n: GraphValidationError "slot index undefined; slot indices are non-negative integers".
@@ -448,7 +463,7 @@ describe('describeWorkflowJson under engineV2 hands the port n8n\'s workflow, no
         connections: { T: { main: [[{ node: 'A', type: 'main', ...(index === undefined ? {} : { index }) }]] } } };
       expect(v2(wf), String(index)).toBe('input-index-out-of-range');
       // v1 reads it as 0, as before.
-      expect(describeWorkflowJson(wf).description.connections[0]!.inputIndex).toBe(0);
+      expect(describeWorkflowJson(wf, { profile: 'v1' }).description.connections[0]!.inputIndex).toBe(0);
     }
   });
 
@@ -503,7 +518,7 @@ describe('describeWorkflowJson under engineV2 hands the port n8n\'s workflow, no
     const taken = { nodes: [node('T', TRIGGER), node('(nameless nodes[2])', 'n8n-nodes-base.set'), note()], connections: {} };
     expect(describeWorkflowJson(taken, { profile: 'engineV2' }).description.nodes.map((n) => n.name))
       .toEqual(['T', '(nameless nodes[2])', "(nameless nodes[2])'"]);
-    expect(describeWorkflowJson(wf(note())).description.nodes.map((n) => n.name)).toEqual(['T']);
+    expect(describeWorkflowJson(wf(note()), { profile: 'v1' }).description.nodes.map((n) => n.name)).toEqual(['T']);
   });
 
   // Review finding (round 3): n8n's dedupeEdges keys `${from}|${to}|${out}|${in}` over node ids.
@@ -530,7 +545,7 @@ describe('describeWorkflowJson under engineV2 hands the port n8n\'s workflow, no
     expect(describeWorkflowJson(wf('0'), { profile: 'engineV2' }).description.connections)
       .toEqual([{ from: 'T', outputIndex: 0, to: 'A', inputIndex: Number.NaN, indexKey: '0' }]);
     // v1 reads it as 0 and carries no key.
-    expect(describeWorkflowJson(wf('0')).description.connections).toEqual([{ from: 'T', outputIndex: 0, to: 'A', inputIndex: 0 }]);
+    expect(describeWorkflowJson(wf('0'), { profile: 'v1' }).description.connections).toEqual([{ from: 'T', outputIndex: 0, to: 'A', inputIndex: 0 }]);
   });
 
   // Review finding (round 3): a guessed count came from a fractional slot on an edge rootAt drops,

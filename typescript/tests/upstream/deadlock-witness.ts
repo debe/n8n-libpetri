@@ -19,7 +19,7 @@ import { fanOut, agentTwoTools } from '../fixtures/workflows.js';
 
 const timeoutMs = Number(process.argv[2] ?? 120_000);
 for (const [label, wf] of [['fanOut', fanOut], ['agentTwoTools (maxToolCalls 64)', { ...agentTwoTools, nodes: agentTwoTools.nodes.map((n) => (n.name === 'Agent' ? { ...n, maxToolCalls: 64 } : n)) }]] as const) {
-  const c = compile(wf);
+  const c = compile(wf, { profile: 'v1' });
   const byRoles = (roles: ReadonlySet<PlaceRole>) => c.netMap.places.filter((p) => roles.has(p.role)).map((p) => p.place);
   const sinks = byRoles(REST_ROLES);
   const marker = (role: PlaceRole) => c.netMap.places.find((p) => p.role === role)!.place;

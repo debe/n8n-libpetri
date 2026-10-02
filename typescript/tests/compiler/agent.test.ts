@@ -18,7 +18,7 @@ import { CompileError } from '../../src/compiler/index.js';
 
 describe('analysis', () => {
   it('classifies the tool and the agent', () => {
-    const a = analyse(agentOneTool);
+    const a = analyse(agentOneTool, { profile: 'v1' });
     expect(a.hasAgents).toBe(true);
     expect(a.byName.get('Calculator')!.isTool).toBe(true);
     expect(a.byName.get('Agent')!.isTool).toBe(false);
@@ -27,29 +27,29 @@ describe('analysis', () => {
   });
 
   it('leaves a workflow without tool connections exactly as it was', () => {
-    const a = analyse(linear);
+    const a = analyse(linear, { profile: 'v1' });
     expect(a.hasAgents).toBe(false);
     expect(a.toolConnections).toEqual([]);
     for (const n of a.nodes) expect(n.isTool).toBe(false);
   });
 
   it('reaches a tool through its agent, and gives it the agent depth plus one', () => {
-    const a = analyse(agentOneTool);
+    const a = analyse(agentOneTool, { profile: 'v1' });
     // The tool has no main producer, so only the dispatch edge can reach it.
     expect(a.reachable.has('Calculator')).toBe(true);
     expect(a.depth.get('Calculator')).toBe(a.depth.get('Agent')! + 1);
   });
 
   it('takes the round budget from the node and says so when it has to assume one', () => {
-    expect(analyse(agentOneTool).byName.get('Agent')!.maxRounds).toBe(3);
-    expect(analyse(agentOneTool).byName.get('Agent')!.roundsAssumed).toBe(false);
+    expect(analyse(agentOneTool, { profile: 'v1' }).byName.get('Agent')!.maxRounds).toBe(3);
+    expect(analyse(agentOneTool, { profile: 'v1' }).byName.get('Agent')!.roundsAssumed).toBe(false);
 
-    const assumed = analyse(agentAssumedRounds);
+    const assumed = analyse(agentAssumedRounds, { profile: 'v1' });
     expect(assumed.byName.get('Agent')!.maxRounds).toBe(10); // n8n's own default
     expect(assumed.byName.get('Agent')!.roundsAssumed).toBe(true);
     expect(assumed.diagnostics.join('\n')).toMatch(/does not declare a static maxIterations/);
 
-    const capped = analyse(agentAssumedRounds, { maxAgentRounds: 4 });
+    const capped = analyse(agentAssumedRounds, { profile: 'v1', maxAgentRounds: 4 });
     expect(capped.byName.get('Agent')!.maxRounds).toBe(4);
   });
 
@@ -62,7 +62,7 @@ describe('analysis', () => {
       nodeTypes: (n) => (n.name === 'Calculator'
         ? { inputCount: 1, outputCount: 1 }
         : agentOneTool.nodeTypes(n)),
-    });
+    }, { profile: 'v1' });
     expect(a.byName.get('Calculator')!.isTool).toBe(false);
     expect(a.diagnostics.join('\n')).toMatch(/also has a main producer/);
   });
@@ -70,7 +70,7 @@ describe('analysis', () => {
 
 describe('the compiled net', () => {
   it('gives the agent a round and the tool a dispatch place', () => {
-    const c = compile(agentOneTool);
+    const c = compile(agentOneTool, { profile: 'v1' });
     const agent = c.netMap.node('Agent');
     const tool = c.netMap.node('Calculator');
 
@@ -96,7 +96,7 @@ describe('the compiled net', () => {
   });
 
   it('seeds A/rounds with the agent maxRounds and A/idle with one', () => {
-    const c = compile(agentOneTool);
+    const c = compile(agentOneTool, { profile: 'v1' });
     const agent = c.netMap.node('Agent');
     const marking = c.initialMarking([{ json: {} }]);
     expect(marking.get(agentOf(agent).rounds)).toHaveLength(3);
@@ -108,7 +108,7 @@ describe('the compiled net', () => {
   });
 
   it('binds the cross-node ports into one flat net', () => {
-    const c = compile(agentTwoTools);
+    const c = compile(agentTwoTools, { profile: 'v1' });
     const agent = c.netMap.node('Agent');
     const names = new Set([...c.net.places].map((p) => p.name));
     // The agent writes each tool's own `in_tool` place; the composition funnels the agent's
@@ -121,7 +121,7 @@ describe('the compiled net', () => {
   });
 
   it('lets two agents share one tool', () => {
-    const c = compile(agentSharedTool);
+    const c = compile(agentSharedTool, { profile: 'v1' });
     const tool = c.netMap.node('Calculator');
     expect(asForm(tool, 'tool').agents).toEqual(['A1', 'A2']);
     // One dispatch place, one idle token: the tool is serialised across both agents.
@@ -131,7 +131,7 @@ describe('the compiled net', () => {
   it('runs the structural placeholder net to quiescence', async () => {
     // The placeholder action never takes the request outcome, so an agent workflow still
     // terminates under `compile()`'s own actions — which is what the verifier explores.
-    const c = compile(agentOneTool);
+    const c = compile(agentOneTool, { profile: 'v1' });
     expect(c.net.transitions).toBeDefined();
     expect(() => c.program).not.toThrow();
   });
@@ -160,23 +160,23 @@ describe('a tool wired to main consumers', () => {
 
   it('compiles with four connected outputs, in the tool form and with no output at all', async () => {
     const wf = toolWithConsumers(4);
-    const a = analyse(wf);
+    const a = analyse(wf, { profile: 'v1' });
     expect(a.diagnostics.join('\n')).toMatch(/'Calculator' has main consumers/);
     expect(a.outgoing.get('Calculator')).toEqual([]);
 
-    const c = compile(wf);
+    const c = compile(wf, { profile: 'v1' });
     const tool = asForm(c.netMap.node('Calculator'), 'tool');
     expect(tool.outputs).toEqual([]);
     expect(tool.routing.kind).toBe('collapsed');
     expect(() => c.program).not.toThrow();
 
     // The same structural check every agent net gets: the graph closes and completes.
-    const r = await verify(wf, { properties: ['proper-completion'], timeoutMs: 1 });
+    const r = await verify(wf, { profile: 'v1', properties: ['proper-completion'], timeoutMs: 1 });
     expect(r.stateSpace.complete).toBe(true);
   });
 
   it('declares no out_e port with one connected output', () => {
-    const c = compile(toolWithConsumers(1));
+    const c = compile(toolWithConsumers(1), { profile: 'v1' });
     const tool = c.netMap.node('Calculator');
     expect(tool.outputs).toEqual([]);
     // The consumer still owns its `in` place, but the tool's run writes nothing there.
@@ -197,7 +197,7 @@ describe('a tool wired to main consumers', () => {
         : n.name === 'M' ? { inputCount: 2, outputCount: 1 } : agentOneTool.nodeTypes(n)),
     };
     let refusal: unknown;
-    try { compile(wf); } catch (e) { refusal = e; }
+    try { compile(wf, { profile: 'v1' }); } catch (e) { refusal = e; }
     expect(refusal).toBeInstanceOf(CompileError);
     expect((refusal as CompileError).code).toBe('tool-main-consumer');
     expect((refusal as CompileError).node).toBe('M');
@@ -210,7 +210,7 @@ describe('the round budget is a hard bound', () => {
     // `A_resume`, so the round loop can go round at most `maxIterations` times. If any
     // transition ever produced it, the cycle would be unbounded again and the graph would stop
     // closing — silently, because it would just truncate instead.
-    const c = compile(agentTwoTools);
+    const c = compile(agentTwoTools, { profile: 'v1' });
     const rounds = agentOf(c.netMap.node('Agent')).rounds;
     const producers: string[] = [];
     for (const t of c.net.transitions) {
@@ -234,7 +234,7 @@ describe('the round budget is a hard bound', () => {
     });
     const sizes: number[] = [];
     for (const n of [1, 2, 3]) {
-      const r = await verify(withRounds(n), { properties: ['proper-completion'], timeoutMs: 1 });
+      const r = await verify(withRounds(n), { profile: 'v1', properties: ['proper-completion'], timeoutMs: 1 });
       expect(r.stateSpace.complete).toBe(true);
       sizes.push(r.stateSpace.classes);
     }
@@ -259,7 +259,7 @@ describe('the round budget is a hard bound', () => {
       ...agentTwoTools,
       nodes: agentTwoTools.nodes.map((x) => (x.name === 'Agent' ? { ...x, maxRounds: 2, maxToolCalls: K } : x)),
     };
-    const c = compile(wf);
+    const c = compile(wf, { profile: 'v1' });
     const g = c.netMap.node('Agent');
     const doneReq = [...c.net.transitions].find((t) => t.name === g.transitions.doneRequest)!;
     const branches = enumerateBranches((doneReq as unknown as { outputSpec: never }).outputSpec);
@@ -277,7 +277,7 @@ describe('the round budget is a hard bound', () => {
   });
 
   it('nothing in the compiled net refunds A/calls either', () => {
-    const c = compile(agentTwoTools);
+    const c = compile(agentTwoTools, { profile: 'v1' });
     const calls = agentOf(c.netMap.node('Agent')).calls;
     const producers: string[] = [];
     for (const t of c.net.transitions) {
@@ -296,7 +296,7 @@ describe('verification', () => {
     // The agent's `queue → dispatched → running → queue` loop is a cycle, and a cycle is what
     // leaves `loopOverItems` at `bounded` forever. This one closes: `A/rounds` is seeded from
     // the workflow's own `options.maxIterations`, so the reachability graph is finite.
-    const report = await verify(agentOneTool, { properties: ['proper-completion'], timeoutMs: 1 });
+    const report = await verify(agentOneTool, { profile: 'v1', properties: ['proper-completion'], timeoutMs: 1 });
     expect(report.counts.violated).toBe(0);
     expect(report.counts.unknown).toBe(0);
     expect(report.stateSpace.complete).toBe(true);
@@ -305,7 +305,7 @@ describe('verification', () => {
   it('an assumed budget truncates and the report names the knob; a declared one proves', async () => {
     // At the scheduler's runtime default (64) the graph cannot close — about K^3.7 markings
     // sequences — and the cause must say so in terms the user can act on, not "cap too low".
-    const assumed = await verify(agentAssumedRounds, { properties: ['proper-completion'], timeoutMs: 1, maxClasses: 5_000 });
+    const assumed = await verify(agentAssumedRounds, { profile: 'v1', properties: ['proper-completion'], timeoutMs: 1, maxClasses: 5_000 });
     expect(assumed.stateSpace.complete).toBe(false);
     expect(assumed.stateSpace.truncation).toBe('tool-calls');
     expect(assumed.stateSpace.agents).toEqual([{ node: 'Agent', tools: 1, maxToolCalls: 64, assumed: true }]);
@@ -324,7 +324,7 @@ describe('verification', () => {
     const declared = await verify({
       ...agentAssumedRounds,
       nodes: agentAssumedRounds.nodes.map((n) => (n.name === 'Agent' ? { ...n, maxRounds: 2, maxToolCalls: 3 } : n)),
-    }, { properties: ['proper-completion'], timeoutMs: 1 });
+    }, { profile: 'v1', properties: ['proper-completion'], timeoutMs: 1 });
     expect(declared.stateSpace.complete).toBe(true);
     expect(declared.stateSpace.agents).toEqual([{ node: 'Agent', tools: 1, maxToolCalls: 3, assumed: false }]);
     expect(declared.counts.violated).toBe(0);
@@ -343,7 +343,7 @@ describe('verification', () => {
     ], [
       conn('Trigger', 0, 'IF', 0), conn('IF', 0, 'Agent', 0), conn('IF', 1, 'Other', 0),
     ], 'Trigger', { toolConnections: [tool('Calculator', 'Agent')] });
-    const report = await verify(branching, { properties: ['proper-completion'], timeoutMs: 1, maxClasses: 20 });
+    const report = await verify(branching, { profile: 'v1', properties: ['proper-completion'], timeoutMs: 1, maxClasses: 20 });
     expect(report.stateSpace.complete).toBe(false);
     expect(report.stateSpace.truncation).toBe('tool-calls');
     const reason = report.checks.find((c) => c.property === 'proper-completion')!.reason ?? '';
@@ -358,7 +358,7 @@ describe('verification', () => {
     // `A/queue` with no round token left — work nothing can ever take. That is a real stranding
     // in the abstraction (a real agent throws "Max iterations reached" first, which the
     // value-blind graph cannot know), so the net makes it a terminal the codec writes back.
-    const c = compile(agentOneTool);
+    const c = compile(agentOneTool, { profile: 'v1' });
     expect(c.netMap.node('Agent').transitions.roundsOut).not.toBeNull();
   });
 });
@@ -375,28 +375,28 @@ describe('the structural hash', () => {
   };
 
   it('separates workflows that differ only in their ai_tool wiring', () => {
-    expect(structuralHash(analyse(agentOneTool))).not.toBe(structuralHash(analyse(withoutTools)));
+    expect(structuralHash(analyse(agentOneTool, { profile: 'v1' }))).not.toBe(structuralHash(analyse(withoutTools, { profile: 'v1' })));
   });
 
   it('separates workflows that differ only in the agent round budget', () => {
-    expect(structuralHash(analyse(agentOneTool))).not.toBe(structuralHash(analyse(withNineRounds)));
+    expect(structuralHash(analyse(agentOneTool, { profile: 'v1' }))).not.toBe(structuralHash(analyse(withNineRounds, { profile: 'v1' })));
   });
 
   it('separates a declared round budget from an assumed one of the same size', () => {
     // Same seed, same marking — but only one of them licenses a bound in a verification report,
     // and the fallback is a compile option, so the same workflow under a different cap must not
     // reuse the entry either.
-    const assumed = analyse(agentAssumedRounds, { maxAgentRounds: 3 });
+    const assumed = analyse(agentAssumedRounds, { profile: 'v1', maxAgentRounds: 3 });
     const declared = analyse({
       ...agentAssumedRounds,
       nodes: agentAssumedRounds.nodes.map((n) => (n.name === 'Agent' ? { ...n, maxRounds: 3 } : n)),
-    });
+    }, { profile: 'v1' });
     expect(assumed.byName.get('Agent')!.maxRounds).toBe(declared.byName.get('Agent')!.maxRounds);
     expect(structuralHash(assumed)).not.toBe(structuralHash(declared));
   });
 
   it('is unchanged by adding an empty toolConnections list to a workflow without agents', () => {
-    expect(structuralHash(analyse(linear))).toBe(structuralHash(analyse({ ...linear, toolConnections: [] })));
+    expect(structuralHash(analyse(linear, { profile: 'v1' }))).toBe(structuralHash(analyse({ ...linear, toolConnections: [] }, { profile: 'v1' })));
   });
 });
 
@@ -414,7 +414,7 @@ describe('an agent used as another agent\'s tool', () => {
       .map((n) => n.slice(`id:${node}/`.length)).sort();
 
   it('compiles with no diagnostics, and puts the tool one level below its agent', () => {
-    const a = analyse(agentNested);
+    const a = analyse(agentNested, { profile: 'v1' });
     expect(a.diagnostics).toEqual([]);
     // The classification that makes this fixture the case it is.
     expect(a.byName.get('B')!.isTool).toBe(true);
@@ -429,7 +429,7 @@ describe('an agent used as another agent\'s tool', () => {
   });
 
   it('gives B both gadgets and neither twice', () => {
-    const c = compile(agentNested);
+    const c = compile(agentNested, { profile: 'v1' });
     // Hand-derived. A tool's input side is the agent's dispatch place and nothing else, so `B`
     // has `in_tool` where `A` has `in` / `in_empty`, and no `skipped` — a tool is never
     // delivered an empty activation to skip. Everything else is `A`'s, entire: the node core
@@ -458,7 +458,7 @@ describe('an agent used as another agent\'s tool', () => {
   });
 
   it('separates the tool outcome from the nested round in one xor', () => {
-    const c = compile(agentNested);
+    const c = compile(agentNested, { profile: 'v1' });
     const run = [...c.net.transitions].find((t) => t.name === 'id:B/run')!;
     const branches = enumerateBranches((run as unknown as { outputSpec: never }).outputSpec)
       .map((b) => [...b].map((p) => p.name).sort());
@@ -486,7 +486,7 @@ describe('an agent used as another agent\'s tool', () => {
     // activation always fails (`toolCallBudgetExceeded` before `runNode`). The run it re-enters
     // must therefore not offer the request branch, or the value-blind graph explores
     // `calls_out → run → done_req → calls_out` forever — a lasso the executor never runs.
-    const c = compile(agentTwoTools, { budget: 1 });
+    const c = compile(agentTwoTools, { profile: 'v1', budget: 1 });
     const branchesOf = (name: string): string[][] => {
       const t = [...c.net.transitions].find((x) => x.name === name)!;
       return enumerateBranches((t as unknown as { outputSpec: never }).outputSpec).map((b) => [...b].map((p) => p.name).sort());
@@ -516,7 +516,7 @@ describe('an agent used as another agent\'s tool', () => {
   });
 
   it('bounds both levels: each agent spends its own A/calls, and neither refunds', () => {
-    const c = compile(agentNested);
+    const c = compile(agentNested, { profile: 'v1' });
     const space = StateSpace.explore(c.net, markingStateOf(c.initialMarking(null)), c.netMap, 200_000);
     expect(space.complete).toBe(true);
     // Two independent budgets, not one shared counter — `B`'s round is bounded by `B/calls`

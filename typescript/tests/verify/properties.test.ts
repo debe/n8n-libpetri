@@ -44,7 +44,7 @@ describeZ3('verify: properties', () => {
   describe('budget', () => {
     it('placeBound(_budget, k) is proven at k = 1, 2 and 4', { timeout: CASE_TIMEOUT_MS }, async () => {
       for (const k of [1, 2, 4]) {
-        const report = await verify(diamond, { ...base, budget: k, properties: ['budget'] });
+        const report = await verify(diamond, { profile: 'v1', ...base, budget: k, properties: ['budget'] });
         expect(report.budget).toBe(k);
         const bound = report.checks.find((c) => c.subject.kind === 'place')!;
         expect(bound.verdict, `k=${k}\n${digest(report)}`).toBe('proven');
@@ -53,12 +53,12 @@ describeZ3('verify: properties', () => {
     });
 
     it('the two-phase semiflow _budget + sum(running + routed) = k is among the invariants', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(diamond, { ...base, budget: 2, properties: ['budget'] });
+      const report = await verify(diamond, { profile: 'v1', ...base, budget: 2, properties: ['budget'] });
       const semiflow = report.invariants.budgetSemiflow;
       expect(semiflow, digest(report)).not.toBeNull();
       expect(semiflow).toMatch(/_budget/);
       expect(semiflow).toMatch(/= 2$/);
-      for (const g of compile(diamond, { budget: 2 }).netMap.nodes) {
+      for (const g of compile(diamond, { profile: 'v1', budget: 2 }).netMap.nodes) {
         expect(semiflow, `${g.node} is not in the semiflow`).toContain(g.running.name);
         // The in-flight place: `X/routed` for a node that routes inside `X_run`, `X/ok_o`
         // for one above `SPLIT_ROUTING_ABOVE` — where the enumeration returns one law per
@@ -83,8 +83,8 @@ describeZ3('verify: properties', () => {
       // present on a run whose graph closed and missing on a run of the same net whose graph
       // truncated. `agentNested` is the fixture that made it visible: the first one big enough
       // to truncate at the default cap.
-      const small = await verify(agentNested, { ...base, properties: ['budget'], maxClasses: 2_000 });
-      const large = await verify(agentNested, { ...base, properties: ['budget'] });
+      const small = await verify(agentNested, { profile: 'v1', ...base, properties: ['budget'], maxClasses: 2_000 });
+      const large = await verify(agentNested, { profile: 'v1', ...base, properties: ['budget'] });
       expect(small.stateSpace.complete).toBe(false);
       expect(large.stateSpace.complete).toBe(true);
       expect(small.invariants.budgetSemiflow, digest(small)).not.toBeNull();
@@ -97,7 +97,7 @@ describeZ3('verify: properties', () => {
       // not per level. An agent used as another agent's tool holds its unit on `B/routed_req`
       // between its request and `B_done_req`, exactly as the agent above it holds one on
       // `A/routed_req` — so one conservation law spans both rounds, and z3 validates it.
-      const report = await verify(agentNested, { ...base, properties: ['budget'] });
+      const report = await verify(agentNested, { profile: 'v1', ...base, properties: ['budget'] });
       const semiflow = report.invariants.budgetSemiflow;
       expect(semiflow, digest(report)).not.toBeNull();
       for (const local of ['id:A/running', 'id:A/routed_req', 'id:B/running', 'id:B/routed_req']) {
@@ -110,7 +110,7 @@ describeZ3('verify: properties', () => {
   describe('no double activation', () => {
     it('placeBound(X/running, 1) is proven for every node, at k = 1 and k = 4', { timeout: CASE_TIMEOUT_MS }, async () => {
       for (const k of [1, 4]) {
-        const report = await verify(diamond, { ...base, budget: k, properties: ['no-double-activation'] });
+        const report = await verify(diamond, { profile: 'v1', ...base, budget: k, properties: ['no-double-activation'] });
         const checks = checksOf(report, 'no-double-activation');
         expect(checks).toHaveLength(6);
         expect(checks.every((c) => c.verdict === 'proven'), `k=${k}\n${digest(report)}`).toBe(true);
@@ -120,7 +120,7 @@ describeZ3('verify: properties', () => {
 
   describe('retry bound', () => {
     it('a retryOnFail node proves at most maxTries attempts — the place bound AND the producer check', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(retryFour, { ...base, properties: ['retry-bound'] });
+      const report = await verify(retryFour, { profile: 'v1', ...base, properties: ['retry-bound'] });
       const checks = checksOf(report, 'retry-bound');
       // Two checks, because the place bound alone does not entail the attempt bound: it is
       // true in the initial marking and a net that refunded a try token would keep it.
@@ -138,12 +138,12 @@ describeZ3('verify: properties', () => {
       expect(attempts.query.method).toBe('structural');
       expect(attempts.explanation).toContain('No transition produces');
 
-      const none = await verify(linear, { ...base, properties: ['retry-bound'] });
+      const none = await verify(linear, { profile: 'v1', ...base, properties: ['retry-bound'] });
       expect(checksOf(none, 'retry-bound')).toHaveLength(0);
     });
 
     it('an onFailure chain proves one bound per attempt plus that the chain is a line', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(failurePolicy, { ...base, properties: ['retry-bound'] });
+      const report = await verify(failurePolicy, { profile: 'v1', ...base, properties: ['retry-bound'] });
       const checks = checksOf(report, 'retry-bound');
       // Three attempts, so three place bounds plus the structural line check.
       expect(checks).toHaveLength(4);
@@ -166,7 +166,7 @@ describeZ3('verify: properties', () => {
 
     it('the producer half is what carries the attempt bound: nothing in the net produces X/tries', () => {
       // Structural, no solver: the check reads the flattened net the encoder sees.
-      const compiled = compile(retryFour);
+      const compiled = compile(retryFour, { profile: 'v1' });
       const tries = retryOf(compiled.netMap.node('A')).tries;
       expect(producersOf(flatten(compiled.net), tries)).toEqual([]);
       // The query is live rather than vacuous: something *does* produce X/running.
@@ -177,6 +177,7 @@ describeZ3('verify: properties', () => {
   describe('mutual exclusion', () => {
     it('every pair is provable at k = 1 — the budget model is what makes it so', { timeout: CASE_TIMEOUT_MS }, async () => {
       const report = await verify(diamond, {
+        profile: 'v1',
         ...base, budget: 1, properties: ['mutual-exclusion'], mutualExclusion: 'all-pairs',
       });
       const checks = checksOf(report, 'mutual-exclusion');
@@ -188,13 +189,13 @@ describeZ3('verify: properties', () => {
       // `fanOut` and not `diamond`: a *violation* is a SAT witness Spacer has to search for,
       // and past a join that search does not close (docs/verification.md). Two siblings of
       // one trigger are the shallowest shape that can hold two budget units at once.
-      const report = await verify(fanOut, { ...base, timeoutMs: 30_000, budget: 2, mutualExclusion: [['A', 'B']], properties: ['mutual-exclusion'] });
+      const report = await verify(fanOut, { profile: 'v1', ...base, timeoutMs: 30_000, budget: 2, mutualExclusion: [['A', 'B']], properties: ['mutual-exclusion'] });
       const check = checksOf(report, 'mutual-exclusion')[0]!;
       expect(check.verdict, digest(report)).toBe('violated');
       const cex = check.counterexample;
       expect(cex, 'a violation must carry a witness').not.toBeNull();
       // Every step is a real node of the workflow, not a place name.
-      const names = new Set(compile(fanOut).netMap.nodes.map((g) => g.node));
+      const names = new Set(compile(fanOut, { profile: 'v1' }).netMap.nodes.map((g) => g.node));
       expect(cex!.nodePath.length).toBeGreaterThan(0);
       for (const n of cex!.nodePath) expect(names, `'${n}' is not a node`).toContain(n);
       expect(cex!.nodePath).toContain('A');
@@ -204,7 +205,7 @@ describeZ3('verify: properties', () => {
     });
 
     it('a pair naming a node the workflow does not have is unknown, never a throw', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(diamond, { ...base, mutualExclusion: [['A', 'Nope']], properties: ['mutual-exclusion'] });
+      const report = await verify(diamond, { profile: 'v1', ...base, mutualExclusion: [['A', 'Nope']], properties: ['mutual-exclusion'] });
       const check = checksOf(report, 'mutual-exclusion')[0]!;
       expect(check.verdict).toBe('unknown');
       expect(check.reason).toMatch(/unknown node/);
@@ -213,7 +214,7 @@ describeZ3('verify: properties', () => {
 
   describe('dead nodes', () => {
     it('a node no execution can reach is reported dead, by name', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(orphanBranch, { ...base, properties: ['dead-nodes'] });
+      const report = await verify(orphanBranch, { profile: 'v1', ...base, properties: ['dead-nodes'] });
       const checks = checksOf(report, 'dead-nodes');
       expect(checks).toHaveLength(4);
       for (const dead of ['Orphan', 'OrphanChild']) {
@@ -228,7 +229,7 @@ describeZ3('verify: properties', () => {
     });
 
     it('a reachable node is `unknown`, never `proven`: reachability is not a liveness proof (VER-004)', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(orphanBranch, { ...base, properties: ['dead-nodes'] });
+      const report = await verify(orphanBranch, { profile: 'v1', ...base, properties: ['dead-nodes'] });
       const checks = checksOf(report, 'dead-nodes');
       expect(checks.some((c) => c.verdict === 'proven'), `no dead-nodes check may be 'proven'\n${digest(report)}`)
         .toBe(false);
@@ -245,7 +246,7 @@ describeZ3('verify: properties', () => {
       // graph finds it immediately — and the verdict is `unknown` all the same, because the
       // reason it is `unknown` was never the solver. If this ever becomes `proven`, the
       // polarity rule of ADR 0007 §5 has been broken.
-      const deep = await verify(diamond, { ...base, properties: ['dead-nodes'] });
+      const deep = await verify(diamond, { profile: 'v1', ...base, properties: ['dead-nodes'] });
       const merge = nodeCheck(checksOf(deep, 'dead-nodes'), 'Merge');
       expect(merge.verdict, `a reached node must never be 'proven' live\n${digest(deep)}`).toBe('unknown');
       expect(merge.query.verdict).toBe('violated');
@@ -257,7 +258,7 @@ describeZ3('verify: properties', () => {
       // n8n runs one trigger per execution, and `initialMarking` seeds only the start node's
       // own input, so `unreachable(TrigB/running)` really is proven. Reporting it as a
       // finding would fail the CLI's exit code on an ordinary Manual-plus-Webhook workflow.
-      const report = await verify(twoTriggers, { ...base, properties: ['dead-nodes'] });
+      const report = await verify(twoTriggers, { profile: 'v1', ...base, properties: ['dead-nodes'] });
       const check = nodeCheck(checksOf(report, 'dead-nodes'), 'TrigB');
       expect(check.verdict, digest(report)).toBe('unknown');
       // libpetri's own verdict is still recorded: the downgrade is never hidden.
@@ -271,10 +272,10 @@ describeZ3('verify: properties', () => {
 
   describe('alternative entry points (no solver)', () => {
     it('names a second trigger and everything only it feeds, and nothing else', () => {
-      expect([...alternativeEntryReach(compile(twoTriggers))]).toEqual([['TrigB', 'TrigB']]);
+      expect([...alternativeEntryReach(compile(twoTriggers, { profile: 'v1' }))]).toEqual([['TrigB', 'TrigB']]);
       // An unwired node whose shape has an input is an orphan, not an entry point: n8n can
       // never start there, so `Orphan` stays a finding.
-      expect([...alternativeEntryReach(compile(orphanBranch))]).toEqual([]);
+      expect([...alternativeEntryReach(compile(orphanBranch, { profile: 'v1' }))]).toEqual([]);
       // A private branch behind the second trigger is dead for the same reason it is.
       const twoBranches = workflow('two-branches', [
         node('TrigA', 'trigger', [0, 0]),
@@ -284,7 +285,7 @@ describeZ3('verify: properties', () => {
       ], [
         conn('TrigA', 0, 'Shared', 0), conn('TrigB', 0, 'Own', 0), conn('Own', 0, 'Shared', 0),
       ], 'TrigA');
-      const reach = alternativeEntryReach(compile(twoBranches));
+      const reach = alternativeEntryReach(compile(twoBranches, { profile: 'v1' }));
       expect([...reach].sort()).toEqual([['Own', 'TrigB'], ['TrigB', 'TrigB']]);
       // `Shared` is fed by the start node too, so it is not excused.
       expect(reach.has('Shared')).toBe(false);
@@ -293,7 +294,7 @@ describeZ3('verify: properties', () => {
 
   describe('proper completion', () => {
     it('a balanced diamond reports no stranding, and every arrival bound proves', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const compiled = compile(diamond);
+      const compiled = compile(diamond, { profile: 'v1' });
       const report = await verifyCompiled(compiled, { ...base, properties: ['proper-completion'] });
       const checks = checksOf(report, 'proper-completion');
       const readyPlaces = compiled.joinReadyPlaces.flatMap((j) => j.places).length;
@@ -332,7 +333,7 @@ describeZ3('verify: properties', () => {
       //
       // M4 measured this `unknown` at 30 s on the smallest OR shape there is, so the family
       // had no working detector for the arrival-count class. The graph decides it exactly.
-      const compiled = compile(multiProducer);
+      const compiled = compile(multiProducer, { profile: 'v1' });
       expect(compiled.netMap.node('C').form).toBe('or');
       const report = await verifyCompiled(compiled, { ...base, properties: ['proper-completion'] });
       const bound = checksOf(report, 'proper-completion').find((c) => c.query.property === 'place-bound')!;
@@ -345,13 +346,13 @@ describeZ3('verify: properties', () => {
       // The headline reversal. M4 measured this `unknown` at 30 s, 60 s and 600 s on *both*
       // fixtures — on the one that strands and on the one that does not — which is what made
       // the project's most valuable claim undeliverable.
-      const clean = await verifyCompiled(compile(diamond), { ...base, properties: ['proper-completion'] });
+      const clean = await verifyCompiled(compile(diamond, { profile: 'v1' }), { ...base, properties: ['proper-completion'] });
       const cleanJoins = checksOf(clean, 'proper-completion')
         .filter((c) => c.subject.kind === 'join-input' && c.name.includes('always completes'));
       expect(cleanJoins.length).toBeGreaterThan(0);
       for (const check of cleanJoins) expect(check.verdict, digest(clean)).toBe('proven');
 
-      const broken = await verifyCompiled(compile(unbalancedJoin), { ...base, properties: ['proper-completion'] });
+      const broken = await verifyCompiled(compile(unbalancedJoin, { profile: 'v1' }), { ...base, properties: ['proper-completion'] });
       const brokenJoins = checksOf(broken, 'proper-completion')
         .filter((c) => c.subject.kind === 'join-input' && c.name.includes('always completes'));
       expect(brokenJoins.some((c) => c.verdict === 'violated'), digest(broken)).toBe(true);
@@ -367,7 +368,7 @@ describeZ3('verify: properties', () => {
       // three `violated` witnesses here and had to downgrade each to `unknown`, because
       // `joinedOrDeadLettered` ignores declared sinks (NU-040 AC4). The graph classifies the
       // class instead, so the same workflow is simply `proven`.
-      const report = await verify(fanOut, { ...base, properties: ['proper-completion'] });
+      const report = await verify(fanOut, { profile: 'v1', ...base, properties: ['proper-completion'] });
       const checks = checksOf(report, 'proper-completion');
       expect(checks.every((c) => c.verdict === 'proven'), digest(report)).toBe(true);
       expect(checks.every((c) => c.counterexample === null)).toBe(true);
@@ -385,6 +386,7 @@ describeZ3('verify: properties', () => {
       // is what lets Spacer find the inductive invariant. Its `proven` is about every
       // reachable marking, not the explored prefix, so the row is a proof and says so.
       const report = await verify(loopOverItems, {
+        profile: 'v1',
         ...base, timeoutMs: 10_000, maxClasses: 500, properties: ['proper-completion'],
       });
       const whole = checksOf(report, 'proper-completion').find((c) => c.subject.kind === 'net')!;
@@ -404,6 +406,7 @@ describeZ3('verify: properties', () => {
       // Without the fallback the graph's `bounded` prefix is all there is, and the reason
       // carries both halves: the cap that truncated it, and why z3 was not consulted.
       const report = await verify(loopOverItems, {
+        profile: 'v1',
         ...base, timeoutMs: 4_000, maxClasses: 500, properties: ['proper-completion'], smtFallback: 'off',
       });
       const whole = checksOf(report, 'proper-completion').find((c) => c.subject.kind === 'net')!;
@@ -447,6 +450,7 @@ describeZ3('verify: properties', () => {
       // That is a red build for a correct degradation. Reproduced 1 run in 4 at 2 s with the
       // cores saturated, 0 in 8 at 5 s and 10 s under the same load.
       const report = await verify(switch20, {
+        profile: 'v1',
         ...base, timeoutMs: 10_000, maxClasses: 500, properties: ['proper-completion'],
       });
       expect(report.stateSpace.truncation).toBe('parallelism');
@@ -462,7 +466,7 @@ describeZ3('verify: properties', () => {
     it('the stranding the unbalanced join has is real, and is what the query would have to find', () => {
       // Not a solver assertion: the shape itself. Input 0 has two producers and input 1 one,
       // so the join's slot discipline leaves the second arrival on ready_0 for good.
-      const compiled = compile(unbalancedJoin, { budget: 4 });
+      const compiled = compile(unbalancedJoin, { profile: 'v1', budget: 4 });
       expect(compiled.effectiveBudget).toBe(1);
       expect(compiled.budgetRestriction?.reason).toBe('multi-producer-input');
       expect(compiled.budgetRestriction?.detail).toContain('M.0 has 2 producers');
@@ -475,7 +479,7 @@ describeZ3('verify: properties', () => {
       // `measure.ts` labels one dead-nodes query `[live]`. Taking the last node in canvas
       // order picks `OrphanChild` here, which is dead — so the doc's two `[live]` rows for
       // the orphan size were a deadness proof under a liveness label.
-      const compiled = compile(orphanBranch);
+      const compiled = compile(orphanBranch, { profile: 'v1' });
       const live = liveSampleNode(compiled.netMap)!;
       expect(live.node).toBe('A');
       expect(live.reachable).toBe(true);
@@ -487,7 +491,7 @@ describeZ3('verify: properties', () => {
 
   describe('the whole report', () => {
     it('carries the net size, the solver, the invariants and the compiler diagnostics', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(linear, { ...base, properties: ['budget'] });
+      const report = await verify(linear, { profile: 'v1', ...base, properties: ['budget'] });
       expect(report.workflow).toBe('linear');
       expect(report.structuralHash).toMatch(/^[0-9a-f]{64}$/);
       expect(report.net.places).toBeGreaterThan(0);
@@ -501,7 +505,7 @@ describeZ3('verify: properties', () => {
     });
 
     it('a k-safety restriction is reported, and the budget it verifies is the effective one', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(unbalancedJoin, { ...base, budget: 4, properties: ['budget'] });
+      const report = await verify(unbalancedJoin, { profile: 'v1', ...base, budget: 4, properties: ['budget'] });
       expect(report.requestedBudget).toBe(4);
       expect(report.budget).toBe(1);
       expect(report.budgetRestriction?.reason).toBe('multi-producer-input');
@@ -509,19 +513,19 @@ describeZ3('verify: properties', () => {
     });
 
     it('runs no query and reports nothing when no property is selected', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(linear, { ...base, properties: [] });
+      const report = await verify(linear, { profile: 'v1', ...base, properties: [] });
       expect(report.checks).toEqual([]);
       expect(report.ok).toBe(true);
       // And it does not pay the P-invariant pipeline either: since M5 that runs only for the
       // budget family's semiflow, which is the one claim the graph cannot make. That is what
       // keeps a 41-node workflow verifiable at all — the pipeline is the wall, not z3.
       expect(report.invariants.encoded).toBe(0);
-      const budget = await verify(linear, { ...base, properties: ['budget'] });
+      const budget = await verify(linear, { profile: 'v1', ...base, properties: ['budget'] });
       expect(budget.invariants.encoded).toBeGreaterThan(0);
     });
 
     it('carries the solver-free route\'s own numbers, so a truncation is visible in the JSON', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const report = await verify(diamond, { ...base, properties: ['proper-completion'] });
+      const report = await verify(diamond, { profile: 'v1', ...base, properties: ['proper-completion'] });
       // Re-measured with the collapsed outcome (ADR 0004): 393 with X/ok + X_route per node; and
       // 306 until a skip stopped at the join that nothing past it reads (ADR 0002).
       expect(report.stateSpace.classes).toBe(295);
@@ -553,7 +557,7 @@ describeZ3('verify: properties', () => {
     it('does not escalate when the first pass truncates but everything is proven', { timeout: CASE_TIMEOUT_MS }, async () => {
       // The case staging exists for. The graph cannot close, the SMT route decides every check,
       // and spending the other 175 000 classes could not change an answer.
-      const report = await verify(generateFanOut(12), { ...base, properties: ['proper-completion'] });
+      const report = await verify(generateFanOut(12), { profile: 'v1', ...base, properties: ['proper-completion'] });
       expect(report.stateSpace.truncation, digest(report)).not.toBeNull();
       expect(report.stateSpace.requestedMaxClasses).toBe(FIRST_PASS_MAX_CLASSES);
       expect(report.checks.every((c) => c.verdict === 'proven'), digest(report)).toBe(true);
@@ -571,7 +575,7 @@ describeZ3('verify: properties', () => {
         conn('B', 0, 'M', 0), conn('Trigger', 0, 'M', 1),
         ...Array.from({ length: 8 }, (_, i) => conn('Trigger', 0, `W${i}`, 0)),
       ], 'Trigger');
-      const report = await verify(wide, { ...base, properties: ['proper-completion'] });
+      const report = await verify(wide, { profile: 'v1', ...base, properties: ['proper-completion'] });
       expect(report.stateSpace.requestedMaxClasses).toBe(DEFAULT_MAX_CLASSES);
       expect(report.checks.some((c) => c.verdict === 'violated'), digest(report)).toBe(true);
       expect(report.checks.some((c) => c.counterexample !== null), digest(report)).toBe(true);
@@ -580,14 +584,14 @@ describeZ3('verify: properties', () => {
     it('never stages a cyclic workflow: a smaller prefix is a narrower `bounded` claim', { timeout: CASE_TIMEOUT_MS }, async () => {
       // Its space is unbounded, so it truncates whatever the cap. A first pass could only narrow
       // the prefix the `bounded` verdict is certified over, and could never save a second.
-      const report = await verify(loopOverItems, { ...base, properties: ['proper-completion'] });
+      const report = await verify(loopOverItems, { profile: 'v1', ...base, properties: ['proper-completion'] });
       expect(report.stateSpace.requestedMaxClasses).toBe(DEFAULT_MAX_CLASSES);
     });
 
     it('a caller ceiling below the staged cap is used as-is, in one pass', { timeout: CASE_TIMEOUT_MS }, async () => {
       // `maxClasses` is a ceiling, not a strategy. Below the staged cap there is nothing to
       // stage, so the route asks for exactly what the caller allowed.
-      const report = await verify(diamond, { ...base, properties: ['proper-completion'], maxClasses: 3_000 });
+      const report = await verify(diamond, { profile: 'v1', ...base, properties: ['proper-completion'], maxClasses: 3_000 });
       expect(report.stateSpace.requestedMaxClasses).toBe(3_000);
     });
   });

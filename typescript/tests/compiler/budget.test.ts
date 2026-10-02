@@ -10,7 +10,7 @@ import { failed, retryOf, routedOf, runCompiled, started } from './support.js';
 describe('effectiveBudget', () => {
   it('keeps the requested budget on an acyclic workflow where every input index has one producer', () => {
     for (const name of ['linear', 'fanOut', 'diamond', 'switch20', 'chooseBranch', 'twoTriggers', 'expressionRef', 'retry', 'continueErrorOutput', 'ifHalf', 'fanOut4', 'partialRequired'] as const) {
-      const c = compile(ALL[name], { budget: 4 });
+      const c = compile(ALL[name], { profile: 'v1', budget: 4 });
       expect(c.requestedBudget, name).toBe(4);
       expect(c.effectiveBudget, name).toBe(4);
       expect(c.budgetRestriction, name).toBeNull();
@@ -19,66 +19,66 @@ describe('effectiveBudget', () => {
 
   it('forces 1 with reason "cyclic" for Loop Over Items and a user cycle', () => {
     for (const wf of [loopOverItems, userCycle]) {
-      const c = compile(wf, { budget: 4 });
+      const c = compile(wf, { profile: 'v1', budget: 4 });
       expect(c.requestedBudget).toBe(4);
       expect(c.effectiveBudget).toBe(1);
       expect(c.budgetRestriction!.reason).toBe('cyclic');
     }
-    const c = compile(loopOverItems, { budget: 2 });
+    const c = compile(loopOverItems, { profile: 'v1', budget: 2 });
     expect(c.budgetRestriction!.detail).toBe('nodes in a cycle: Body, Loop');
     expect(c.initialMarking(null).get(c.netMap.shared.budget)).toHaveLength(1);
   });
 
   it('forces 1 with reason "multi-producer-input" when an input index has two producers', () => {
-    const c = compile(multiProducer, { budget: 3 });
+    const c = compile(multiProducer, { profile: 'v1', budget: 3 });
     expect(c.effectiveBudget).toBe(1);
     expect(c.budgetRestriction).toEqual({ reason: 'multi-producer-input', detail: 'C.0 has 2 producers' });
-    expect(compile(ALL.ifBothOutputs, { budget: 2 }).budgetRestriction!.reason).toBe('multi-producer-input');
+    expect(compile(ALL.ifBothOutputs, { profile: 'v1', budget: 2 }).budgetRestriction!.reason).toBe('multi-producer-input');
   });
 
   it('a self-loop counts as cyclic', () => {
     const wf = workflow('self-loop', [node('T', 'trigger', [0, 0]), node('A', 'set', [100, 0])],
       [conn('T', 0, 'A', 0), conn('A', 0, 'A', 0)], 'T');
-    expect(kSafety(analyse(wf))!.reason).toBe('cyclic');
-    const c = compile(wf, { budget: 2 });
+    expect(kSafety(analyse(wf, { profile: 'v1' }))!.reason).toBe('cyclic');
+    const c = compile(wf, { profile: 'v1', budget: 2 });
     expect(c.effectiveBudget).toBe(1);
     expect(c.netMap.node('A').cyclic).toBe(true);
   });
 
   it('defaults to 1 and rejects a non-positive or fractional budget', () => {
-    expect(compile(linear).effectiveBudget).toBe(1);
-    expect(() => compile(linear, { budget: 0 })).toThrow(/budget must be a positive integer/);
-    expect(() => compile(linear, { budget: 1.5 })).toThrow(/budget must be a positive integer/);
+    expect(compile(linear, { profile: 'v1' }).effectiveBudget).toBe(1);
+    expect(() => compile(linear, { profile: 'v1', budget: 0 })).toThrow(/budget must be a positive integer/);
+    expect(() => compile(linear, { profile: 'v1', budget: 1.5 })).toThrow(/budget must be a positive integer/);
   });
 });
 
 describe('structuralHash', () => {
   it('is a 64-hex SHA-256, stable across compiles and independent of the budget', () => {
-    const a = compile(diamond).structuralHash;
+    const a = compile(diamond, { profile: 'v1' }).structuralHash;
     expect(a).toMatch(/^[0-9a-f]{64}$/);
-    expect(compile(diamond).structuralHash).toBe(a);
-    expect(compile(diamond, { budget: 3 }).structuralHash).toBe(a);
+    expect(compile(diamond, { profile: 'v1' }).structuralHash).toBe(a);
+    expect(compile(diamond, { profile: 'v1', budget: 3 }).structuralHash).toBe(a);
   });
 
   it('ignores the order nodes and connections are listed in', () => {
     const shuffled = workflow('diamond', [...diamond.nodes].reverse(), [...diamond.connections].reverse(), diamond.startNode!);
-    expect(compile(shuffled).structuralHash).toBe(compile(diamond).structuralHash);
+    expect(compile(shuffled, { profile: 'v1' }).structuralHash).toBe(compile(diamond, { profile: 'v1' }).structuralHash);
   });
 
   it('changes with a position, a connection, a node option or an expression reference', () => {
-    const base = compile(linear).structuralHash;
+    const base = compile(linear, { profile: 'v1' }).structuralHash;
     const moved = workflow('linear', linear.nodes.map((n) => (n.name === 'B' ? { ...n, position: [400, 50] as const } : n)), linear.connections, 'Trigger');
-    expect(compile(moved).structuralHash).not.toBe(base);
+    expect(compile(moved, { profile: 'v1' }).structuralHash).not.toBe(base);
     const rewired = workflow('linear', linear.nodes, linear.connections.slice(0, 2), 'Trigger');
-    expect(compile(rewired).structuralHash).not.toBe(base);
+    expect(compile(rewired, { profile: 'v1' }).structuralHash).not.toBe(base);
     const retried = workflow('linear', linear.nodes.map((n) => (n.name === 'B' ? { ...n, retryOnFail: true } : n)), linear.connections, 'Trigger');
-    expect(compile(retried).structuralHash).not.toBe(base);
+    expect(compile(retried, { profile: 'v1' }).structuralHash).not.toBe(base);
     const referenced = workflow('linear', linear.nodes, linear.connections, 'Trigger', { references: { C: ['A'] } });
-    expect(compile(referenced).structuralHash).not.toBe(base);
+    expect(compile(referenced, { profile: 'v1' }).structuralHash).not.toBe(base);
   });
 
   it('distinguishes fixtures', () => {
-    const hashes = new Set(Object.values(ALL).map((wf) => compile(wf).structuralHash));
+    const hashes = new Set(Object.values(ALL).map((wf) => compile(wf, { profile: 'v1' }).structuralHash));
     expect(hashes.size).toBe(Object.keys(ALL).length);
   });
 });
@@ -95,7 +95,7 @@ describe('the budget semiflow across a halt (README "Retries, halt, cancellation
       node('A', 'set', [200, 0], { retryOnFail: true, maxTries: 3, waitBetweenTries: 5000 }),
       node('B', 'set', [200, 100]),
     ], [conn('T', 0, 'A', 0), conn('T', 0, 'B', 0)], 'T');
-    const c = compile(wf, { budget: 2 }).withActions((info, map) => {
+    const c = compile(wf, { profile: 'v1', budget: 2 }).withActions((info, map) => {
       if (info.role !== 'run') return null;
       const g = map.node(info.node!);
       if (g.node === 'A') {

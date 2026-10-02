@@ -20,15 +20,26 @@
  * - {@link referenceAnswer}: R(S), what v2 plans next from a row set S.
  *
  * Moved from `tasks/spike-v2-settlement.mts`, which imports it and reprints its first report with
- * `--baseline`. Three additions over the spike:
+ * `--baseline`. Four additions over the spike:
  * - a `running` row between the claim and the settle (`StepReadyHandler` claims `queued → running`
  *   before it runs);
- * - the `cancelled` rows `failExecution` leaves (`cancelQueuedSteps`), so a failed run's queued
- *   rows end cancelled rather than queued;
- * - the `[null, null]` batch terminal, drawn with chance {@link Behaviour.emptyTerminal}.
+ * - the `cancelled` rows `failExecution` leaves (`cancelPendingSteps`), so a failed run's queued
+ *   and waiting rows end cancelled;
+ * - the `[null, null]` batch terminal, drawn with chance {@link Behaviour.emptyTerminal};
+ * - suspend and resume (master's `waiting`), drawn with chance {@link Behaviour.pWait}: a step
+ *   that suspends goes `running → waiting` and owes its settlement until a `resume` event
+ *   (`resumeStep`) puts it back to `queued`; its next claim emits the outputs it stored and does
+ *   not run the node again (`resumedOutputs`).
  *
  * The first two draw no random number, so no run's order, end or event count moves; at
- * `emptyTerminal` 0 the third draws nothing either, and every run is the spike's.
+ * `emptyTerminal` 0 and `pWait` 0 the last two draw nothing either and add no event, and every
+ * run is the spike's.
+ *
+ * The claim and the run are one event here, as `StepReadyHandler.handle` is one call: no row is
+ * `running` between events. So when a failure is handled no step is running, and master's rule
+ * that a running step keeps its status and still settles (`cancelPendingSteps` touches only
+ * `queued` and `waiting`) holds without a case of its own. `tasks/spike-v2-exhaustive.mts` splits
+ * the claim from the settle and exercises it.
  */
 import type { StepKey, V2StepStatus } from '../../codec/v2/step-rows.js';
 import type { V2Graph, V2Node } from './graph.js';
@@ -103,20 +114,31 @@ export function rng(seed: number): () => number {
 
 /**
  * What a run's steps do. `seed` fixes every outcome, `pFail` is the chance that a step other than a
- * batch step fails, and `emptyTerminal` is the chance, per batch node, that its terminal step ends
- * with nothing accumulated.
+ * batch step fails, `emptyTerminal` is the chance, per batch node, that its terminal step ends
+ * with nothing accumulated, and `pWait` is the chance that a step which completes suspends first.
  */
 export interface Behaviour {
   readonly seed: number;
   readonly pFail: number;
   /** 0 reproduces the spike's baseline, where every loop ends with its done slot filled. */
   readonly emptyTerminal: number;
+  /**
+   * The chance, per (node, iteration), that a step other than a batch step or the trigger
+   * suspends (`running → waiting`) before it completes; absent is 0, which reproduces every run
+   * from before master's `waiting`.
+   */
+  readonly pWait?: number;
 }
 
 /** One step's outcome: the row status and, when completed, its filled output slots. */
 export interface Outcome {
   readonly status: 'completed' | 'failed';
   readonly filled: boolean[];
+  /**
+   * Present and `true` when the step suspends first: it goes `waiting`, and a resume completes it
+   * with `filled`, the outputs the wait stored (`resumedOutputs`). Absent otherwise.
+   */
+  readonly suspends?: true;
 }
 
 /** A node's output arity from its edges: highest `outputIndex` + 1, and at least 1. */
@@ -134,13 +156,15 @@ function outputArity(graph: V2Graph, nodeId: string): number {
  * the done slot (`[acc, null]`), or, with chance `emptyTerminal` per (behaviour, batch node), fills
  * nothing (`[null, null]`, a loop that ends with nothing accumulated). A batch step never fails
  * here. Any other step fails with chance `pFail`, and otherwise fills each output slot with
- * chance 0.7.
+ * chance 0.7. A step that completes suspends first with chance `pWait`: an executor returns a wait
+ * or an error, never both, so a failing step does not suspend, and a batch step, which the engine
+ * runs itself (`runBatchStep` returns outputs), never does.
  *
- * The empty-terminal draw uses its own hash, so it moves no other draw: with `emptyTerminal` 0
- * every outcome is the spike's.
+ * The empty-terminal and the wait draws use hashes of their own, so they move no other draw: with
+ * `emptyTerminal` and `pWait` 0 every outcome is the spike's.
  */
 export function outcome(graph: V2Graph, node: V2Node, iteration: number, behaviour: Behaviour): Outcome {
-  const { seed, pFail, emptyTerminal } = behaviour;
+  const { seed, pFail, emptyTerminal, pWait = 0 } = behaviour;
   if (node.type === 'batch') {
     const passes = 1 + (hash(seed, node.id, 'passes') % 3);
     if (iteration < passes - 1) return { status: 'completed', filled: [false, true] };
@@ -150,6 +174,7 @@ export function outcome(graph: V2Graph, node: V2Node, iteration: number, behavio
   const r = rng(hash(seed, node.id, iteration));
   if (r() < pFail) return { status: 'failed', filled: [] };
   const filled = Array.from({ length: outputArity(graph, node.id) }, () => r() < 0.7);
+  if (pWait > 0 && rng(hash(seed, node.id, iteration, 'wait'))() < pWait) return { status: 'completed', filled, suspends: true };
   return { status: 'completed', filled };
 }
 
@@ -269,9 +294,15 @@ const SETTLED: ReadonlySet<string> = new Set(['completed', 'failed', 'skipped', 
  * `ExecutionStartHandler` writes the trigger's row completed at birth with slot 0 filled. Then, until
  * nothing is pending or the run ends, an event is drawn at random:
  * - `step:ready` (`StepReadyHandler`): claim the queued row (`running`), run it ({@link outcome}),
- *   settle it and announce `step:settled`;
+ *   settle it and announce `step:settled`. A step that suspends goes `waiting` instead, announces
+ *   nothing, and gets a pending resume; a resumed step's claim completes it with the outputs its
+ *   wait stored;
+ * - `resume` (`resumeStep`, or the sweep's `resumeDueSteps`): a row still `waiting` goes back to
+ *   `queued` and announces `step:ready`; a row cancelled meanwhile is left alone, as the
+ *   compare-and-set on `waiting` leaves it;
  * - `step:settled` (`StepSettledHandler.handle`): a failed row, or any failed row before planning,
- *   ends the run `failed` and cancels the queued rows (`failExecution`, `cancelQueuedSteps`);
+ *   ends the run `failed` and cancels the queued and waiting rows (`failExecution`,
+ *   `cancelPendingSteps`);
  *   otherwise a completed or skipped row plans its successors through `decisionKeys` and
  *   `decideSuccessors`, and inserts the new rows (queued ones announce `step:ready`, skipped ones
  *   `step:settled`). With nothing queued, `finishExecutionIfDone` ends the run once the settled
@@ -304,7 +335,9 @@ export function simulate(
     return true;
   };
   const batchIds = loops.filter((l) => reachable.has(l.batchNodeId)).map((l) => l.batchNodeId);
-  const pending: { kind: 'ready' | 'settled'; key: StepKey }[] = [];
+  const pending: { kind: 'ready' | 'settled' | 'resume'; key: StepKey }[] = [];
+  /** Rows a resume put back to `queued`: their next claim emits the stored outputs (`resumedOutputs`). */
+  const resumed = new Set<string>();
   create({ nodeId: trigger.id, iteration: 0 }, 'completed', [true]);
   report();
   pending.push({ kind: 'settled', key: { nodeId: trigger.id, iteration: 0 } });
@@ -315,7 +348,9 @@ export function simulate(
   const fail = () => {
     end = 'failed';
     let cancelled = false;
-    for (const r of rows.values()) if (r.status === 'queued') { r.status = 'cancelled'; cancelled = true; }
+    for (const r of rows.values()) {
+      if (r.status === 'queued' || r.status === 'waiting') { r.status = 'cancelled'; cancelled = true; }
+    }
     if (cancelled) report();
   };
 
@@ -323,11 +358,25 @@ export function simulate(
     if (++events > maxEvents) throw new Error(`simulate: no termination within ${maxEvents} events`);
     const ev = pending.splice(Math.floor(pick() * pending.length), 1)[0]!;
     const row = rows.get(ref.stepKeyId(ev.key))!;
+    if (ev.kind === 'resume') {
+      if (row.status !== 'waiting') continue;
+      row.status = 'queued';
+      resumed.add(ref.stepKeyId(ev.key));
+      report();
+      pending.push({ kind: 'ready', key: ev.key });
+      continue;
+    }
     if (ev.kind === 'ready') {
       if (row.status !== 'queued') continue;
       row.status = 'running';
       report();
       const o = outcome(graph, byId.get(row.nodeId)!, row.iteration, behaviour);
+      if (o.suspends === true && !resumed.has(ref.stepKeyId(ev.key))) {
+        row.status = 'waiting';
+        report();
+        pending.push({ kind: 'resume', key: ev.key });
+        continue;
+      }
       row.status = o.status;
       row.filledOutputSlots = o.status === 'completed' ? o.filled : [];
       report();

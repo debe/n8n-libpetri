@@ -14,7 +14,7 @@ import { markingStateOf } from '../../src/verify/index.js';
 import { linear, diamond, agentTwoTools } from '../fixtures/workflows.js';
 
 for (const [label, wf] of [['linear', linear], ['diamond', diamond], ['agentTwoTools (maxToolCalls 6)', { ...agentTwoTools, nodes: agentTwoTools.nodes.map((n) => (n.name === 'Agent' ? { ...n, maxToolCalls: 6 } : n)) }]] as const) {
-  const c = compile(wf);
+  const c = compile(wf, { profile: 'v1' });
   const g = StateClassGraph.build(c.net, markingStateOf(c.initialMarking(null)), 400_000);
   const places = [...c.net.places];
   const byMarking = new Map<string, number>();

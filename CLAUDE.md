@@ -27,6 +27,10 @@ budget, marking codec) and the design principles live in the root
   the `status` / `timedOut` fields the caller reads, and n8n polls it between activations —
   see ADR 0004, "The timeout is n8n's, not the net's".
 - Every n8n behaviour we do not reproduce is recorded in `docs/divergences.md`. No silent skips.
+- **The default compile profile is `engineV2` (ADR 0013).** Every v1 consumer names
+  `profile: 'v1'` / `--profile v1` explicitly. v1 is frozen, not deleted: it stays tested, its
+  net is pinned byte-identical by `tests/compiler/v1-identity.test.ts`, and it gets no new
+  features.
 - An agent's `ai_tool` dispatch is a round in the net, not a host loop (ADR 0008). Only `ai_tool`
   reaches the scheduler; every other `ai_*` connection is resolved by `supplyData` inside
   `runNode` and the compiler is right not to model it.
@@ -81,7 +85,11 @@ in the failure chain, `all(X/hasdata)` in the join's start). Immediate transitio
 later in FIFO order within their priority, and `stateEquation(true)` now gives a place drained
 by `all()` / `atLeast()` an upper bound in the HORN encoding, so its scripts change. Measured
 2026-09-17 against released 6.0.0: suite 1075/1075 across 79 files, typecheck clean, and the
-200-template survey compiles and verifies 200/200 with no timeouts. Nothing moved for the
+200-template survey (`--profile v1`, as all surveys were then) compiles 200/200 with no timeouts.
+Compiling is not verifying. At libpetri 7.0.0 (2026-10-02) the v1 survey decides at least one
+check on 121 of the 200; the other 79 come back all `unknown` (k = 4, `--smt-fallback off`). The
+default engineV2 survey compiles 91, decides something on 85, and refuses 109 (52 of them for
+having several triggers, which the survey does not enumerate yet). Nothing moved for the
 shapes we have — that is not a general result, and a new timed shape is not covered by it.
 
 **Why 7.0.0 is the floor.** 7.0.0 fixed [VER-020] AC4: with enumeration off, the structural
@@ -159,8 +167,9 @@ runtime is in the gitignored `.testbed/`. See `docs/testbed.md`.
 
 libpetri shells out to the `z3` executable (`PATH` or `LIBPETRI_Z3`, ≥ 4.8.0). Without it
 verification returns `unknown`, never throws. CI installs z3 and fails if proofs become skips
-(`tests/z3-gate.test.ts`); the `n8n-libpetri verify` CLI exits **3** when no solver resolved,
-so a run that verified nothing is never mistaken for a clean one.
+(`tests/z3-gate.test.ts`); the `n8n-libpetri verify` CLI exits **3** when no solver resolved (v1) or when no check was
+decided (engineV2). A v1 run whose checks all came back `unknown` with z3 present still exits 0:
+v1 is frozen, and the survey separates those runs itself (`scripts/templates/survey-outcome.mjs`).
 
 What the surface proves, what it cannot, and what it costs is measured in
 [`docs/verification.md`](docs/verification.md) (ADR 0007). Two rules when touching it: report

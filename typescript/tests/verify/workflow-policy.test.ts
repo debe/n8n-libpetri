@@ -44,9 +44,10 @@ describe('a workflow-level executionPolicy resolves the same on the JSON path as
   ])('%s is stripped with one diagnostic, and the two descriptions hash alike', (_key, policy) => {
     const live = liveOf(policy);
     const fromJson = describeWorkflowJson(exportOf(policy), {
+      profile: 'v1',
       nodeTypes: { nodes: { Trigger: SHAPES.trigger, A: SHAPES.set } },
     }).description;
-    expect(compile(fromJson).structuralHash).toBe(compile(live).structuralHash);
+    expect(compile(fromJson, { profile: 'v1' }).structuralHash).toBe(compile(live, { profile: 'v1' }).structuralHash);
     expect((live.diagnostics ?? []).filter((d) => NOT_INHERITED.test(d))).toHaveLength(1);
     expect((fromJson.diagnostics ?? []).filter((d) => NOT_INHERITED.test(d))).toHaveLength(1);
     // The resource knobs still inherit: the same sentence says so.

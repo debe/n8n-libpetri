@@ -69,7 +69,7 @@ describe('the libpetri surface this verifier requires', () => {
    * `unavailable`, so the invariant section of the report is present either way.
    */
   it('still emits the semiflow line this verifier reads the invariant cache from', async () => {
-    const compiled = compile(diamond, { budget: 1 });
+    const compiled = compile(diamond, { profile: 'v1', budget: 1 });
     const result = await SmtVerifier.forNet(compiled.net)
       .initialMarking(markingStateOf(compiled.initialMarking(null)))
       .semiflowInvariants(true)

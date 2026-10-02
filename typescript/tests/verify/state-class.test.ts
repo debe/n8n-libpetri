@@ -64,6 +64,7 @@ async function completionOf(
   smtFallback?: NonNullable<Parameters<typeof verify>[1]>['smtFallback'],
 ): Promise<VerificationReport> {
   return verify(workflow, {
+    profile: 'v1',
     properties: ['proper-completion'],
     timeoutMs: 1,
     ...(maxClasses === undefined ? {} : { maxClasses }),
@@ -122,7 +123,7 @@ describe('the solver-free route (VER-010)', () => {
     ];
     for (const [label, workflow, classes] of atBudgetTwo) {
       it(`${label} at k = 2: ${classes} classes`, { timeout: CASE_TIMEOUT_MS }, async () => {
-        const report = await verify(workflow, { properties: ['proper-completion'], timeoutMs: 1, budget: 2 });
+        const report = await verify(workflow, { profile: 'v1', properties: ['proper-completion'], timeoutMs: 1, budget: 2 });
         expect(report.budget).toBe(2);
         expect(report.stateSpace.classes, `k = 2 class count moved; re-measure docs/verification.md\n${digest(report)}`)
           .toBe(classes);
@@ -133,7 +134,7 @@ describe('the solver-free route (VER-010)', () => {
 
     it('chain40 is past the ~25-node ceiling M4 measured, and closes in well under a second', { timeout: CASE_TIMEOUT_MS }, async () => {
       const report = await completionOf(generateChain(40));
-      expect(compile(generateChain(40)).netMap.nodes).toHaveLength(41);
+      expect(compile(generateChain(40), { profile: 'v1' }).netMap.nodes).toHaveLength(41);
       expect(report.stateSpace.elapsedMs).toBeLessThan(5_000);
       expect(completion(report).whole.verdict).toBe('proven');
     });
@@ -156,7 +157,7 @@ describe('the solver-free route (VER-010)', () => {
 
       // The path is a real firing sequence of the net, not an order-free derivation set.
       expect(cex!.ordered).toBe(true);
-      const names = new Set(compile(ifBothOutputs).netMap.nodes.map((g) => g.node));
+      const names = new Set(compile(ifBothOutputs, { profile: 'v1' }).netMap.nodes.map((g) => g.node));
       expect(cex!.nodePath.length).toBeGreaterThan(0);
       for (const n of cex!.nodePath) expect(names, `'${n}' is not a node`).toContain(n);
       expect(cex!.steps.every((s) => s.node === null || names.has(s.node))).toBe(true);
@@ -340,7 +341,7 @@ describe('the solver-free route (VER-010)', () => {
 
     it('the exploration is bounded by default, so the graph never runs unbounded', () => {
       expect(DEFAULT_MAX_CLASSES).toBe(200_000);
-      const compiled = compile(loopOverItems);
+      const compiled = compile(loopOverItems, { profile: 'v1' });
       const space = StateSpace.explore(
         compiled.net, markingStateOf(compiled.initialMarking(null)), compiled.netMap, 1_000);
       expect(space.usable).toBe(true);
@@ -461,7 +462,7 @@ describe('the solver-free route (VER-010)', () => {
       // each newly discovered class — nothing else in this repository would notice if that
       // changed upstream, and the bounded verdict would silently stop being sound, so it is
       // asserted directly against an independent BFS.
-      const compiled = compile(loopOverItems);
+      const compiled = compile(loopOverItems, { profile: 'v1' });
       const graph = StateClassGraph.build(
         compiled.net, markingStateOf(compiled.initialMarking(null)), 3_000);
       expect(graph.isComplete()).toBe(false);
@@ -501,14 +502,14 @@ describe('the solver-free route (VER-010)', () => {
     });
 
     it('`loopTransitions` counts the run of every cyclic node, and nothing else', () => {
-      const compiled = compile(loopOverItems);
+      const compiled = compile(loopOverItems, { profile: 'v1' });
       const loops = loopTransitions(compiled);
       const named = [...loops].map((n) => compiled.netMap.transition(n)!);
       expect(named.every((t) => t.role === 'run')).toBe(true);
       expect(named.map((t) => t.node).sort()).toEqual(['Body', 'Loop']);
       // `After` is downstream of the loop's `done` output and is not on the cycle.
       expect(named.some((t) => t.node === 'After')).toBe(false);
-      expect(loopTransitions(compile(diamond)).size, 'an acyclic workflow has no loop step').toBe(0);
+      expect(loopTransitions(compile(diamond, { profile: 'v1' })).size, 'an acyclic workflow has no loop step').toBe(0);
     });
 
     it('`--strict` treats a bound as unproven, and a plain run does not fail on it', { timeout: CASE_TIMEOUT_MS }, async () => {
@@ -528,7 +529,7 @@ describe('the solver-free route (VER-010)', () => {
       process.env.LIBPETRI_Z3 = '/nonexistent/definitely-not-a-z3-binary';
       process.env.PATH = '/nonexistent';
       try {
-        const report = await verify(diamond, { properties: ['proper-completion'] });
+        const report = await verify(diamond, { profile: 'v1', properties: ['proper-completion'] });
         expect(report.solver.available).toBe(false);
         expect(completion(report).whole.verdict, digest(report)).toBe('proven');
         expect(report.checks.every((c) => c.query.route === 'state-class-graph')).toBe(true);
@@ -549,7 +550,7 @@ describe('the solver-free route (VER-010)', () => {
       // enabled. If the DBM ever stopped letting time advance in the classes where only the
       // retry wait is enabled, the whole retry subtree would silently vanish from the graph
       // and every property over it would be vacuously `proven`.
-      const compiled = compile(retryFour);
+      const compiled = compile(retryFour, { profile: 'v1' });
       const space = StateSpace.explore(
         compiled.net, markingStateOf(compiled.initialMarking(null)), compiled.netMap);
       expect(space.complete).toBe(true);
@@ -566,6 +567,7 @@ describe('the solver-free route (VER-010)', () => {
   describe('the other families the graph decides', () => {
     it('dead nodes, the running mutex, the budget bound and mutual exclusion all route to the graph', { timeout: CASE_TIMEOUT_MS }, async () => {
       const report = await verify(diamond, {
+        profile: 'v1',
         timeoutMs: 1, budget: 1, mutualExclusion: 'all-pairs',
         properties: ['budget', 'no-double-activation', 'dead-nodes', 'mutual-exclusion', 'proper-completion'],
       });
@@ -579,9 +581,9 @@ describe('the solver-free route (VER-010)', () => {
     });
 
     it('mutual exclusion is violated at k = 2 and proven at k = 1, from the same one pass', { timeout: CASE_TIMEOUT_MS }, async () => {
-      const one = await verify(fanOut, { timeoutMs: 1, budget: 1, mutualExclusion: 'all-pairs', properties: ['mutual-exclusion'] });
+      const one = await verify(fanOut, { profile: 'v1', timeoutMs: 1, budget: 1, mutualExclusion: 'all-pairs', properties: ['mutual-exclusion'] });
       expect(one.checks.every((c) => c.verdict === 'proven'), digest(one)).toBe(true);
-      const two = await verify(fanOut, { timeoutMs: 1, budget: 2, mutualExclusion: [['A', 'B']], properties: ['mutual-exclusion'] });
+      const two = await verify(fanOut, { profile: 'v1', timeoutMs: 1, budget: 2, mutualExclusion: [['A', 'B']], properties: ['mutual-exclusion'] });
       const check = two.checks[0]!;
       expect(check.verdict, digest(two)).toBe('violated');
       expect(check.counterexample!.stuckMarking.some((p) => p.role === 'running')).toBe(true);

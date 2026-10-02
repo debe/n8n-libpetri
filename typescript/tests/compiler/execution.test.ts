@@ -46,7 +46,7 @@ function transientPlaces(c: CompiledWorkflow) {
 
 describe.each<Executor>(['precompiled', 'bitmap'])('forward-all actions on %s', (executor) => {
   it('linear: every node done once, in order, budget back at k = 1', async () => {
-    const c = compile(linear).withActions(forwardAllActions());
+    const c = compile(linear, { profile: 'v1' }).withActions(forwardAllActions());
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), executor);
     expect(failed(store)).toEqual([]);
     expect(doneCounts(c, marking)).toEqual({ Trigger: 1, A: 1, B: 1, C: 1 });
@@ -57,7 +57,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('forward-all actions on %s', 
   });
 
   it('linear at k = 2: budget back at 2', async () => {
-    const c = compile(linear, { budget: 2 }).withActions(forwardAllActions());
+    const c = compile(linear, { profile: 'v1', budget: 2 }).withActions(forwardAllActions());
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), executor);
     expect(failed(store)).toEqual([]);
     expect(doneCounts(c, marking)).toEqual({ Trigger: 1, A: 1, B: 1, C: 1 });
@@ -65,7 +65,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('forward-all actions on %s', 
   });
 
   it('diamond: the join fires once with both inputs, every node done, budget back', async () => {
-    const c = compile(diamond).withActions(forwardAllActions());
+    const c = compile(diamond, { profile: 'v1' }).withActions(forwardAllActions());
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), executor);
     expect(failed(store)).toEqual([]);
     expect(doneCounts(c, marking)).toEqual({ Trigger: 1, IF: 1, A: 1, B: 1, Merge: 1, End: 1 });
@@ -81,7 +81,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('forward-all actions on %s', 
   });
 
   it('fan-out at k = 1 runs the siblings in canvas order (declaration-order tiebreak, EXEC-002 AC3)', async () => {
-    const c = compile(fanOut).withActions(forwardAllActions());
+    const c = compile(fanOut, { profile: 'v1' }).withActions(forwardAllActions());
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), executor);
     expect(failed(store)).toEqual([]);
     expect(started(store, (n) => n.endsWith('/run'))).toEqual(['id:Trigger/run', 'id:A/run', 'id:B/run', 'id:C/run']);
@@ -91,7 +91,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('forward-all actions on %s', 
 
 describe('placeholder actions (no-data routing) quiesce cleanly on every fixture (reference executor)', () => {
   it.each(Object.keys(ALL) as (keyof typeof ALL)[])('%s', async (name) => {
-    const c = compile(ALL[name]);
+    const c = compile(ALL[name], { profile: 'v1' });
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), 'bitmap');
     expect(failed(store)).toEqual([]);
     expect(marking.tokenCount(c.netMap.shared.budget)).toBe(c.effectiveBudget);
@@ -118,7 +118,7 @@ describe('placeholder actions (no-data routing) quiesce cleanly on every fixture
   });
 
   it('a skipped Loop Over Items emits empty on its exit edge so After is skipped too (Body never runs)', async () => {
-    const c = compile(ALL.loopOverItems);
+    const c = compile(ALL.loopOverItems, { profile: 'v1' });
     const { marking } = await runCompiled(c, c.initialMarking(ITEMS), 'bitmap');
     expect(marking.tokenCount(c.netMap.node('Loop').skipped!)).toBe(1);
     expect(marking.tokenCount(c.netMap.node('After').skipped!)).toBe(1);
@@ -129,7 +129,7 @@ describe('placeholder actions (no-data routing) quiesce cleanly on every fixture
 describe('action binding', () => {
   it('compile() binds placeholders; a binder returning null keeps them; withActions re-binds without touching the original', () => {
     const seen: string[] = [];
-    const c = compile(linear, { actions: (info) => { seen.push(info.role); return null; } });
+    const c = compile(linear, { profile: 'v1', actions: (info) => { seen.push(info.role); return null; } });
     // `linear` has no node above SPLIT_ROUTING_ABOVE, so no `route` transition exists.
     expect(new Set(seen)).toEqual(new Set(['start', 'run', 'done', 'skip']));
     const program = c.program;
@@ -145,6 +145,7 @@ describe('action binding', () => {
   it('the binder sees every transition with its role and owner, and sinks stay passthrough', () => {
     const roles = new Map<string, string[]>();
     compile(ALL.loopOverItems, {
+      profile: 'v1',
       actions: (info) => {
         roles.set(info.role, [...(roles.get(info.role) ?? []), info.name]);
         return null;
@@ -152,7 +153,7 @@ describe('action binding', () => {
     });
     expect(roles.get('sink')).toEqual(['id:Loop/sink_0', 'id:Loop/sink_1', 'id:Body/sink_0']);
     expect(roles.get('arm')).toHaveLength(3);
-    const c = compile(ALL.loopOverItems, { actions: placeholderActions() });
+    const c = compile(ALL.loopOverItems, { profile: 'v1', actions: placeholderActions() });
     expect(c.program.transitionCount).toBe(c.net.transitions.size);
   });
 });

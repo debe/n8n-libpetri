@@ -33,12 +33,18 @@ const NOT_UNDER_V1 =
   'the settlement family reads the settlement gadgets of an engineV2 net, and a v1 net has none; compile ' +
   'with profile engineV2 (CLI --profile engineV2) to ask it';
 
+/**
+ * Since ADR 0013 `engineV2` is the default profile, so a v1 family asked without naming a profile
+ * lands here; the reason says how to ask it of the net it reads.
+ */
+const ASK_UNDER_V1 = '; compile with profile v1 (CLI --profile v1) to ask the v1 family';
+
 /** The reason `property` does not apply to a net compiled for `profile`. */
 export function notApplicableReason(property: PropertyName, profile: CompileProfile): string {
   if (profile === 'v1') return NOT_UNDER_V1;
   // A caller bug, not an input: `verifySettlement` runs the family itself.
   if (property === 'settlement') throw new InternalCompilerError('the settlement family applies under engineV2');
-  return NOT_UNDER_ENGINE_V2[property];
+  return `${NOT_UNDER_ENGINE_V2[property]}${ASK_UNDER_V1}`;
 }
 
 /** Records `property` as not applicable under `profile`: one `unknown` check about the whole net. */

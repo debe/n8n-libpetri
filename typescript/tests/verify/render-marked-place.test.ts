@@ -13,7 +13,7 @@ import { unbalancedJoin } from './support.js';
 
 it('a stranded join input renders identically in the finding block and the whole-net explanation', async () => {
   // Graph only: the stranding is found by enumeration, so no solver is involved.
-  const report = await verify(unbalancedJoin, { properties: ['proper-completion'], smtFallback: 'off' });
+  const report = await verify(unbalancedJoin, { profile: 'v1', properties: ['proper-completion'], smtFallback: 'off' });
   const whole = report.checks.find((c) => c.property === 'proper-completion' && c.subject.kind === 'net');
   expect(whole?.verdict).toBe('violated');
   const ready = whole!.counterexample!.stuckMarking.find((p) => p.node === 'M' && p.role === 'ready');

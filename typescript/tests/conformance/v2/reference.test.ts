@@ -8,6 +8,7 @@
  * claim about n8n's answers rests on it. The claim that R(S) is n8n's answer is the `tasks/`
  * scripts', which inject the pinned `dist` (`tasks/spike-v2-settlement.mts`).
  */
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { decodeStepRows } from '../../../src/codec/v2/step-rows.js';
 import { planFromMarking } from '../../../src/codec/v2/plan.js';
@@ -94,6 +95,44 @@ describe('outcome', () => {
   });
 });
 
+describe('outcome with suspension (master\'s waiting, ADR 0013 (a))', () => {
+  const sw: V2Graph = { nodes: [trigger('T'), v1('S'), v1('X'), v1('Y')], edges: [edge('T', 'S'), edge('S', 'X', 0), edge('S', 'Y', 2)] };
+  const S = sw.nodes[1]!;
+  const B = loop.nodes[1]!;
+
+  it('is the outcome from before at pWait 0 or absent: no suspends key, the same draws', () => {
+    for (let seed = 0; seed < 40; seed++) {
+      for (const pFail of [0, 0.3]) {
+        const before = outcome(sw, S, 0, calm(seed, pFail));
+        expect(before).not.toHaveProperty('suspends');
+        expect(outcome(sw, S, 0, { ...calm(seed, pFail), pWait: 0 })).toStrictEqual(before);
+      }
+    }
+  });
+
+  it('suspends every completing step at pWait 1, with the slots the resume emits drawn as before', () => {
+    for (let seed = 0; seed < 40; seed++) {
+      const before = outcome(sw, S, 0, calm(seed, 0.3));
+      const o = outcome(sw, S, 0, { ...calm(seed, 0.3), pWait: 1 });
+      if (before.status === 'failed') expect(o).toStrictEqual(before);
+      else expect(o).toStrictEqual({ ...before, suspends: true });
+    }
+  });
+
+  it('never suspends a batch step, which the engine runs itself', () => {
+    for (let seed = 0; seed < 20; seed++) {
+      for (let it = 0; it < 3; it++) expect(outcome(loop, B, it, { ...calm(seed), pWait: 1 })).not.toHaveProperty('suspends');
+    }
+  });
+
+  it('draws the wait per (node, iteration), apart from every other draw', () => {
+    let waits = 0;
+    for (let seed = 0; seed < 2000; seed++) if (outcome(sw, S, 0, { ...calm(seed), pWait: 0.25 }).suspends === true) waits++;
+    expect(waits / 2000).toBeGreaterThan(0.2);
+    expect(waits / 2000).toBeLessThan(0.3);
+  });
+});
+
 // ---- the loop ----
 
 describe('simulate', () => {
@@ -158,6 +197,89 @@ describe('simulate', () => {
       }
     }
     expect(cancelledRuns).toBeGreaterThan(0);
+  });
+
+  /**
+   * The digest of 600 runs (every shape in SETTLEMENT_SHAPES, seeds 0–9 at pFail 0.2, orders 0–9:
+   * each run's result and every state it reported), recorded by running `reference.ts` as it was
+   * at e133737, before `pWait` existed. Review finding: the test below compares pWait absent with
+   * pWait 0 under the same code, which cannot tell whether either is the run from before.
+   */
+  const BEFORE_PWAIT_DIGEST = 'a5c651eb27f413a7ff3e78f51a0019102edf81fd6c65eb15d104d7114424f22f';
+
+  it('is the run from before pWait existed, with pWait absent and at 0: the digest recorded from e133737', () => {
+    for (const pWait of [undefined, 0]) {
+      const h = createHash('sha256');
+      let runs = 0;
+      for (const [name, graph] of Object.entries(SETTLEMENT_SHAPES)) {
+        for (let seed = 0; seed < 10; seed++) {
+          for (let order = 0; order < 10; order++) {
+            const states: (readonly ReferenceRow[])[] = [];
+            const behaviour: Behaviour = pWait === undefined ? calm(seed, 0.2) : { ...calm(seed, 0.2), pWait };
+            const r = simulate(stub, graph, behaviour, order, { onState: (rows) => states.push(rows) });
+            h.update(JSON.stringify([name, seed, order, r, states]));
+            runs++;
+          }
+        }
+      }
+      expect(runs).toBe(600);
+      expect(h.digest('hex'), `pWait ${String(pWait)}`).toBe(BEFORE_PWAIT_DIGEST);
+    }
+  });
+
+  it('is the same run with pWait absent and at 0: same rows, states, events and end', () => {
+    for (let order = 0; order < 20; order++) {
+      const a: (readonly ReferenceRow[])[] = [];
+      const b: (readonly ReferenceRow[])[] = [];
+      const before = simulate(stub, branchDiamond, calm(order, 0.2), order, { onState: (rows) => a.push(rows) });
+      const after = simulate(stub, branchDiamond, { ...calm(order, 0.2), pWait: 0 }, order, { onState: (rows) => b.push(rows) });
+      expect(after).toEqual(before);
+      expect(b).toEqual(a);
+    }
+  });
+
+  it('suspends and resumes: queued, running, waiting, queued, running, completed; the run ends as without the wait', () => {
+    for (let seed = 0; seed < 20; seed++) {
+      const seen = new Map<string, string[]>();
+      const r = simulate(stub, branchDiamond, { ...calm(seed), pWait: 1 }, seed, {
+        onState: (rows) => {
+          for (const x of rows) {
+            const trail = seen.get(id(x)) ?? [];
+            if (trail[trail.length - 1] !== x.status) trail.push(x.status);
+            seen.set(id(x), trail);
+          }
+        },
+      });
+      for (const [key, trail] of seen) {
+        if (key === 'T:0') expect(trail).toEqual(['completed']);
+        else if (trail[0] === 'queued') expect(trail).toEqual(['queued', 'running', 'waiting', 'queued', 'running', 'completed']);
+        else expect(trail).toEqual(['skipped']);
+      }
+      const plain = simulate(stub, branchDiamond, calm(seed), seed);
+      expect(r.end).toBe('completed');
+      expect(r.fates).toBe(plain.fates);
+      expect(r.settled).toBe(r.expected);
+    }
+  });
+
+  it('on a failure, cancels the waiting rows with the queued ones (cancelPendingSteps), and leaves none waiting', () => {
+    const fan: V2Graph = { nodes: [trigger('T'), v1('A'), v1('B'), v1('C')], edges: [edge('T', 'A'), edge('T', 'B'), edge('T', 'C')] };
+    let cancelledWaiting = 0;
+    for (let seed = 0; seed < 30; seed++) {
+      for (let order = 0; order < 10; order++) {
+        const states: (readonly ReferenceRow[])[] = [];
+        const r = simulate(stub, fan, { seed, pFail: 0.5, emptyTerminal: 0, pWait: 1 }, order, { onState: (rows) => states.push(rows) });
+        if (r.end !== 'failed') continue;
+        expect(r.rows.some((x) => x.status === 'waiting' || x.status === 'queued')).toBe(false);
+        const last = states[states.length - 1]!;
+        const before = states[states.length - 2]!;
+        if (!last.some((x) => x.status === 'cancelled')) continue;
+        expect(before.filter((x) => x.status === 'queued' || x.status === 'waiting').map(id).sort())
+          .toEqual(last.filter((x) => x.status === 'cancelled').map(id).sort());
+        cancelledWaiting += before.filter((x) => x.status === 'waiting').length;
+      }
+    }
+    expect(cancelledWaiting).toBeGreaterThan(0);
   });
 
   it('throws when the loop does not terminate', () => {
@@ -235,5 +357,22 @@ describe('the reference loop\'s row sets, decoded (stub reference, graphs withou
     }
     expect(states).toBeGreaterThan(48);
     expect(running).toBeGreaterThan(0);
+  });
+
+  it.each(Object.entries(SETTLEMENT_SHAPES))('%s with steps that suspend: every state decodes, and the planner agrees with the stub', (_name, graph) => {
+    const c = compile(graphToDescription(graph).description, { profile: 'engineV2' });
+    let waiting = 0;
+    for (let seed = 0; seed < 12; seed++) {
+      for (let order = 0; order < 4; order++) {
+        simulate(stub, graph, { ...calm(seed, seed % 3 === 2 ? 0.3 : 0), pWait: 0.5 }, order, {
+          onState: (rows) => {
+            if (rows.some((r) => r.status === 'waiting')) waiting++;
+            const plan = planFromMarking(c, decodeStepRows(c, rows));
+            expect(keys(plan)).toEqual(keys(referenceAnswer(stub, graph, [], rows)));
+          },
+        });
+      }
+    }
+    expect(waiting).toBeGreaterThan(0);
   });
 });

@@ -55,7 +55,7 @@ interface Row {
 
 /** One node's gadget, instantiated alone with its ports left open. */
 function gadgetOf(wf: any, node: any, budget: number) {
-  const analysis = analyse(wf);
+  const analysis = analyse(wf, { profile: 'v1' });
   const full = composeNet(wf, analysis);
   const fullMap = mapNet(full.structural as any, full.shared as any, full.builds as any);
   // The gadget prefix is the node's **id** (MOD-010), not its name: a real export's ids are
@@ -70,7 +70,7 @@ function gadgetOf(wf: any, node: any, budget: number) {
   for (const p of flatten(net as any).places) byName.set((p as any).name, p);
   const roles = new Map<string, string>();
   for (const pi of (fullMap as any).places) if (byName.has(pi.place.name)) roles.set(pi.place.name, pi.role);
-  const compiled: any = compile(wf, { budget: Math.max(budget, 1), maxAgentToolCalls: 4 } as any);
+  const compiled: any = compile(wf, { profile: 'v1', budget: Math.max(budget, 1), maxAgentToolCalls: 4 } as any);
   const seed = new Map<string, number>();
   for (const [pl, toks] of compiled.initialMarking(null)) {
     if (byName.has((pl as any).name)) seed.set((pl as any).name, (toks as any[]).length);
@@ -114,7 +114,7 @@ const rows: Row[] = [];
 for (const f of files) {
   let description: any;
   try {
-    description = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { nodeTypes }).description;
+    description = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { profile: 'v1', nodeTypes }).description;
   } catch { continue; }
   for (const node of description.nodes) {
     for (const budget of BUDGETS) {

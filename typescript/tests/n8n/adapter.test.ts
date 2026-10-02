@@ -31,7 +31,7 @@ describe('describeWorkflow', () => {
     expect(d.startNodes).toEqual(['Trigger']);
     expect(d.nodeTypes(d.nodes.find((n) => n.name === 'Merge')!)).toEqual({ inputCount: 2, outputCount: 1 });
     expect(d.nodeTypes(d.nodes.find((n) => n.name === 'IF')!)).toEqual({ inputCount: 1, outputCount: 2, outputNames: ['true', 'false'] });
-    expect(compile(d).structuralHash).toBe(compile(diamond).structuralHash);
+    expect(compile(d, { profile: 'v1' }).structuralHash).toBe(compile(diamond, { profile: 'v1' }).structuralHash);
   });
 
   it('carries disabled / onError / retry fields and falls back to n<index> for an id that is missing, repeats another or contains the MOD-010 separator', () => {
@@ -57,7 +57,7 @@ describe('describeWorkflow', () => {
     (wf.nodes.A as { id?: string }).id = undefined;
     const d = describeWorkflow(wf, newRunExecutionData(wf.nodes.T!), adapter);
     expect(d.nodes.map((n) => n.id)).toEqual(['n1', 'n2']);
-    expect(() => compile(d)).not.toThrow();
+    expect(() => compile(d, { profile: 'v1' })).not.toThrow();
   });
 });
 
@@ -69,7 +69,7 @@ describe('nodeShapeOf', () => {
     expect(fakeNodeHelpers.getNodeOutputs(wf, wf.nodes.A!, description)).toHaveLength(2);
     expect(nodeShapeOf(wf, wf.nodes.A!, adapter)).toEqual({ inputCount: 1, outputCount: 1 });
     expect(nodeShapeOf(wf, wf.nodes.B!, adapter)).toEqual({ inputCount: 1, outputCount: 1 });
-    const c = compile(describeWorkflow(wf, newRunExecutionData(wf.nodes.Trigger!), adapter));
+    const c = compile(describeWorkflow(wf, newRunExecutionData(wf.nodes.Trigger!), adapter), { profile: 'v1' });
     expect(c.netMap.node('A').outputs.map((o) => [o.index, o.isErrorOutput])).toEqual([[0, false], [1, true]]);
   });
 
@@ -193,7 +193,7 @@ describe('scanExpressionReferences', () => {
     const d = describeWorkflow(wf, newRunExecutionData(wf.nodes.Trigger!), adapter);
     expect(d.expressionReferences!(d.nodes.find((n) => n.name === 'B')!)).toEqual(['A']);
     expect(d.expressionReferences!(d.nodes.find((n) => n.name === 'A')!)).toEqual([]);
-    const c = compile(d);
+    const c = compile(d, { profile: 'v1' });
     expect(c.netMap.node('B').references).toEqual(['A']);
     expect(c.netMap.node('B').transitions.startUnmet).toHaveLength(1);
   });
@@ -216,7 +216,7 @@ describe('startNodesOf', () => {
     expect(d.startNodes).toEqual(['B', 'A', 'Trigger', 'IF']);
     // The compiler canonicalises: primary first, the rest in canvas order — (y, x) ascending,
     // so A at y −100 precedes Trigger (0, 0) and IF (200, 0).
-    expect(compile(d).startNodes).toEqual(['B', 'A', 'Trigger', 'IF']);
+    expect(compile(d, { profile: 'v1' }).startNodes).toEqual(['B', 'A', 'Trigger', 'IF']);
   });
 });
 

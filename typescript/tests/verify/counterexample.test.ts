@@ -15,7 +15,7 @@ import {
 } from '../../src/verify/index.js';
 import { inputOf, readyOf } from '../compiler/support.js';
 
-const compiled = compile(diamond);
+const compiled = compile(diamond, { profile: 'v1' });
 const map = compiled.netMap;
 
 function fakeResult(partial: Partial<SmtVerificationResult>): SmtVerificationResult {

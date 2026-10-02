@@ -8,6 +8,16 @@
  * - every outcome of a running step: each filling of its output slots, failure, and for a batch
  *   node all three terminals (`[acc,null]`, `[null,null]`) plus failure, with loop passes capped;
  * - after a failure, queued rows are cancelled and running steps still settle, as in v2.
+ * With `--wait`, master's suspend and resume (ADR 0013 (a)) as well:
+ * - a running step other than a batch step may also suspend (`running → waiting`, `suspendStep`),
+ *   which announces nothing;
+ * - a waiting row may be resumed at any point (`waiting → queued`, `resumeStep` or the sweep's
+ *   `resumeDueSteps`), which announces `step:ready`; its next claim emits the outputs the wait
+ *   stored, so it completes with any filling and neither fails nor suspends again
+ *   (`resumedOutputs`);
+ * - after a failure, queued **and waiting** rows are cancelled (`cancelPendingSteps`); a step still
+ *   running settles, and may suspend after the cancellation, as on master.
+ * Without `--wait` no step suspends, and every number is the one from before the flag.
  * At every distinct row set it checks `planFromMarking(decodeStepRows(S))` against n8n's R(S), and
  * it checks that decoding the rows in reverse order gives the same plan. The reference is n8n's
  * compiled code, loaded from the pinned checkout's `dist`.
@@ -15,7 +25,7 @@
  * Graphs: the committed golden's graphs, plus every corpus entry n8n accepts with at most
  * MAX_NODES nodes and output arity at most 3.
  *
- *   npx --prefix typescript tsx tasks/spike-v2-exhaustive.mts [maxPasses=3] [cap=300000] [maxNodes=9]
+ *   npx --prefix typescript tsx tasks/spike-v2-exhaustive.mts [maxPasses=3] [cap=300000] [maxNodes=9] [--wait]
  *
  * Written by the adversarial review of plan steps 8-12 (tasks/v2-profile-plan.md). Checked for
  * sensitivity: dropping B's back start in a copy of the planner makes it report 70 disagreements.
@@ -44,14 +54,20 @@ const { V1WorkflowConverter } = req(`${pkg}/node-engine-compatibility/dist/v1-wo
 const { isTriggerNodeType } = req('n8n-workflow');
 const ref = { decideSuccessors, decisionKeys, countExpectedSettledSteps, deriveLoops, isTerminalStep, exitSourcesInto, stepKeyId, findTriggerNode, getDescendantNodeIds, getSuccessorNodeIds };
 
-const MAX_PASSES = Number(process.argv[2] ?? 3);
-const CAP = Number(process.argv[3] ?? 300000);
-const MAX_NODES = Number(process.argv[4] ?? 9);
+const WAIT = process.argv.includes('--wait');
+const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const MAX_PASSES = Number(positional[0] ?? 3);
+const CAP = Number(positional[1] ?? 300000);
+const MAX_NODES = Number(positional[2] ?? 9);
 
-type Row = { nodeId: string; iteration: number; id: string; status: string; filledOutputSlots: boolean[] };
+/**
+ * A row as `StepSummary` has it, plus two marks the planner never reads: `resumed`, set by a resume
+ * (the next claim emits stored outputs), and `cancelledFrom`, the status a cancelled row had.
+ */
+type Row = { nodeId: string; iteration: number; id: string; status: string; filledOutputSlots: boolean[]; resumed?: true; cancelledFrom?: string };
 interface St { rows: Row[]; settle: string[]; ready: string[] }
 const kid = (r: { nodeId: string; iteration: number }) => stepKeyId({ nodeId: r.nodeId, iteration: r.iteration });
-const canon = (s: St) => s.rows.map((r) => `${kid(r)}=${r.status}${r.filledOutputSlots.map(Number).join('')}`).sort().join(' ') + '|' + [...s.settle].sort().join(',') + '|' + [...s.ready].sort().join(',');
+const canon = (s: St) => s.rows.map((r) => `${kid(r)}=${r.status}${r.filledOutputSlots.map(Number).join('')}${r.resumed ? 'r' : ''}${r.cancelledFrom === 'waiting' ? 'w' : ''}`).sort().join(' ') + '|' + [...s.settle].sort().join(',') + '|' + [...s.ready].sort().join(',');
 const keyStr = (p: any) => `Q{${p.toQueue.join(' ')}} S{${p.toSkip.join(' ')}}`;
 
 function explore(tag: string, graph: any, total: any) {
@@ -62,7 +78,12 @@ function explore(tag: string, graph: any, total: any) {
   for (const n of graph.nodes) arity.set(n.id, 1);
   for (const e of graph.edges) arity.set(e.from, Math.max(arity.get(e.from)!, e.outputIndex + 1));
   const isBatch = new Set(graph.nodes.filter((n: any) => n.type === 'batch').map((n: any) => n.id));
-  const outcomes = (nodeId: string, it: number): { status: string; filled: boolean[] }[] => {
+  const outcomes = (nodeId: string, it: number, resumed: boolean): { status: string; filled: boolean[] }[] => {
+    if (resumed) {
+      // A resume emits the outputs the wait stored: any filling, no failure, no second wait.
+      const a = arity.get(nodeId)!;
+      return Array.from({ length: 1 << a }, (_, m) => ({ status: 'completed', filled: Array.from({ length: a }, (_, i) => Boolean(m & (1 << i))) }));
+    }
     if (isBatch.has(nodeId)) {
       const o = [{ status: 'completed', filled: [true, false] }, { status: 'completed', filled: [false, false] }, { status: 'failed', filled: [] }];
       if (it < MAX_PASSES - 1) o.push({ status: 'completed', filled: [false, true] });
@@ -71,6 +92,7 @@ function explore(tag: string, graph: any, total: any) {
     const a = arity.get(nodeId)!;
     const o = [{ status: 'failed', filled: [] as boolean[] }];
     for (let m = 0; m < 1 << a; m++) o.push({ status: 'completed', filled: Array.from({ length: a }, (_, i) => Boolean(m & (1 << i))) });
+    if (WAIT) o.push({ status: 'waiting', filled: [] });
     return o;
   };
   const init: St = { rows: [{ nodeId: trig, iteration: 0, id: '0', status: 'completed', filledOutputSlots: [true] }], settle: [kid({ nodeId: trig, iteration: 0 })], ready: [] };
@@ -78,8 +100,13 @@ function explore(tag: string, graph: any, total: any) {
   const stack: St[] = [init];
   let states = 0, rowSets = new Set<string>(), nonEmpty = 0, dis = 0, truncated = false;
   const checked = new Set<string>();
+  // Row sets with a waiting row, and with a row cancelled out of `waiting` (told apart by `cancelledFrom`).
+  const waitingSets = new Set<string>();
+  const cancelledWaitingSets = new Set<string>();
   const check = (rows: Row[]) => {
     const rk = rows.map((r) => `${kid(r)}=${r.status}${r.filledOutputSlots.map(Number).join('')}`).sort().join(' ');
+    if (rows.some((r) => r.status === 'waiting')) waitingSets.add(rk);
+    if (rows.some((r) => r.cancelledFrom === 'waiting')) cancelledWaitingSets.add(rows.map((r) => `${kid(r)}=${r.status}${r.cancelledFrom ?? ''}`).sort().join(' '));
     if (checked.has(rk)) return; checked.add(rk);
     const R = keyStr(planKeys(referenceAnswer(ref, graph, loops, rows)));
     let P: string;
@@ -107,22 +134,30 @@ function explore(tag: string, graph: any, total: any) {
       if (r.status === 'queued') n.rows.find((x) => kid(x) === k)!.status = 'running';
       stack.push(n);
     }
-    // running rows settle with every outcome
+    // running rows settle with every outcome; a suspension settles nothing and announces nothing
     for (const r of s.rows) {
       if (r.status !== 'running') continue;
-      for (const o of outcomes(r.nodeId, r.iteration)) {
+      for (const o of outcomes(r.nodeId, r.iteration, r.resumed === true)) {
         const n = clone(); const x = n.rows.find((y) => kid(y) === kid(r))!;
         x.status = o.status; x.filledOutputSlots = o.status === 'completed' ? o.filled : [];
-        n.settle.push(kid(r));
+        if (o.status !== 'waiting') n.settle.push(kid(r));
         stack.push(n);
       }
+    }
+    // waiting rows resume: back to queued, announced as step:ready
+    for (const r of s.rows) {
+      if (r.status !== 'waiting') continue;
+      const n = clone(); const x = n.rows.find((y) => kid(y) === kid(r))!;
+      x.status = 'queued'; x.resumed = true;
+      n.ready.push(kid(r));
+      stack.push(n);
     }
     // settled events: the handler
     for (const k of s.settle) {
       const r = byK.get(k)!;
       const n = clone(); n.settle = n.settle.filter((x) => x !== k);
       if (r.status === 'failed' || failed) {
-        for (const x of n.rows) if (x.status === 'queued') x.status = 'cancelled';
+        for (const x of n.rows) if (x.status === 'queued' || x.status === 'waiting') { x.cancelledFrom = x.status; x.status = 'cancelled'; }
         n.ready = [];
         stack.push(n); continue;
       }
@@ -142,10 +177,11 @@ function explore(tag: string, graph: any, total: any) {
     }
   }
   total.graphs++; total.states += Math.min(states, CAP); total.rowSets += checked.size; total.nonEmpty += nonEmpty; total.dis += dis; if (truncated) total.truncated.push(tag);
+  total.waitingRowSets += waitingSets.size; total.cancelledWaitingRowSets += cancelledWaitingSets.size;
   if (loops.length) total.loopGraphs++;
 }
 
-const total = { graphs: 0, loopGraphs: 0, states: 0, rowSets: 0, nonEmpty: 0, dis: 0, truncated: [] as string[], examples: [] as string[] };
+const total = { graphs: 0, loopGraphs: 0, states: 0, rowSets: 0, nonEmpty: 0, dis: 0, truncated: [] as string[], examples: [] as string[], waitingRowSets: 0, cancelledWaitingRowSets: 0 };
 const golden = JSON.parse(readFileSync(`${root}/typescript/tests/fixtures/v2/settlement-golden.json`, 'utf8'));
 for (const e of golden.entries) if (e.graph.nodes.length <= MAX_NODES + 3) explore(e.id, e.graph, total);
 const conv = new V1WorkflowConverter();
@@ -163,5 +199,6 @@ for (const file of files) {
     explore(basename(file) + (fired ? `[${fired}]` : ''), graph, total);
   }
 }
-console.log(JSON.stringify({ ...total, examples: undefined }, null, 1));
+// The wait counts are printed only with `--wait`, so a run without it prints what it printed before.
+console.log(JSON.stringify({ ...total, examples: undefined, ...(WAIT ? { wait: true } : { waitingRowSets: undefined, cancelledWaitingRowSets: undefined }) }, null, 1));
 console.log(total.examples.join('\n'));

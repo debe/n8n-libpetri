@@ -21,7 +21,7 @@ import * as F from '/Users/db/repositories/n8n-libpetri/typescript/tests/fixture
 import { generateFanOut } from '/Users/db/repositories/n8n-libpetri/typescript/tests/verify/support.js';
 
 function gadgetOf(wf: any, nodeName: string, budget: number) {
-  const analysis = analyse(wf);
+  const analysis = analyse(wf, { profile: 'v1' });
   const full = composeNet(wf, analysis);
   const fullMap = mapNet(full.structural as any, full.shared as any, full.builds as any);
   const build: any = full.builds.find((x: any) => x.prefix === `id:${nodeName}`);
@@ -35,7 +35,7 @@ function gadgetOf(wf: any, nodeName: string, budget: number) {
   for (const p of flatten(net as any).places) byName.set((p as any).name, p);
   // The gadget's own starting resources, taken from the compiler rather than hand-rolled:
   // a join begins holding its slot tokens (ADR 0003) and an agent its round / call budgets.
-  const compiled: any = compile(wf, { budget, maxAgentToolCalls: 4 } as any);
+  const compiled: any = compile(wf, { profile: 'v1', budget, maxAgentToolCalls: 4 } as any);
   const seed = new Map<string, number>();
   for (const [pl, toks] of compiled.initialMarking(null)) {
     if (byName.has((pl as any).name)) seed.set((pl as any).name, (toks as any[]).length);

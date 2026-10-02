@@ -100,7 +100,7 @@ const SHARED = new Set(['_budget', '_halt', '_pause']);
 console.log('=== fixtures: free-choice with and without the shared places ===\n');
 for (const [name, wf] of [['linear', F.linear], ['diamond', F.diamond], ['fanOut', F.fanOut],
   ['ifHalf', F.ifHalf], ['agentOneTool', F.agentOneTool]] as any[]) {
-  const c: any = compile(wf, { budget: 1, maxAgentToolCalls: 4 } as any);
+  const c: any = compile(wf, { profile: 'v1', budget: 1, maxAgentToolCalls: 4 } as any);
   const all = violations(c.net, new Set());
   const noBudget = violations(c.net, new Set(['_budget']));
   const noShared = violations(c.net, SHARED);
@@ -122,8 +122,8 @@ let clean = 0; let dirty = 0; let failed = 0;
 const culpritRoles = new Map<string, number>();
 for (const f of readdirSync(DIR).filter((x) => x.endsWith('.json')).sort().slice(0, Number(process.env.LIMIT ?? 60))) {
   try {
-    const { description } = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { nodeTypes });
-    const c: any = compile(description, { budget: 1 } as any);
+    const { description } = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { profile: 'v1', nodeTypes });
+    const c: any = compile(description, { profile: 'v1', budget: 1 } as any);
     const v = violations(c.net, SHARED);
     if (v.found.length === 0) clean++; else {
       dirty++;

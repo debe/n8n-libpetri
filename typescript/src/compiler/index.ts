@@ -14,6 +14,7 @@
  */
 export { compile, readyPlacesOf, readySlot } from './compile.js';
 export { analyse, reachableFrom, DEFAULT_MAX_AGENT_ROUNDS, DEFAULT_MAX_AGENT_TOOL_CALLS } from './graph.js';
+export { DEFAULT_COMPILE_PROFILE } from './analysis/validate.js';
 export type { AnalysisOptions } from './graph.js';
 export { parseExecutionPolicy, mergePolicies, PolicyError, POLICY_SCHEMA_VERSION } from './policy.js';
 export type { ExecutionPolicy, FailureAction, FailureStep, PolicyParse } from './policy.js';

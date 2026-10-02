@@ -109,7 +109,7 @@ describe('the fired trigger (resolveFiredTrigger, v1-workflow-converter.ts)', ()
   it('refuses a workflow with no nodes as one with no trigger, n8n\'s verdict; v1 keeps empty-workflow', () => {
     const empty = workflow('empty', [], [], 'T');
     expect(v2({ ...empty, startNode: undefined })).toMatch(/^v2-trigger-count: /);
-    expect(() => analyse(empty)).toThrow(expect.objectContaining({ code: 'empty-workflow' }));
+    expect(() => analyse(empty, { profile: 'v1' })).toThrow(expect.objectContaining({ code: 'empty-workflow' }));
   });
 
   it('refuses two start nodes: a description names at most one fired trigger', () => {

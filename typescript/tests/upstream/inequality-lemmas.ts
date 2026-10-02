@@ -35,7 +35,7 @@ const TOKEN_ROLES = new Set(['in', 'in_empty', 'running', 'retry', 'routed', 'do
 type Lemma = { label: string; w: number[]; sense: '<=' | '>='; c: number };
 for (const d of [1, 2]) {
   const wf = depthNet(d);
-  const c = compile(wf);
+  const c = compile(wf, { profile: 'v1' });
   const m0 = markingStateOf(c.initialMarking(null));
   const flat = flatten(c.net, new Set(), ignore());
   const matrix = IncidenceMatrix.from(flat);

@@ -925,10 +925,49 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
 
 - [x] Resync to n8n master `944afe5`: patches, baselines, frozen v1 conformance, and the v2
       acceptance, differential and exhaustive checks (`docs/conformance-master.md`)
-- [ ] **(a)** Master's `waiting` step status and `cancelPendingSteps` (queued *and* waiting
-      cancelled) in the decoder, the planner, the reference loop and divergence row 31
-- [ ] **(b)** Make `engineV2` the default profile in `compile` and the verify CLI, with every
-      v1 consumer passing `profile: 'v1'` explicitly
+- [x] **(a)** Master's `waiting` step status and `cancelPendingSteps` (queued *and* waiting
+      cancelled) in the decoder, the planner, the reference loop and divergence row 31.
+      `decodeStepRows` reads `waiting` as a run in flight, like `running`. The reference loop
+      draws suspend and resume (`Behaviour.pWait`, differential `--wait`, spike `--wait`), and
+      a failure cancels its waiting rows too. Cancellation on request is not modelled (new row
+      35): the decoder refuses a row set with a cancelled row and no failed one, but one that
+      cancelled no row decodes and plans, so liveness has to come from outside the rows, as
+      `StepSettledHandler` checks it before planning (review finding, corrected 2026-10-02). Deviations and numbers: `tasks/v2-profile-plan.md`, "ADR 0013 (a)"
+- [ ] **The reference loops claim a step after a failure** (found in (a), there since
+      `n8n@2.41.3`). `claimStep` refuses to claim while any row of the execution has failed.
+      `simulate` (`conformance/v2/reference.ts`) and `tasks/spike-v2-exhaustive.mts` still claim
+      and run a queued step between a failed row and the handling of its `step:settled`. R(S) is
+      empty either way, so legs (a) and (c) and the spike cannot be affected. Leg (b)'s failed-pair
+      fates and the golden's failed runs can be: a step completes in the reference where n8n leaves
+      it queued, and then cancels it. A fix likely changes the golden's failed runs (not measured): re-record with
+      `--force` and say what moved
+- [x] **(b)** `engineV2` is the default profile (`DEFAULT_COMPILE_PROFILE`) of `analyse`,
+      `compile`, `verify()`, `describeWorkflowJson` and the verify CLI. Every v1 consumer names
+      `profile: 'v1'`: the scheduler's `compileCached`, `verify()`'s v1 branch, the fingerprint,
+      the tests and the v1 spikes. The codec, conformance and testbed reach the compiler only
+      through the scheduler. `--budget` / `--start` (and, after the review, `--mutex` /
+      `--all-pairs`) without `--profile v1` are usage errors, and
+      the survey takes `--profile` (v1 reproduces at HEAD, 200 of 200 rows identical).
+      Fingerprint not regenerated, golden not re-recorded, conformance unchanged (legacy 45/45,
+      libpetri 41/45, the same 4). Deviations and numbers: `tasks/v2-profile-plan.md`,
+      "ADR 0013 (b)"
+- [x] **Review fixes after (a) and (b)** (2026-10-02; `tasks/v2-profile-plan.md`, "ADR 0013
+      review fixes"): row 35 and the decoder no longer claim that cancellation on request is
+      refused at decode time; `--mutex` / `--all-pairs` without `--profile v1` are usage errors;
+      the survey counts a report that decided nothing as `undecided`, not verified; the
+      STEP_STATUSES test reads the pinned checkout where there is one, the pWait-0 test is pinned
+      to a digest recorded from e133737, and the golden's stamp also hashes the handlers and the
+      step store (golden re-recorded with `--force`: only the stamp moved); ADR 0013 and the
+      CHANGELOG brought up to date
+- [x] **CLAUDE.md** now states the default-profile rule, qualifies the survey sentence
+      (`--profile v1`, and compiling is not verifying), and gives exit 3's meaning per profile
+- [ ] **v1: the CLI exits 0 for a run that decided nothing** when z3 resolved (for example
+      `--smt-fallback off` and a truncated graph, 79 of the v1 survey's 200). Exit 3 under v1
+      means no usable z3 only. v1 is frozen (ADR 0013), so this is recorded, not changed; the
+      survey now separates those runs itself
+- [ ] **The engineV2 survey names no trigger**: 52 of its 109 refusals are workflows with
+      several triggers (`AmbiguousTriggerError`). Enumerating triggers per workflow, as
+      `tasks/v2-acceptance.mts` does (310 entries), would make the survey cover them
 - [ ] **(c)** Seam patches 0003/0004 against master: extract a `SettlementPolicy`, then make it
       injectable through `createEngineRuntime`. The gate is n8n's engine and compatibility tests
 - [ ] **(d)** A net-backed `SettlementPolicy` (`decodeStepRows` + `planFromMarking`)

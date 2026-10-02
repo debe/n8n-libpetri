@@ -62,8 +62,8 @@ The project owner decided to move to v2 as the primary target.
   frozen-path regression checks. v2 settlement evidence is not a conformance number. The live
   v2 testbed will be an integration result.
 - What v2 does not do (no retries, no error output, agents failing at the first tool call)
-  becomes what this project's default compile does not do. `docs/divergences.md` rows 31-34
-  carry it.
+  becomes what this project's default compile does not do. `docs/divergences.md` rows 31-35
+  carry it; row 35 is cancellation on request, which the net does not model.
 
 ## Evidence
 

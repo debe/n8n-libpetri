@@ -101,6 +101,7 @@ describe('a fallback violation the pause filter does not excuse is a finding', (
     // own dependency skew would present, so it must be loud.
     mockWitness.bug = true;
     await expect(verify(unbalancedJoin, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
     })).rejects.toThrow(TypeError);
   });
@@ -113,6 +114,7 @@ describe('a fallback violation the pause filter does not excuse is a finding', (
     // "does the witness hold any terminal role", which discarded exactly this finding.
     mockWitness.also = ['_pause'];
     const report = await verify(unbalancedJoin, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
     });
     const whole = wholeNet(report);
@@ -129,6 +131,7 @@ describe('a fallback violation the pause filter does not excuse is a finding', (
     mockWitness.place = '_pause';
     mockWitness.also = ['id:A/in'];
     const report = await verify(unbalancedJoin, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
     });
     const whole = wholeNet(report);
@@ -142,6 +145,7 @@ describe('a fallback violation the pause filter does not excuse is a finding', (
     // Before the fix this was mapped to `unknown` with "the fallback did not decide it
     // either", which threw away the only violation the route had found.
     const report = await verify(unbalancedJoin, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
     });
     const whole = wholeNet(report);
@@ -153,6 +157,7 @@ describe('a fallback violation the pause filter does not excuse is a finding', (
 
   it('a per-place row takes it only when the witness marks that place, and never claims the query said nothing', { timeout: CASE_TIMEOUT_MS }, async () => {
     const report = await verify(unbalancedJoin, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
     });
     const perPlace = report.checks.filter(
@@ -170,10 +175,11 @@ describe('a fallback violation the pause filter does not excuse is a finding', (
   it('the per-place row whose place the witness marks takes the finding', { timeout: CASE_TIMEOUT_MS }, async () => {
     // The other half of the same rule: a whole-net witness that holds *this* place is this
     // row's finding, so the report names the input rather than only the net.
-    const compiled = compile(unbalancedJoin);
+    const compiled = compile(unbalancedJoin, { profile: 'v1' });
     const readyPlace = compiled.joinReadyPlaces[0]!.places[0]!;
     mockWitness.place = readyPlace.name;
     const report = await verify(unbalancedJoin, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
     });
     const rows = report.checks.filter(
@@ -201,7 +207,7 @@ describe('a fallback violation the pause filter does not excuse is a finding', (
     // violations where the graph, closing at 12,679 classes, reports four. A false `violated`
     // is the one direction this verifier must never get wrong, so the per-place test applies
     // the same widening the whole-net verdict was judged with.
-    const compiled = compile(unbalancedJoin);
+    const compiled = compile(unbalancedJoin, { profile: 'v1' });
     const stranded = compiled.netMap.places.find((p) => p.role === 'edge-data');
     const excused = compiled.netMap.places.find((p) => p.role === 'in-data');
     if (stranded === undefined || excused === undefined) throw new Error('fixture lost its edge / input places');
@@ -209,6 +215,7 @@ describe('a fallback violation the pause filter does not excuse is a finding', (
     mockWitness.also = ['_pause', excused.place.name];
 
     const report = await verify(unbalancedJoin, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 0, timeoutMs: TEST_TIMEOUT_MS,
     });
     const rowFor = (name: string) => report.checks.find(

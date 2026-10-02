@@ -14,7 +14,9 @@
  * profile's single switch point (decision 2) is meant to rule out.
  */
 import { readFileSync } from 'node:fs';
-import { FINGERPRINT_FILE, diffLines, entryOf, subjects, type FingerprintFile } from './v1-fingerprint.js';
+import { compile } from '../../src/compiler/index.js';
+import { diamond } from '../fixtures/workflows.js';
+import { FINGERPRINT_FILE, diffLines, entryOf, fingerprint, subjects, type FingerprintFile } from './v1-fingerprint.js';
 
 const recorded = JSON.parse(readFileSync(FINGERPRINT_FILE, 'utf8')) as FingerprintFile;
 const current = subjects();
@@ -33,6 +35,26 @@ describe('v1 net fingerprint', () => {
       return;
     }
     expect(diffLines(want.lines, got.lines)).toEqual([]);
+  });
+});
+
+// ADR 0013 decision 2: engineV2 is the default profile, so the subjects must name v1. This pins
+// that they do: the recorded v1 lines are not what a compile with no profile produces.
+describe('the fingerprint compiles v1 by name', () => {
+  it('every subject compiles to a v1 net', () => {
+    for (const subject of current) {
+      const entry = entryOf(subject);
+      if ('error' in entry) continue;
+      expect(subject.compile().netMap.profile, subject.key).toBe('v1');
+    }
+  });
+
+  it('the default compile is not the recorded v1 net', () => {
+    const want = recorded.subjects['fixture:diamond'];
+    if (want === undefined || 'error' in want) throw new Error('fixture:diamond has no recorded lines');
+    expect(compile(diamond).netMap.profile).toBe('engineV2');
+    expect(diffLines(want.lines, fingerprint(compile(diamond)))).not.toEqual([]);
+    expect(diffLines(want.lines, fingerprint(compile(diamond, { profile: 'v1' })))).toEqual([]);
   });
 });
 

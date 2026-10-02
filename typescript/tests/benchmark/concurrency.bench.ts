@@ -171,6 +171,6 @@ describe('scheduling overhead: 100-node chain, 0 ms actions', () => {
 
 describe('compile a 185-node workflow', () => {
   const w = wide(46, 4);
-  bench('compile() — net + NetMap', () => { compile(w, { budget: 1 }); }, { iterations: 10, time: 0 });
-  bench('compile() + PrecompiledNet', () => { compile(w, { budget: 1 }).program.transitionCount; }, { iterations: 10, time: 0 });
+  bench('compile() — net + NetMap', () => { compile(w, { profile: 'v1', budget: 1 }); }, { iterations: 10, time: 0 });
+  bench('compile() + PrecompiledNet', () => { compile(w, { profile: 'v1', budget: 1 }).program.transitionCount; }, { iterations: 10, time: 0 });
 });

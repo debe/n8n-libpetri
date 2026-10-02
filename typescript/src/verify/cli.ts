@@ -8,8 +8,8 @@
  * `main.ts` is the process entry point the `bin` maps to.
  *
  * ```
- *   --profile NAME         v1 (default) | engineV2 — the target the workflow is compiled for
- *   --budget k             concurrency budget (default 1; the compiler may lower it; refused under engineV2)
+ *   --profile NAME         engineV2 (default) | v1 — the target the workflow is compiled for
+ *   --budget k             v1 concurrency budget (default 1; the compiler may lower it; refused under engineV2)
  *   --property NAME        run only this property family; repeatable
  *   --timeout MS           per-query z3 timeout for the SMT fallback (default 60000)
  *   --max-classes N        state-class cap for the solver-free route (default 200000; 0 = off)
@@ -17,8 +17,8 @@
  *   --node-types FILE      JSON node-type shapes; without it port counts are guessed
  *   --start NODE           start node (default: the first unfed node, triggers first; v1 only)
  *   --trigger NODE         the trigger that fired (engineV2 only; default: the only trigger)
- *   --mutex A,B            add a mutual-exclusion pair; repeatable
- *   --all-pairs            mutual exclusion for every pair of nodes (O(n^2) queries)
+ *   --mutex A,B            add a mutual-exclusion pair; repeatable (v1 only)
+ *   --all-pairs            mutual exclusion for every pair of nodes (O(n^2) queries; v1 only)
  *   --no-semiflows         turn VER-007 semiflow strengthening off
  *   --strict               fail the run when any check is not `proven` (unknown or bounded)
  *   --json                 emit the report as JSON instead of the table
@@ -47,15 +47,19 @@
  * verdict is sound within the graph's closed prefix and is deliberately not a proof, so a
  * gate that demands proofs must not accept it.
  *
- * `--profile engineV2` compiles for engine v2 (`tasks/v2-profile-plan.md`) and runs the
- * `settlement` family over the state-class graph alone (`settlement.ts`); `--property` of a v1
- * family then records it as not applicable. The workflow goes through the compiler's port of
+ * The default profile is `engineV2` (ADR 0013 decision 2): the CLI compiles for engine v2
+ * (`tasks/v2-profile-plan.md`) unless `--profile v1` asks for the frozen v1 target, whose six
+ * families, `--budget`, `--start`, `--mutex` and `--all-pairs` exist only there (each of the four
+ * flags without `--profile v1` is a usage error, exit 2). Under engineV2 it runs the `settlement` family over
+ * the state-class graph alone (`settlement.ts`); `--property` of a v1 family then records it as
+ * not applicable. The workflow goes through the compiler's port of
  * n8n's converter (plan step 13): it is rooted at the trigger that fired — `--trigger`, or the
  * workflow's only trigger; a workflow with several needs `--trigger`, as n8n needs the name —
  * disabled nodes are spliced out, and what n8n's converter or validator refuses is refused with
  * the compiler's `CompileError`, exit 2 with the refusal on stderr, never a report. Measured on
  * the template corpus against n8n's own converter (`tasks/v2-acceptance.mts`), the verdicts
- * agree on every entry. Exit 3 does not apply under engineV2: no check there is solver-backed.
+ * agree on every entry. Under engineV2 no check is solver-backed, so exit 3 means something else
+ * there: no check was decided (`cli/exit-code.ts`), a run that verified nothing.
  *
  * `--smt-fallback` is the escape hatch for the size ceiling `verify()` applies to the SMT
  * route: above a measured net size libpetri's pre-solver pipeline exhausts the V8 heap, which

@@ -44,12 +44,20 @@ export const requireNonNegativeInt = raising(nonNegativeInt, 'non-negative');
 export const requirePositiveInt = raising(positiveInt, 'positive');
 
 /**
- * The profile an option names, default `v1`. Checked at run time too, because the value can
- * come from a JavaScript caller or a flag: an unknown profile compiled as `v1` would build a
- * net for an engine nobody asked for.
+ * The profile a caller that names none compiles for: `engineV2` since ADR 0013 (decision 2).
+ * v1 stays available, frozen, as `profile: 'v1'`, and every v1 consumer in this repository
+ * names it — the scheduler, the codec, the conformance harness and the testbed — so this
+ * default only decides what a caller gets that did not say.
+ */
+export const DEFAULT_COMPILE_PROFILE: CompileProfile = 'engineV2';
+
+/**
+ * The profile an option names, default {@link DEFAULT_COMPILE_PROFILE}. Checked at run time
+ * too, because the value can come from a JavaScript caller or a flag: an unknown profile
+ * compiled as the default would build a net for an engine nobody asked for.
  */
 export function profileOf(requested: CompileProfile | undefined, where: string): CompileProfile {
-  const profile: unknown = requested ?? 'v1';
+  const profile: unknown = requested ?? DEFAULT_COMPILE_PROFILE;
   if (profile === 'v1' || profile === 'engineV2') return profile;
   throw new CompileError('invalid-options', `${where}: profile must be 'v1' or 'engineV2', got ${String(profile)}`);
 }

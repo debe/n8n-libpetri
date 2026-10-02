@@ -41,7 +41,7 @@ describe('verify without z3 (VER-013)', () => {
   });
 
   it('the whole report still closes: the graph needs no solver, and nothing throws', { timeout: 120_000 }, async () => {
-    const report = await withoutZ3(async () => verify(retryFour, { timeoutMs: 1_000 }));
+    const report = await withoutZ3(async () => verify(retryFour, { profile: 'v1', timeoutMs: 1_000 }));
     expect(report.solver.available).toBe(false);
     expect(report.counts.violated).toBe(0);
     expect(report.ok).toBe(true);
@@ -63,7 +63,7 @@ describe('verify without z3 (VER-013)', () => {
   it('a check that has to fall back is unknown with the reason naming PATH and LIBPETRI_Z3', { timeout: 120_000 }, async () => {
     // `maxClasses: 0` turns the solver-free route off, so every family falls back — which
     // without a solver is exactly M4's no-z3 behaviour, and the reason must still say why.
-    const report = await withoutZ3(async () => verify(retryFour, { timeoutMs: 1_000, maxClasses: 0 }));
+    const report = await withoutZ3(async () => verify(retryFour, { profile: 'v1', timeoutMs: 1_000, maxClasses: 0 }));
     const solverChecks = report.checks.filter((c) => c.query.route === 'smt');
     expect(solverChecks.length).toBeGreaterThan(0);
     for (const check of solverChecks) {
@@ -78,7 +78,7 @@ describe('verify without z3 (VER-013)', () => {
   });
 
   it('the structural part of the report still works: invariants come from the pipeline, not from z3', { timeout: 120_000 }, async () => {
-    const report = await withoutZ3(async () => verify(diamond, { timeoutMs: 1_000, properties: ['budget'] }));
+    const report = await withoutZ3(async () => verify(diamond, { profile: 'v1', timeoutMs: 1_000, properties: ['budget'] }));
     expect(report.invariants.encoded).toBeGreaterThan(0);
     expect(report.invariants.basis).toBeGreaterThan(0);
     expect(report.invariants.budgetSemiflow).toMatch(/_budget/);
@@ -86,11 +86,11 @@ describe('verify without z3 (VER-013)', () => {
     // without a solver.
     const structural = report.checks.find((c) => c.subject.kind === 'net')!;
     expect(structural.verdict).toBe('proven');
-    expect(report.net.places).toBe(compile(diamond).net.places.size);
+    expect(report.net.places).toBe(compile(diamond, { profile: 'v1' }).net.places.size);
   });
 
   it('renders a report that says the solver is missing, and what still closed without it', { timeout: 120_000 }, async () => {
-    const report = await withoutZ3(async () => verify(diamond, { timeoutMs: 1_000, properties: ['budget'] }));
+    const report = await withoutZ3(async () => verify(diamond, { profile: 'v1', timeoutMs: 1_000, properties: ['budget'] }));
     const text = renderReport(report);
     // Not "every verdict is unknown": the same page carries PROVEN rows off the complete
     // graph, so the header has to say what a missing solver actually costs.
@@ -103,7 +103,7 @@ describe('verify without z3 (VER-013)', () => {
     expect(text).toContain('PROVEN');
 
     // With the route off, there is nothing left to decide and the unproven section returns.
-    const blind = await withoutZ3(async () => verify(diamond, { timeoutMs: 1_000, properties: ['budget'], maxClasses: 0 }));
+    const blind = await withoutZ3(async () => verify(diamond, { profile: 'v1', timeoutMs: 1_000, properties: ['budget'], maxClasses: 0 }));
     expect(renderReport(blind)).toContain('Unproven');
   });
 });

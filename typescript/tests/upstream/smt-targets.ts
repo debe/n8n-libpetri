@@ -38,7 +38,7 @@ const pool = 4; let i = 0;
 await Promise.all(Array.from({ length: pool }, async () => {
   while (i < cases.length) {
     const [label, [dA, dB], target] = cases[i++]!;
-    const c = compile(depthNet(dA, dB));
+    const c = compile(depthNet(dA, dB), { profile: 'v1' });
     const p = (n: string) => { const pl = c.netMap.place(n); if (!pl) throw new Error('no place ' + n); return pl.place; };
     const t0 = performance.now();
     const r = await SmtVerifier.forNet(c.net).initialMarking(markingStateOf(c.initialMarking(null)))

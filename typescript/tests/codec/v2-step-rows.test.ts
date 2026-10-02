@@ -17,12 +17,17 @@
  * differential of step 10, which loads n8n's code. The plans asserted here are written from
  * engine v2's rules, as the step 5 and 6 suites write their fates.
  */
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { InMemoryEventStore, PrecompiledNetExecutor, BitmapNetExecutor } from 'libpetri';
 import type { Place, Token, TransitionAction } from 'libpetri';
 import { MarkingState, StateClassGraph } from 'libpetri/verification';
 import { CodecError } from '../../src/codec/errors.js';
 import { enabledTransitions, planFromMarking } from '../../src/codec/v2/plan.js';
-import { decodeStepRows, type StepKey, type StepRow } from '../../src/codec/v2/step-rows.js';
+import {
+  decodeStepRows, V2_SETTLED_STEP_STATUSES, V2_STEP_STATUSES, type StepKey, type StepRow,
+} from '../../src/codec/v2/step-rows.js';
 import {
   compile, DONE_SLOT, LOOP_SLOT, ProfileMismatchError, settlementActions,
 } from '../../src/compiler/index.js';
@@ -32,6 +37,9 @@ import { hash, rng } from '../../src/conformance/v2/reference.js';
 import type { V2Graph } from '../../src/conformance/v2/graph.js';
 import { ACCEPTED, SETTLEMENT_SHAPES, branchDiamond, chain, edge, loop, trigger, v1 } from '../fixtures/v2-graphs.js';
 import { diamond } from '../fixtures/workflows.js';
+
+/** n8n's built `execution.types.js` in the pinned checkout, when there is one. */
+const N8N_EXECUTION_TYPES = fileURLToPath(new URL('../../../.n8n/packages/@n8n/engine/dist/execution/execution.types.js', import.meta.url));
 
 const compileV2 = (graph: V2Graph): CompiledWorkflow =>
   compile(graphToDescription(graph).description, { profile: 'engineV2' });
@@ -277,6 +285,81 @@ describe('planFromMarking', () => {
   });
 });
 
+// ---- master's waiting and cancelPendingSteps (ADR 0013 (a)) ----
+
+describe('decodeStepRows at master: a waiting step is a run in flight', () => {
+  const t = row('T', 0, 'completed', [true]);
+
+  // The recorded copy: what the decoder was written against, readable with no `.n8n` (CI).
+  it('records master\'s step statuses at the pin, in STEP_STATUSES\' order, and waiting as not settled', () => {
+    expect([...V2_STEP_STATUSES]).toEqual(['queued', 'running', 'waiting', 'completed', 'failed', 'skipped', 'cancelled']);
+    expect([...V2_SETTLED_STEP_STATUSES]).toEqual(['completed', 'failed', 'skipped', 'cancelled']);
+  });
+
+  // The check against n8n itself (review finding: the test above compares the constant with a
+  // copy of itself). Runs where the pinned checkout's engine is built; CI has none, and the
+  // resync's drift review covers it there.
+  it.skipIf(!existsSync(N8N_EXECUTION_TYPES))('equals STEP_STATUSES and SETTLED_STEP_STATUSES of the pinned checkout\'s engine', () => {
+    const n8n = createRequire(import.meta.url)(N8N_EXECUTION_TYPES) as {
+      STEP_STATUSES: readonly string[]; SETTLED_STEP_STATUSES: readonly string[];
+    };
+    expect([...V2_STEP_STATUSES]).toEqual([...n8n.STEP_STATUSES]);
+    expect([...V2_SETTLED_STEP_STATUSES]).toEqual([...n8n.SETTLED_STEP_STATUSES]);
+  });
+
+  it('decodes a waiting row as a running one: start fired, X/running marked, nothing planned behind it', () => {
+    const c = compileV2(chain);
+    const running = decodeStepRows(c, [t, row('A', 0, 'running')]);
+    const waiting = decodeStepRows(c, [t, row('A', 0, 'waiting')]);
+    expect(countsOf(waiting.marking)).toEqual(countsOf(running.marking));
+    expect(countsOf(waiting.marking)).toMatchObject({ 'A/running': 1 });
+    expect(waiting.rowCounts).toEqual(running.rowCounts);
+    expect(planFromMarking(c, waiting)).toEqual({ toQueue: [], toSkip: [] });
+  });
+
+  it('decodes a resumed step (waiting → queued → running) to the same marking, and settles it from there', () => {
+    const c = compileV2(chain);
+    const at = (status: StepRow['status']) => countsOf(decodeStepRows(c, [t, row('A', 0, status)]).marking);
+    expect(at('queued')).toEqual(at('waiting'));
+    expect(at('running')).toEqual(at('waiting'));
+    expect(planFromMarking(c, decodeStepRows(c, [t, row('A', 0, 'completed', [true])])))
+      .toEqual({ toQueue: [{ nodeId: 'B', iteration: 0 }], toSkip: [] });
+  });
+
+  it('holds a Merge while one input is waiting, as while it is running', () => {
+    const c = compileV2(branchDiamond);
+    const base = [row('T', 0, 'completed', [true]), row('If', 0, 'completed', [true, true]), row('P', 0, 'completed', [true])];
+    expect(planFromMarking(c, decodeStepRows(c, [...base, row('Q', 0, 'waiting')]))).toEqual({ toQueue: [], toSkip: [] });
+  });
+
+  it('decodes a waiting loop member like a running one, and keys the plan after it by its pass', () => {
+    const c = compileV2(loop);
+    const pass0 = [row('T', 0, 'completed', [true]), row('B', 0, 'completed', [false, true])];
+    const waiting = decodeStepRows(c, [...pass0, row('Body', 0, 'waiting')]);
+    expect(countsOf(waiting.marking)).toEqual(countsOf(decodeStepRows(c, [...pass0, row('Body', 0, 'running')]).marking));
+    expect(planFromMarking(c, waiting)).toEqual({ toQueue: [], toSkip: [] });
+  });
+
+  it('decodes a row cancelled out of waiting (cancelPendingSteps) like a waiting one, beside the failure', () => {
+    const c = compileV2(branchDiamond);
+    const base = [row('T', 0, 'completed', [true]), row('If', 0, 'completed', [true, true]), row('P', 0, 'failed')];
+    const cancelled = decodeStepRows(c, [...base, row('Q', 0, 'cancelled')]);
+    const waiting = decodeStepRows(c, [...base, row('Q', 0, 'waiting')]);
+    expect(countsOf(cancelled.marking)).toEqual(countsOf(waiting.marking));
+    expect(countsOf(cancelled.marking)).toMatchObject({ _halt: 1, 'Q/running': 1 });
+    expect(planFromMarking(c, cancelled)).toEqual({ toQueue: [], toSkip: [] });
+    expect(planFromMarking(c, waiting)).toEqual({ toQueue: [], toSkip: [] });
+  });
+
+  it('decodes a waiting row beside a failure: a step that suspended after the cancellation sweep still owes its settlement', () => {
+    const c = compileV2(branchDiamond);
+    const rows = [row('T', 0, 'completed', [true]), row('If', 0, 'completed', [true, true]), row('P', 0, 'failed'), row('Q', 0, 'waiting')];
+    const decoded = decodeStepRows(c, [...rows].reverse());
+    expect(countsOf(decoded.marking)).toEqual(countsOf(decodeStepRows(c, rows).marking));
+    expect(planFromMarking(c, decoded)).toEqual({ toQueue: [], toSkip: [] });
+  });
+});
+
 // ---- refusals ----
 
 describe('decodeStepRows refuses a row set the net cannot have produced', () => {
@@ -288,9 +371,19 @@ describe('decodeStepRows refuses a row set the net cannot have produced', () => 
     expect(() => decodeStepRows(compiled, rows)).toThrow(message);
   };
 
-  it('an unknown status, waiting included', () => {
-    refuses(c, [t, row('A', 0, 'waiting')], /status 'waiting' is not an engine v2 step status/);
-    refuses(c, [t, row('A', 0, 'paused')], /status 'paused'/);
+  it('an unknown status, named against master\'s STEP_STATUSES', () => {
+    refuses(c, [t, row('A', 0, 'paused')], /status 'paused' is not an engine v2 step status at n8n master 944afe5 \(queued, running, waiting,/);
+    refuses(c, [t, row('A', 0, 'suspended')], /status 'suspended'/);
+  });
+
+  it('a waiting row on the trigger or a batch node: neither ever suspends', () => {
+    refuses(c, [row('T', 0, 'waiting')], /trigger 'T' is waiting; the trigger's row is completed at birth/);
+    refuses(cl, [t, row('B', 0, 'waiting')], /batch node 'B' is waiting; the engine runs a batch step itself/);
+    refuses(cl, [t, row('B', 0, 'completed', [false, true]), row('Body', 0, 'completed', [true]), row('B', 1, 'waiting')], /batch node 'B' is waiting/);
+  });
+
+  it('a waiting row with filled slots: a wait stores its outputs on the declaration, not on the row', () => {
+    refuses(c, [t, row('A', 0, 'waiting', [true])], /a waiting row fills output slots/);
   });
 
   it('a gap in a node\'s iterations', () => {
@@ -316,8 +409,28 @@ describe('decodeStepRows refuses a row set the net cannot have produced', () => 
     refuses(cl, [t, row('B', 0, 'skipped'), row('Body', 0, 'skipped')], /where batch node 'B' ended its loop/);
   });
 
-  it('a cancelled row without a failed one', () => {
-    refuses(c, [t, row('A', 0, 'cancelled')], /cancelled but no row failed/);
+  it('a cancelled row without a failed one: at master only a cancellation on request does that, and the rows do not record it', () => {
+    refuses(c, [t, row('A', 0, 'cancelled')], /cancelled but no row failed; without a failure engine v2 cancels steps only when the execution is cancelled on request/);
+    refuses(c, [t, row('A', 0, 'cancelled'), row('B', 0, 'waiting')], /cancelled but no row failed/);
+  });
+
+  // Divergence row 35: the refusal above is not a detector of cancellation on request. These
+  // row sets are ones an ended execution leaves, and they decode; the liveness check is the
+  // caller's, as it is `StepSettledHandler.handle`'s before it plans.
+  it('does not refuse a cancellation on request that found only running steps: no row is cancelled, and the net plans on', () => {
+    // testbed agent-nested.json is this chain (trigger → research-agent → answer). The
+    // cancellation lands while A runs, A then completes, and n8n plans nothing for the ended
+    // execution; the rows are those of a live one, and the planner queues B.
+    const decoded = decodeStepRows(c, [t, row('A', 0, 'completed', [true])]);
+    expect(planFromMarking(c, decoded)).toEqual({ toQueue: [{ nodeId: 'B', iteration: 0 }], toSkip: [] });
+  });
+
+  it('does not refuse a cancellation on request followed by a failure: the set decodes as a failure, and plans nothing', () => {
+    // T fans out to A and B. The cancellation cancels queued A while B runs, then B fails.
+    const fan = compileV2({ nodes: [trigger('T'), v1('A'), v1('B')], edges: [edge('T', 'A'), edge('T', 'B')] });
+    const decoded = decodeStepRows(fan, [t, row('A', 0, 'cancelled'), row('B', 0, 'failed')]);
+    expect(countsOf(decoded.marking)).toMatchObject({ _halt: 1 });
+    expect(planFromMarking(fan, decoded)).toEqual({ toQueue: [], toSkip: [] });
   });
 
   it('a node the net does not compile, a repeated row, a second row outside a loop', () => {
@@ -334,7 +447,7 @@ describe('decodeStepRows refuses a row set the net cannot have produced', () => 
   });
 
   it('a v1 net, by profile', () => {
-    const v1Compiled = compile(diamond);
+    const v1Compiled = compile(diamond, { profile: 'v1' });
     expect(() => decodeStepRows(v1Compiled, [])).toThrow(ProfileMismatchError);
     expect(() => planFromMarking(v1Compiled, { marking: new Map(), rowCounts: new Map() })).toThrow(ProfileMismatchError);
     expect(() => enabledTransitions(v1Compiled, new Map())).toThrow(ProfileMismatchError);

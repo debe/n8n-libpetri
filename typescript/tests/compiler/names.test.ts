@@ -37,7 +37,7 @@ describe('names', () => {
 
   it('is the vocabulary every compiled fixture carries', () => {
     for (const workflow of [diamond, multiProducer, chooseBranch, userCycle, expressionRef, loopOverItems]) {
-      const compiled = compile(workflow);
+      const compiled = compile(workflow, { profile: 'v1' });
       for (const g of compiled.netMap.nodes) {
         if (g.form === 'direct') expect(g.in.name).toBe(inPlaceOf(g.id));
         if (g.skipped !== null) expect(g.skipped.name).toBe(skippedPlaceOf(g.id));

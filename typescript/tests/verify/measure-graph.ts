@@ -95,7 +95,7 @@ function widened(compiled: CompiledWorkflow, roles: ReadonlySet<PlaceRole>): Pla
 async function smtFallback(
   workflow: WorkflowDescription, timeoutMs: number,
 ): Promise<{ verdict: string; ms: number; witness: string }> {
-  const compiled = compile(workflow, { budget: 1 });
+  const compiled = compile(workflow, { profile: 'v1', budget: 1 });
   const sinks: Place<unknown>[] = compiled.netMap.places
     .filter((p) => REST_ROLES.has(p.role)).map((p) => p.place);
   const started = performance.now();
@@ -142,6 +142,7 @@ async function main(): Promise<void> {
     let peak = 0;
     const sampler = setInterval(() => { peak = Math.max(peak, process.memoryUsage().rss); }, 50);
     const report = await verify(workflow, {
+      profile: 'v1',
       properties: ['proper-completion'],
       // Zero solver work in this table: the fallback only runs on a truncated graph, and
       // when it does its cost is the next table's subject rather than this one's.
@@ -171,6 +172,7 @@ async function main(): Promise<void> {
     for (const [label, workflow] of [...cyclic, ['userCycle', userCycle] as const]) {
       for (const cap of [2_000, 20_000, 200_000]) {
         const report = await verify(workflow, {
+          profile: 'v1',
           properties: ['proper-completion'], timeoutMs: 1, maxClasses: cap,
         });
         const space = report.stateSpace;
@@ -228,6 +230,7 @@ async function main(): Promise<void> {
   for (const [label, workflow] of FIXTURES) {
     const started = performance.now();
     const report = await verify(workflow, {
+      profile: 'v1',
       timeoutMs,
       ...(maxClasses === undefined ? {} : { maxClasses }),
     });

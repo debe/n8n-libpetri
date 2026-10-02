@@ -26,10 +26,17 @@
  *
  *   npx tsx tasks/v2-differential.mts [--behaviours 20] [--orders 20] [--net-behaviours B]
  *                                     [--net-orders O] [--limit N] [--empty-terminal 0.25]
- *                                     [--json out.json]
+ *                                     [--wait 0] [--json out.json]
  *
  * `--net-behaviours` / `--net-orders` (default: all) bound which (b, o) pairs also run the net for
  * legs (b) and (c); leg (a) runs on every pair.
+ *
+ * `--wait p` lets a step that completes suspend first with chance p (master's `waiting`,
+ * `Behaviour.pWait`): it goes `waiting`, and a seeded resume completes it later with the outputs it
+ * stored. The default 0 draws nothing and reproduces every run from before. Leg (b) also counts,
+ * on every failed pair, the rows the reference cancelled (`cancelPendingSteps`), by the status they
+ * had before (`queued` or `waiting`) and what the net did with the same step: the measurement of
+ * `docs/divergences.md` row 31.
  *
  * Needs `.n8n/` at the pin, built with `scripts/bootstrap-n8n.sh --scope=cli`.
  */
@@ -45,6 +52,7 @@ import { compareLockstep, comparePoint, compareState } from '../typescript/src/c
 import type { PlanKeys } from '../typescript/src/conformance/v2/differential.ts';
 import { graphToDescription } from '../typescript/src/conformance/v2/graph.ts';
 import type { V2Graph } from '../typescript/src/conformance/v2/graph.ts';
+import { GOLDEN_STAMPED_DIST } from '../typescript/src/conformance/v2/golden.ts';
 import { runV2 } from '../typescript/src/conformance/v2/net-run.ts';
 import { hash, simulate } from '../typescript/src/conformance/v2/reference.ts';
 import type { ReferenceRow, RunResult, SettlementReference, V2Loop } from '../typescript/src/conformance/v2/reference.ts';
@@ -74,10 +82,7 @@ const reference: SettlementReference = {
 };
 
 // Decision 16's stamp: the pin, the dist files that decide, and the libpetri the net ran on.
-const STAMPED = [
-  'engine/dist/execution/settlement.js', 'engine/dist/execution/iteration-mapping.js', 'engine/dist/execution/completion.js',
-  'engine/dist/execution/loop-ledger.js', 'engine/dist/graph/loops.js', 'node-engine-compatibility/dist/v1-workflow-converter.js',
-];
+const STAMPED = GOLDEN_STAMPED_DIST;
 const sha = (f: string) => createHash('sha256').update(readFileSync(resolve(pkg, f))).digest('hex').slice(0, 12);
 const n8nVersion = JSON.parse(readFileSync(resolve(root, '.n8n/packages/cli/package.json'), 'utf8')).version as string;
 const libpetriPkg = resolve(root, 'typescript/node_modules/libpetri/package.json');
@@ -95,6 +100,7 @@ const NET_BEHAVIOURS = Number(arg('net-behaviours', String(BEHAVIOURS)));
 const NET_ORDERS = Number(arg('net-orders', String(ORDERS)));
 const LIMIT = Number(arg('limit', '100000'));
 const EMPTY_TERMINAL = Number(arg('empty-terminal', '0.25'));
+const P_WAIT = Number(arg('wait', '0'));
 const JSON_OUT = arg('json', '');
 
 // --- corpus, as the spike reads it ----------------------------------------------------------------
@@ -117,13 +123,18 @@ const findings: Finding[] = [];
 const count = {
   workflows: files.length, entries: 0, accepted: 0, compiled: 0, compileErrors: 0, loopEntries: 0,
   // leg (a)
-  states: 0, statesRunning: 0, statesCancelled: 0, statesFailed: 0, statesEmptyTerminal: 0, stateDisagreements: 0, stateCodecErrors: 0,
+  states: 0, statesRunning: 0, statesWaiting: 0, statesWaitingFailed: 0, statesCancelled: 0, statesFailed: 0, statesEmptyTerminal: 0, stateDisagreements: 0, stateCodecErrors: 0,
   refRuns: 0,
   // leg (b)
   pairs: 0, pairsFailureFree: 0, pairsFailed: 0, pairDisagreements: 0, keysCompared: 0, keysFailedCompared: 0, onlyNet: 0, onlyReference: 0,
   // leg (c)
   netFirings: 0, points: 0, pointDisagreements: 0, pointCodecErrors: 0, pointMarkingDiffs: 0,
 };
+/**
+ * Leg (b) on failed pairs: each row the reference cancelled, as `<status before>-><net's status>`
+ * (`absent` when the net has no row for the step). Row 31's measurement.
+ */
+const cancelledFates = new Map<string, number>();
 const time = { a: 0, net: 0, c: 0 };
 const started = performance.now();
 
@@ -169,15 +180,28 @@ for (const file of files) {
     for (let b = 0; b < BEHAVIOURS; b++) {
       const seed = hash(file, fired ?? '', 'behaviour', b);
       const pFail = b % 4 === 0 ? 0.05 : 0; // a quarter of the behaviours let a node fail, as in the spike
-      const behaviour = { seed, pFail, emptyTerminal: EMPTY_TERMINAL };
+      const behaviour = { seed, pFail, emptyTerminal: EMPTY_TERMINAL, pWait: P_WAIT };
       for (let o = 0; o < ORDERS; o++) {
         // (a) every state of the reference run
         let t0 = performance.now();
         let run: RunResult;
+        // The status each row had before it was cancelled, by key: `queued` or `waiting`.
+        const lastStatus = new Map<string, string>();
+        const cancelledFrom = new Map<string, string>();
         run = simulate(reference, graph, behaviour, o, {
           onState: (rows) => {
             count.states++;
+            for (const r of rows) {
+              const k = `${r.nodeId}@${r.iteration}`;
+              const before = lastStatus.get(k);
+              if (r.status === 'cancelled' && before !== undefined && before !== 'cancelled') cancelledFrom.set(k, before);
+              lastStatus.set(k, r.status);
+            }
             if (rows.some((r) => r.status === 'running')) count.statesRunning++;
+            if (rows.some((r) => r.status === 'waiting')) {
+              count.statesWaiting++;
+              if (rows.some((r) => r.status === 'failed')) count.statesWaitingFailed++;
+            }
             if (rows.some((r) => r.status === 'cancelled')) count.statesCancelled++;
             if (rows.some((r) => r.status === 'failed')) count.statesFailed++;
             if (rows.some((r) => batchIds.has(r.nodeId) && r.status === 'completed' && !r.filledOutputSlots.some(Boolean))) count.statesEmptyTerminal++;
@@ -203,7 +227,14 @@ for (const file of files) {
         count.pairs++;
         count.netFirings += net.firings;
         const lock = compareLockstep(reference, graph, loops, compiled, run, net);
-        if (lock.failed) { count.pairsFailed++; count.keysFailedCompared += lock.compared; count.onlyNet += lock.onlyNet; count.onlyReference += lock.onlyReference; }
+        if (lock.failed) {
+          count.pairsFailed++; count.keysFailedCompared += lock.compared; count.onlyNet += lock.onlyNet; count.onlyReference += lock.onlyReference;
+          const netStatus = new Map(net.rows.map((r) => [`${r.nodeId}@${r.iteration}`, r.status]));
+          for (const [k, before] of cancelledFrom) {
+            const fate = `${before}->${netStatus.get(k) ?? 'absent'}`;
+            cancelledFates.set(fate, (cancelledFates.get(fate) ?? 0) + 1);
+          }
+        }
         else { count.pairsFailureFree++; count.keysCompared += lock.compared; }
         if (!lock.agree) {
           count.pairDisagreements++;
@@ -234,9 +265,12 @@ const wall = (performance.now() - started) / 1000;
 const s = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
 console.log(`stamp: n8n@${n8nVersion}; ${STAMPED.map((f) => `${basename(f)} ${sha(f)}`).join(', ')}; libpetri ${libpetriVersion}${libpetriLinked ? ' (LINKED checkout)' : ' (registry)'}`);
 console.log(`corpus: workflows ${count.workflows}, entries ${count.entries}, accepted ${count.accepted}, compiled ${count.compiled} (${count.loopEntries} with a batch loop), compile errors ${count.compileErrors}`);
-console.log(`behaviours ${BEHAVIOURS} x orders ${ORDERS} (net legs: ${Math.min(NET_BEHAVIOURS, BEHAVIOURS)} x ${Math.min(NET_ORDERS, ORDERS)}), emptyTerminal ${EMPTY_TERMINAL}, pFail 0.05 on every 4th behaviour`);
-console.log(`(a) state:    reference runs ${count.refRuns}, states ${count.states} (${count.statesRunning} with a running row, ${count.statesCancelled} with a cancelled row, ${count.statesFailed} with a failed row, ${count.statesEmptyTerminal} with an empty terminal); disagreements ${count.stateDisagreements} (of which CodecError ${count.stateCodecErrors})`);
+console.log(`behaviours ${BEHAVIOURS} x orders ${ORDERS} (net legs: ${Math.min(NET_BEHAVIOURS, BEHAVIOURS)} x ${Math.min(NET_ORDERS, ORDERS)}), emptyTerminal ${EMPTY_TERMINAL}, pFail 0.05 on every 4th behaviour${P_WAIT > 0 ? `, pWait ${P_WAIT}` : ''}`);
+const waitingStates = P_WAIT > 0 ? `${count.statesWaiting} with a waiting row (${count.statesWaitingFailed} beside a failed row), ` : '';
+console.log(`(a) state:    reference runs ${count.refRuns}, states ${count.states} (${count.statesRunning} with a running row, ${waitingStates}${count.statesCancelled} with a cancelled row, ${count.statesFailed} with a failed row, ${count.statesEmptyTerminal} with an empty terminal); disagreements ${count.stateDisagreements} (of which CodecError ${count.stateCodecErrors})`);
 console.log(`(b) lockstep: pairs ${count.pairs} (failure-free ${count.pairsFailureFree}, ${count.keysCompared} steps compared; failed ${count.pairsFailed}, ${count.keysFailedCompared} steps decided by both compared, ${count.onlyNet} only by the net, ${count.onlyReference} only by the reference); disagreements ${count.pairDisagreements}`);
+const fateText = [...cancelledFates].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([f, n]) => `${f} ${n}`).join(', ');
+console.log(`(b) cancelled on failed pairs, reference status before -> the net's status for the step: ${fateText === '' ? 'none' : fateText}`);
 console.log(`(c) firing:   net firings ${count.netFirings}, row-set points ${count.points}; disagreements ${count.pointDisagreements} (CodecError ${count.pointCodecErrors}, marking differs ${count.pointMarkingDiffs})`);
 console.log(`wall clock ${wall.toFixed(1)} s: leg (a) ${s(time.a)}, net runs ${s(time.net)}, leg (c) ${s(time.c)}`);
 console.log(`findings ${findings.length}`);
@@ -244,5 +278,5 @@ for (const f of findings) {
   console.log(`  (${f.leg}) ${f.entry} b${f.behaviour} o${f.order}: ${f.detail}`);
   if (f.rows !== undefined) console.log(`      rows ${rowsText(f.rows)}`);
 }
-if (JSON_OUT !== '') writeFileSync(JSON_OUT, JSON.stringify({ count, findings }, null, 2));
+if (JSON_OUT !== '') writeFileSync(JSON_OUT, JSON.stringify({ count, cancelledFates: Object.fromEntries(cancelledFates), findings }, null, 2));
 process.exitCode = findings.length > 0 ? 1 : 0;

@@ -9,7 +9,7 @@ import { ALL, diamond, fanOut4, linear } from '../fixtures/workflows.js';
 
 describe('node membership', () => {
   it('hasNode / tryNode answer without throwing; node() still throws for an unknown name', () => {
-    const c = compile(linear);
+    const c = compile(linear, { profile: 'v1' });
     expect(c.netMap.hasNode('A')).toBe(true);
     expect(c.netMap.hasNode('Nope')).toBe(false);
     expect(c.netMap.tryNode('A')).toBe(c.netMap.node('A'));
@@ -21,7 +21,7 @@ describe('node membership', () => {
 describe('role indexes', () => {
   it('transitionFor and placeFor agree with a declaration-order scan on every fixture, with and without a port', () => {
     for (const wf of Object.values(ALL)) {
-      const c = compile(wf);
+      const c = compile(wf, { profile: 'v1' });
       for (const g of c.netMap.nodes) {
         const transitions = c.netMap.transitionsOf(g.node);
         const roles = new Set(transitions.map((t) => t.role));
@@ -48,7 +48,7 @@ describe('role indexes', () => {
   });
 
   it('a ported query never matches an info that carries no port', () => {
-    const c = compile(fanOut4);
+    const c = compile(fanOut4, { profile: 'v1' });
     // `X_run` carries no port; `X_route_o` does.
     expect(c.netMap.transitionFor('Q', 'run')).toBeDefined();
     expect(c.netMap.transitionFor('Q', 'run', 0)).toBeUndefined();
@@ -59,7 +59,7 @@ describe('role indexes', () => {
 
 describe('derived place collections', () => {
   it('are the same arrays on every read and on every withActions rebinding', () => {
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const collections = ['joinInputPlaces', 'joinReadyPlaces', 'edgeDataPlaces', 'runningPlaces'] as const;
     const first = collections.map((k) => c[k]);
     const rebound = c.withActions(forwardAllActions());

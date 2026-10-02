@@ -38,8 +38,8 @@ const out: Verdict[] = [];
 for (const f of files) {
   let a: any;
   try {
-    const { description } = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { nodeTypes });
-    a = analyse(description);
+    const { description } = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { profile: 'v1', nodeTypes });
+    a = analyse(description, { profile: 'v1' });
   } catch { continue; }
 
   // Activations per node, by flow conservation over the DAG. Only meaningful when acyclic;

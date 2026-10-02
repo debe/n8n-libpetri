@@ -25,7 +25,7 @@ function branchesOf(t: Transition): string[][] {
 }
 
 describe('emission rule: tree edge from an acyclic producer carries data | empty', () => {
-  const c = compile(diamond);
+  const c = compile(diamond, { profile: 'v1' });
 
   it('X_run offers data or empty per output and marks X/routed; X_done refunds the budget', () => {
     const toA = edgeSlot(c, 'IF', 0, 'A', 0);
@@ -63,7 +63,7 @@ describe('emission rule: tree edge from an acyclic producer carries data | empty
 });
 
 describe('emission rule inside a cycle (Loop Over Items)', () => {
-  const c = compile(loopOverItems);
+  const c = compile(loopOverItems, { profile: 'v1' });
 
   it('classifies the edges: Trigger->Loop and Loop->After are tree edges, Loop->Body and Body->Loop cycle edges', () => {
     const kinds = Object.fromEntries(c.analysis.edges.map((e) => [`${e.from}.${e.outputIndex}->${e.to}.${e.inputIndex}`, e.kind]));
@@ -133,7 +133,7 @@ describe('emission rule inside a cycle (Loop Over Items)', () => {
 });
 
 describe('a user cycle without a loop node', () => {
-  const c = compile(userCycle);
+  const c = compile(userCycle, { profile: 'v1' });
 
   it('B (cyclic, no skip) never writes the empty place of its tree edge to Exit; Exit still owns it', () => {
     expect(routingPlaces(c, 'B')).toEqual(['id:A/in0_e2', 'id:B/nil_0', 'id:Exit/in']);
@@ -152,7 +152,7 @@ describe('a user cycle without a loop node', () => {
 });
 
 describe('join gadget (ADR 0003)', () => {
-  const c = compile(diamond);
+  const c = compile(diamond, { profile: 'v1' });
   const merge = () => gadget(c, 'Merge');
 
   it('arm per edge consuming free_i; data arms count hasdata', () => {
@@ -194,7 +194,7 @@ describe('join gadget (ADR 0003)', () => {
   });
 
   it('a single input with two empty-capable producers is the OR form (README "OR-inputs"), not a slot join', () => {
-    const m = compile(multiProducer);
+    const m = compile(multiProducer, { profile: 'v1' });
     const g = gadget(m, 'C');
     expect(g.form).toBe('or');
     const [i] = asForm(g, 'or').inputs;
@@ -206,12 +206,12 @@ describe('join gadget (ADR 0003)', () => {
   });
 
   it('a single input with one tree and one cycle producer (Loop Over Items) stays a slot join', () => {
-    expect(gadget(compile(loopOverItems), 'Loop').form).toBe('join');
+    expect(gadget(compile(loopOverItems, { profile: 'v1' }), 'Loop').form).toBe('join');
   });
 });
 
 describe('Merge chooseBranch: all inputs required, combinations enumerated', () => {
-  const c = compile(chooseBranch);
+  const c = compile(chooseBranch, { profile: 'v1' });
 
   it('X_start consumes ready_i_data for every input; no hasdata place', () => {
     const g = gadget(c, 'Merge');
@@ -240,7 +240,7 @@ describe('Merge chooseBranch: all inputs required, combinations enumerated', () 
 });
 
 describe('retry gadget', () => {
-  const c = compile(retry);
+  const c = compile(retry, { profile: 'v1' });
 
   it('X_run offers the routed success | retry | halt (stopWorkflow default) | waiting | stopped and always returns idle', () => {
     const run = transitionOf(c, 'A', 'run');
@@ -296,7 +296,7 @@ describe('retry gadget', () => {
 
 describe('expression references and onError', () => {
   it("$('A') in B becomes a read arc on A/done at B_start and a start_unmet twin reading A/skipped (CORE-032)", () => {
-    const c = compile(expressionRef);
+    const c = compile(expressionRef, { profile: 'v1' });
     expect(readNames(transitionOf(c, 'B', 'start'))).toEqual(['id:A/done']);
     expect(readNames(transitionOf(c, 'A', 'start'))).toEqual([]);
     expect(gadget(c, 'B').references).toEqual(['A']);
@@ -310,7 +310,7 @@ describe('expression references and onError', () => {
   });
 
   it('continueErrorOutput appends the error output as the last index and drops the halt branch', () => {
-    const c = compile(continueErrorOutput);
+    const c = compile(continueErrorOutput, { profile: 'v1' });
     const a = gadget(c, 'A');
     expect(a.onError).toBe('continueErrorOutput');
     expect(a.outputs.map((o) => [o.index, o.isErrorOutput, o.name])).toEqual([[0, false, null], [1, true, 'error']]);
@@ -324,7 +324,7 @@ describe('expression references and onError', () => {
   });
 
   it('unconnected outputs get no places', () => {
-    const c = compile(ifHalf);
+    const c = compile(ifHalf, { profile: 'v1' });
     expect(gadget(c, 'IF').outputs.map((o) => o.index)).toEqual([0]);
     // One connected output routed inside X_run; output 1 is unwired and has no places.
     expect(routingPlaces(c, 'IF')).toEqual(['id:A/in', 'id:A/in_empty']);
@@ -340,7 +340,7 @@ describe('halt: no reap, no resets', () => {
     // take and earlier than a reap that destroyed them. So there is no reap: `_halt` is the
     // terminal marker, and `HALT_REST_ROLES` counts the arrivals as its residue.
     for (const wf of [retry, twoTriggers, multiProducer]) {
-      const c = compile(wf);
+      const c = compile(wf, { profile: 'v1' });
       for (const t of c.net.transitions) {
         expect(t.resets, t.name).toHaveLength(0);
         expect(inputNames(t), t.name).not.toContain('_halt');

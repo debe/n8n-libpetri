@@ -39,7 +39,7 @@ const nodeTypes = parseNodeTypesFile(JSON.parse(readFileSync(
 const BUDGETS = [1, 2, 4, 8];
 
 function gadgetOf(wf: any, node: any, budget: number) {
-  const analysis = analyse(wf);
+  const analysis = analyse(wf, { profile: 'v1' });
   const full = composeNet(wf, analysis);
   const fullMap = mapNet(full.structural as any, full.shared as any, full.builds as any);
   const build: any = full.builds.find((b: any) => b.prefix === node.id);
@@ -52,7 +52,7 @@ function gadgetOf(wf: any, node: any, budget: number) {
   for (const p of flatten(net as any).places) byName.set((p as any).name, p);
   const roles = new Map<string, string>();
   for (const pi of (fullMap as any).places) if (byName.has(pi.place.name)) roles.set(pi.place.name, pi.role);
-  const compiled: any = compile(wf, { budget: Math.max(budget, 1), maxAgentToolCalls: 4 } as any);
+  const compiled: any = compile(wf, { profile: 'v1', budget: Math.max(budget, 1), maxAgentToolCalls: 4 } as any);
   const seed = new Map<string, number>();
   for (const [pl, toks] of compiled.initialMarking(null)) {
     if (byName.has((pl as any).name)) seed.set((pl as any).name, (toks as any[]).length);
@@ -193,7 +193,7 @@ const rows: Row[] = [];
 
 for (const f of readdirSync(DIR).filter((x) => x.endsWith('.json')).sort().slice(0, Number(process.env.LIMIT ?? 25))) {
   let description: any;
-  try { description = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { nodeTypes }).description; }
+  try { description = describeWorkflowJson(JSON.parse(readFileSync(`${DIR}/${f}`, 'utf8')), { profile: 'v1', nodeTypes }).description; }
   catch { continue; }
   for (const node of description.nodes) {
     const classes: number[] = []; let meta: any = null;
@@ -208,7 +208,7 @@ for (const f of readdirSync(DIR).filter((x) => x.endsWith('.json')).sort().slice
       } catch { classes.push(-1); }
     }
     if (meta === null || classes.some((c) => c < 0)) continue;
-    const an = analyse(description);
+    const an = analyse(description, { profile: 'v1' });
     const live = liveArity(an, node.name);
     const cls = { exclusive: allExclusive(an, node.name), loopBack: hasLoopBack(an, node.name) };
     rows.push({ key: `${f}|${node.name}`, type: String(node.type).replace('n8n-nodes-base.', ''), ...meta, ...live, ...cls, classes });

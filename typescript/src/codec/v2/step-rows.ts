@@ -13,15 +13,24 @@
  *
  * | row | fired |
  * |---|---|
- * | `queued`, `running` | the start: the step is in flight, its token on `X/running` |
+ * | `queued`, `running`, `waiting` | the start: the step is in flight, its token on `X/running` |
  * | `completed` | the start, then `X_run`'s success branch filling exactly the row's `filledOutputSlots`; under split routing `X_run` then every `X_route_o` |
  * | `failed` | the start, then `X_run`'s halt branch |
  * | `skipped` | the skip |
- * | `cancelled` | the start only: v2 cancels a queued step after a failure (`cancelQueuedSteps`), and the net does not model the cancellation, so the step stays in flight |
+ * | `cancelled` | the start only: v2 cancels a queued or waiting step after a failure (`cancelPendingSteps`), and a claimed one whose execution ended before it ran (`cancelStep`); the net does not model the cancellation, so the step stays in flight |
  *
  * A batch node's completed row takes `B_run`'s `loop` branch when its loop slot is filled,
  * `doneData` when its done slot is, and `doneEmpty` when neither is (`runBatchStep`,
  * `execution/batch-step.ts`).
+ *
+ * **`waiting` is a run in flight.** At the pin, a step whose executor returns a wait moves
+ * `running → waiting` (`StepReadyHandler`, `suspendStep`). It ran, but it still owes the execution
+ * a settlement: `waiting` is not in `SETTLED_STEP_STATUSES`, nothing is announced and nothing is
+ * planned behind it. A resume moves it `waiting → queued` (`resumeStep`, `resumeDueSteps`), and the
+ * re-dispatch emits the stored outputs without running the node again. The net has one place for
+ * all of it: the start has fired and `X/running` holds the token until `X_run` settles, so
+ * `queued`, `running` and `waiting` — and a resumed step's second `queued` and `running` — decode
+ * to the same marking.
  *
  * Why replay rather than a closed formula or the state equation: `X_start` takes `all(X/live)`, a
  * count fixed only when it fires. Replay also lets the net itself find a row set it cannot have
@@ -44,17 +53,34 @@
  * The decoder is exact and refuses rather than guesses: every refusal is a {@link CodecError}
  * naming the row. The replay's own refusal (a row left over) and the checks made before it:
  * - a node the net does not compile;
- * - a status engine v2 does not have at the pin — `waiting` included, which `STEP_STATUSES` lacks;
+ * - a status engine v2 does not have at the pin (`STEP_STATUSES`);
  * - an iteration that is not a whole number, a repeated `(node, iteration)`, a gap in a node's
  *   iterations, and an iteration above 0 on a node outside every loop;
  * - a filled slot on a row that did not complete (`filledOutputSlots` is "empty unless
  *   completed");
- * - a trigger row that failed or was skipped (`ExecutionStartHandler` records it completed at
- *   birth, decision 7);
+ * - a trigger row that failed, was skipped or is waiting (`ExecutionStartHandler` records it
+ *   completed at birth, decision 7, so it never runs and never suspends);
+ * - a batch row that is waiting: the engine runs a batch step itself (`runBatchNode`), and
+ *   `runBatchStep` returns outputs, never a wait;
  * - a batch row that filled both its done and its loop slot, which `runBatchStep` never returns;
  * - a loop member's row at a pass whose batch row is terminal (`isPastLoopEnd`: body steps exist
  *   for running passes only);
- * - a cancelled row with no failed row (v2 cancels only after a failure).
+ * - a cancelled row with no failed row. At the pin v2 cancels steps in two cases: after a failure
+ *   (`failExecution` → `cancelPendingSteps`, and `cancelStep` on a step claimed before the
+ *   execution ended), and on request (`CancelExecutionService` → `cancelPendingSteps`), which ends
+ *   the execution with no failed row. The rows do not record which: the execution's status is not
+ *   among them. After a cancellation on request `StepSettledHandler` plans nothing (the execution
+ *   is not live), while a marking without `_halt` plans on. The net does not model cancellation on
+ *   request, so the decoder refuses the row set rather than guess.
+ *
+ *   This refusal is **not** a detector of cancellation on request. It sees only a cancellation
+ *   that cancelled a pending row. One that lands while every unsettled step is running cancels
+ *   nothing: those steps settle `completed` or `failed`, and the row set is one a live execution
+ *   also has. Such a row set decodes, and `planFromMarking` plans what the net would plan for a
+ *   live execution, where n8n plans nothing. A step that fails after the cancellation adds a
+ *   failed row, so a set with cancelled rows decodes too, as a failure (and the plan is empty, as
+ *   n8n's). Whether the execution is live is not in the rows: `StepSettledHandler` checks it
+ *   before it plans, and a caller of the planner has to as well (divergence row 35).
  *
  * The marking alone does not say how many rows a node has — a loop is folded, not unrolled, and
  * its members carry no per-pass marker (decision 6) — so the decoder returns the row count per
@@ -66,14 +92,16 @@ import type { CompiledWorkflow, SettlementGadget } from '../../compiler/index.js
 import { CodecError } from '../errors.js';
 import { branchOf, fire, isEnabled, TokenCounts } from './net.js';
 
-/** `STEP_STATUSES` (`packages/@n8n/engine/src/execution/execution.types.ts`) at the pin `n8n@2.41.3`. */
-export const V2_STEP_STATUSES = ['queued', 'running', 'completed', 'failed', 'skipped', 'cancelled'] as const;
+/** `STEP_STATUSES` (`packages/@n8n/engine/src/execution/execution.types.ts`) at the pin, n8n master `944afe5`. */
+export const V2_STEP_STATUSES = ['queued', 'running', 'waiting', 'completed', 'failed', 'skipped', 'cancelled'] as const;
 
-/** `StepStatus` at the pin. There is no `waiting`. */
+/** `StepStatus` at the pin. */
 export type V2StepStatus = (typeof V2_STEP_STATUSES)[number];
 
-/** `SETTLED_STEP_STATUSES` at the pin. */
-const SETTLED: ReadonlySet<string> = new Set(['completed', 'failed', 'skipped', 'cancelled']);
+/** `SETTLED_STEP_STATUSES` at the pin: `waiting` is not settled, the step still owes an outcome. */
+export const V2_SETTLED_STEP_STATUSES = ['completed', 'failed', 'skipped', 'cancelled'] as const satisfies readonly V2StepStatus[];
+
+const SETTLED: ReadonlySet<string> = new Set(V2_SETTLED_STEP_STATUSES);
 
 /** `StepKey` (`execution.types.ts`): one row's identity within an execution, by n8n graph node id. */
 export interface StepKey {
@@ -121,7 +149,7 @@ function validate(compiled: CompiledWorkflow, rows: readonly StepRow[]): Pending
     const g = byId.get(row.nodeId);
     if (g === undefined) throw new CodecError(`row ${rowName(row)}: node '${row.nodeId}' is not compiled in the engineV2 net`);
     if (!known.has(row.status)) {
-      throw new CodecError(`row ${rowName(row)} of node '${g.node}': status '${row.status}' is not an engine v2 step status at n8n@2.41.3 (${V2_STEP_STATUSES.join(', ')})`);
+      throw new CodecError(`row ${rowName(row)} of node '${g.node}': status '${row.status}' is not an engine v2 step status at n8n master 944afe5 (${V2_STEP_STATUSES.join(', ')})`);
     }
     if (!Number.isInteger(row.iteration) || row.iteration < 0) {
       throw new CodecError(`row ${rowName(row)} of node '${g.node}': the iteration is not a non-negative integer`);
@@ -133,8 +161,11 @@ function validate(compiled: CompiledWorkflow, rows: readonly StepRow[]): Pending
     if (row.status !== 'completed' && row.filledOutputSlots.some(Boolean)) {
       throw new CodecError(`row ${rowName(row)} of node '${g.node}': a ${row.status} row fills output slots, which only a completed row does`);
     }
-    if (g.isTrigger && (row.status === 'failed' || row.status === 'skipped')) {
+    if (g.isTrigger && (row.status === 'failed' || row.status === 'skipped' || row.status === 'waiting')) {
       throw new CodecError(`row ${rowName(row)} of trigger '${g.node}' is ${row.status}; the trigger's row is completed at birth`);
+    }
+    if (g.batch !== null && row.status === 'waiting') {
+      throw new CodecError(`row ${rowName(row)} of batch node '${g.node}' is waiting; the engine runs a batch step itself and runBatchStep returns outputs, never a wait`);
     }
     if (g.batch !== null && row.status === 'completed' && row.filledOutputSlots[DONE_SLOT] && row.filledOutputSlots[LOOP_SLOT]) {
       throw new CodecError(`row ${rowName(row)} of batch node '${g.node}' fills both its done and its loop slot; runBatchStep fills one at most`);
@@ -161,9 +192,10 @@ function validate(compiled: CompiledWorkflow, rows: readonly StepRow[]): Pending
       }
     }
   }
+  // Catches only a cancellation on request that cancelled a pending row; see the module doc.
   if (rows.some((r) => r.status === 'cancelled') && !rows.some((r) => r.status === 'failed')) {
     const r = rows.find((x) => x.status === 'cancelled')!;
-    throw new CodecError(`row ${rowName(r)} is cancelled but no row failed; engine v2 cancels queued steps only after a failure`);
+    throw new CodecError(`row ${rowName(r)} is cancelled but no row failed; without a failure engine v2 cancels steps only when the execution is cancelled on request, which the rows do not record and the net does not model`);
   }
   return pending;
 }

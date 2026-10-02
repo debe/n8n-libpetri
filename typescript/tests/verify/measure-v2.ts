@@ -67,7 +67,7 @@ async function measure(wf: WorkflowDescription, compileOptions: CompileOptions, 
 function subjects(): Array<readonly [string, WorkflowDescription]> {
   const out: Array<readonly [string, WorkflowDescription]> = [];
   for (const [name, wf] of Object.entries(ALL)) {
-    if (compile(wf).analysis.hasCycle) continue;
+    if (compile(wf, { profile: 'v1' }).analysis.hasCycle) continue;
     try {
       compile(wf, { profile: 'engineV2' });
     } catch (e) {
@@ -97,8 +97,8 @@ const rows: string[][] = [[
 ]];
 for (const [name, wf] of subjects()) {
   const n = wf.nodes.length;
-  const v1 = await measure(wf, { budget: 1 }, { budget: 1, smtFallback: 'off' });
-  const v1n = await measure(wf, { budget: n }, { budget: n, smtFallback: 'off' });
+  const v1 = await measure(wf, { profile: 'v1', budget: 1 }, { profile: 'v1', budget: 1, smtFallback: 'off' });
+  const v1n = await measure(wf, { profile: 'v1', budget: n }, { profile: 'v1', budget: n, smtFallback: 'off' });
   const v2 = await measure(wf, { profile: 'engineV2' }, { profile: 'engineV2' });
   rows.push([
     name, String(n), `${v1.places}/${v1.transitions}`, v1.classes, v1n.classes, `${v2.places}/${v2.transitions}`,

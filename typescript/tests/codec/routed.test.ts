@@ -51,7 +51,7 @@ function withGadget(c: CompiledWorkflow, name: string, g: NodeGadget): CompiledW
 
 describe('routed arrivals into a join', () => {
   it('cancelled: a data output on X/ok_o becomes the consumer input\'s arrival', () => {
-    const c = compile(routerIntoJoin);
+    const c = compile(routerIntoJoin, { profile: 'v1' });
     const wf = fakeWorkflow(routerIntoJoin);
     const m = c.sharedMarking();
     const a = items({ a: 1 });
@@ -65,7 +65,7 @@ describe('routed arrivals into a join', () => {
   });
 
   it('an arrival over an edge the consumer\'s input does not carry is a CodecError naming node, edge and place', () => {
-    const c = compile(routerIntoJoin);
+    const c = compile(routerIntoJoin, { profile: 'v1' });
     const wf = fakeWorkflow(routerIntoJoin);
     const merge = gadget(c, 'Merge');
     if (merge.form !== 'join') throw new Error('fixture: Merge is not a join');
@@ -92,7 +92,7 @@ describe('routed arrivals into a join', () => {
   });
 
   it('an arrival over an input the join does not model is a CodecError, not silently ignored', () => {
-    const c = compile(routerIntoJoin);
+    const c = compile(routerIntoJoin, { profile: 'v1' });
     const wf = fakeWorkflow(routerIntoJoin);
     const merge = gadget(c, 'Merge');
     if (merge.form !== 'join') throw new Error('fixture: Merge is not a join');
@@ -109,7 +109,7 @@ describe('routed arrivals into a join', () => {
 
 describe('routed arrivals into an OR-form or a direct-form consumer', () => {
   it('cancelled: both outputs on X/ok_o become the OR input\'s arrivals', () => {
-    const c = compile(routerIntoOr);
+    const c = compile(routerIntoOr, { profile: 'v1' });
     const wf = fakeWorkflow(routerIntoOr);
     expect(gadget(c, 'C').form).toBe('or');
     const m = c.sharedMarking();
@@ -126,7 +126,7 @@ describe('routed arrivals into an OR-form or a direct-form consumer', () => {
 
   /** `routerIntoOr` with `C`'s input narrowed to lose the edge `Q.2 -> C.0`. */
   function narrowedOr(): { readonly patched: CompiledWorkflow; readonly c: CompiledWorkflow; readonly id: number } {
-    const c = compile(routerIntoOr);
+    const c = compile(routerIntoOr, { profile: 'v1' });
     const or = gadget(c, 'C');
     if (or.form !== 'or') throw new Error('fixture: C is not in OR form');
     const [input0] = or.inputs;
@@ -157,7 +157,7 @@ describe('routed arrivals into an OR-form or a direct-form consumer', () => {
   });
 
   it('an arrival over an edge the direct input does not carry is a CodecError naming node, edge and place', () => {
-    const c = compile(routerIntoOr);
+    const c = compile(routerIntoOr, { profile: 'v1' });
     const wf = fakeWorkflow(routerIntoOr);
     // S0's gadget carries S1's edge place, so the arrival over Q.0 -> S0.0 has no place in it.
     const narrowed: NodeGadget = { ...gadget(c, 'S0'), in: inOf(gadget(c, 'S1')) } as NodeGadget;

@@ -417,7 +417,7 @@ describe('a policy on an agent\'s tool', () => {
   });
 
   it('refuses route: a tool has no output to route to', () => {
-    expect(() => compile(agentToolPolicy({ onFailure: [{ action: 'route', output: 0 }] })))
+    expect(() => compile(agentToolPolicy({ onFailure: [{ action: 'route', output: 0 }] }), { profile: 'v1' }))
       .toThrow(/Calculator.*no output to route to.*goes to its agent/s);
   });
 });

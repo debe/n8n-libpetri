@@ -23,7 +23,7 @@ function named(m: Map<{ name: string }, unknown[]>): Record<string, number> {
 
 describe('decodeExecutionData — fresh run', () => {
   it('layers the one stack entry over sharedMarking(): the entry payload on the start node\'s in place, nothing else touched', () => {
-    const c = compile(linear);
+    const c = compile(linear, { profile: 'v1' });
     const wf = fakeWorkflow(linear);
     const red = newRunExecutionData(wf.nodes.Trigger!, { startItems: items({ n: 1 }) });
     const entry = red.executionData!.nodeExecutionStack[0]!;
@@ -39,7 +39,7 @@ describe('decodeExecutionData — fresh run', () => {
     // Trigger is a second start node (a resumed execution lists the nodes with runData) so
     // A and B stay reachable and the shared marking carries Merge's free tokens rather than
     // seeding its inputs empty.
-    const c = compile({ ...diamond, startNode: undefined, startNodes: ['Merge', 'Trigger'] });
+    const c = compile({ ...diamond, startNode: undefined, startNodes: ['Merge', 'Trigger'] }, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const red = newRunExecutionData(wf.nodes.Merge!, { startItems: items(1) });
     const m = named(decodeExecutionData(c, red.executionData!));
@@ -54,7 +54,7 @@ describe('decodeExecutionData — fresh run', () => {
   });
 
   it('keeps the seeded empties and skipped markers of the shared part (unreachable producers)', () => {
-    const c = compile(twoTriggers);
+    const c = compile(twoTriggers, { profile: 'v1' });
     const wf = fakeWorkflow(twoTriggers);
     const red = newRunExecutionData(wf.nodes.TrigA!);
     const m = decodeExecutionData(c, red.executionData!);
@@ -64,7 +64,7 @@ describe('decodeExecutionData — fresh run', () => {
   });
 
   it('marks X/done for every node with at least one recorded run (options.runData), so resumed $(\'Y\') read arcs see it', () => {
-    const c = compile(linear);
+    const c = compile(linear, { profile: 'v1' });
     const wf = fakeWorkflow(linear);
     const red = newRunExecutionData(wf.nodes.Trigger!);
     const m = named(decodeExecutionData(c, red.executionData!, { runData: { A: [{} as never], B: [] } }));

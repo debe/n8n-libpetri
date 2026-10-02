@@ -432,7 +432,7 @@ describe('the k-safety condition (README "Concurrency budget and its safety cond
   it('is not about overlap — X/idle already forbids two activations of one node — but about arrival order', async () => {
     // `C`'s input 0 has two producers, so `C` runs twice, once per arrival. The compiler
     // forces k = 1, and at k = 1 the arrivals are the producers' declaration order.
-    const c = compile(multiProducer, { budget: 4 });
+    const c = compile(multiProducer, { profile: 'v1', budget: 4 });
     expect(c.requestedBudget).toBe(4);
     expect(c.effectiveBudget).toBe(1);
     expect(c.budgetRestriction).toEqual({ reason: 'multi-producer-input', detail: 'C.0 has 2 producers' });
@@ -462,7 +462,7 @@ describe('the k-safety condition (README "Concurrency budget and its safety cond
       node('Trigger', 'trigger', [0, 0]), node('A', 'set', [200, 0]), node('B', 'set', [200, 100]),
       node('CA', 'set', [400, 0]), node('CB', 'set', [400, 100]),
     ], [conn('Trigger', 0, 'A', 0), conn('Trigger', 0, 'B', 0), conn('A', 0, 'CA', 0), conn('B', 0, 'CB', 0)], 'Trigger');
-    const c = compile(wf, { budget: 4 });
+    const c = compile(wf, { profile: 'v1', budget: 4 });
     expect(c.effectiveBudget).toBe(4);
     const r = await execute(wf, {
       A: async () => { await sleep(30); return { data: [items({ from: 'A' })] }; },
@@ -474,7 +474,7 @@ describe('the k-safety condition (README "Concurrency budget and its safety cond
   });
 
   it('a cycle is forced to k = 1 for the same reason, and the loop still runs correctly at any requested k', { timeout: 20_000 }, async () => {
-    expect(compile(loopOverItems, { budget: 4 }).budgetRestriction!.reason).toBe('cyclic');
+    expect(compile(loopOverItems, { profile: 'v1', budget: 4 }).budgetRestriction!.reason).toBe('cyclic');
     let iteration = 0;
     const r = await execute(loopOverItems, {
       // Two iterations, then the `done` output.

@@ -52,7 +52,7 @@ import type { CompiledWorkflow } from '../typescript/src/compiler/index.ts';
 import { v2Actions } from '../typescript/src/conformance/v2/binder.ts';
 import { compareLockstep, compareStateTo, planKeys } from '../typescript/src/conformance/v2/differential.ts';
 import {
-  asGolden, decodeRows, encodeRow, fatesOf, GOLDEN_FORMAT, selectStates, stampDifferences, stateKey,
+  asGolden, decodeRows, encodeRow, fatesOf, GOLDEN_FORMAT, GOLDEN_STAMPED_DIST, selectStates, stampDifferences, stateKey,
 } from '../typescript/src/conformance/v2/golden.ts';
 import type {
   GoldenEntry, GoldenParameters, GoldenRow, GoldenRun, GoldenStamp, GoldenState, SettlementGolden,
@@ -105,10 +105,7 @@ const parameters: GoldenParameters = {
 };
 
 // ---- decision 16's stamp -----------------------------------------------------------------------
-const STAMPED = [
-  'engine/dist/execution/settlement.js', 'engine/dist/execution/iteration-mapping.js', 'engine/dist/execution/completion.js',
-  'engine/dist/execution/loop-ledger.js', 'engine/dist/graph/loops.js', 'node-engine-compatibility/dist/v1-workflow-converter.js',
-];
+const STAMPED = GOLDEN_STAMPED_DIST;
 const libpetriDir = resolve(root, 'typescript/node_modules/libpetri');
 const stamp: GoldenStamp = {
   n8n: `n8n@${JSON.parse(readFileSync(resolve(root, '.n8n/packages/cli/package.json'), 'utf8')).version as string}`,

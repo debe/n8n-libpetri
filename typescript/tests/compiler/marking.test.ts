@@ -23,7 +23,7 @@ function named(m: Map<{ name: string }, unknown[]>): Record<string, number> {
 
 describe('initialMarking', () => {
   it('linear at k = 1: budget, idles, trigger data on Trigger/in and nothing else', () => {
-    const c = compile(linear);
+    const c = compile(linear, { profile: 'v1' });
     const items = { items: [{ json: { a: 1 } }] };
     const m = c.initialMarking(items);
     expect(named(m)).toEqual({
@@ -37,13 +37,13 @@ describe('initialMarking', () => {
   });
 
   it('budget k lands as k unit tokens when the k-safety check passes', () => {
-    const c = compile(linear, { budget: 3 });
+    const c = compile(linear, { profile: 'v1', budget: 3 });
     expect(c.effectiveBudget).toBe(3);
     expect(c.initialMarking(null).get(c.netMap.shared.budget)).toHaveLength(3);
   });
 
   it('diamond: one free token per join input, no ready tokens', () => {
-    const m = named(compile(diamond).initialMarking(null));
+    const m = named(compile(diamond, { profile: 'v1' }).initialMarking(null));
     expect(m['id:Merge/free_0']).toBe(1);
     expect(m['id:Merge/free_1']).toBe(1);
     expect(m['id:Merge/ready_0']).toBeUndefined();
@@ -52,7 +52,7 @@ describe('initialMarking', () => {
   });
 
   it('two triggers: the join input fed only by the other trigger is seeded empty, its free token withheld', () => {
-    const c = compile(twoTriggers);
+    const c = compile(twoTriggers, { profile: 'v1' });
     const merge = gadget(c, 'Merge');
     expect(merge.inputs.map((i) => [i.index, i.seedEmpty])).toEqual([[0, false], [1, true]]);
     expect(gadget(c, 'TrigB').reachable).toBe(false);
@@ -68,13 +68,13 @@ describe('initialMarking', () => {
   });
 
   it('retryOnFail: X/tries seeded with maxTries - 1, maxTries clamped as n8n clamps it ([2, 5])', () => {
-    const c = compile(retry);
+    const c = compile(retry, { profile: 'v1' });
     const m = named(c.initialMarking(null));
     expect(m['id:A/tries']).toBe(2);
     expect(m['id:A/retry']).toBeUndefined();
     const tries = (maxTries: number | undefined) => named(compile(workflow('tries', [
       node('Trigger', 'trigger', [0, 0]), node('A', 'set', [100, 0], { retryOnFail: true, maxTries }),
-    ], [conn('Trigger', 0, 'A', 0)], 'Trigger')).initialMarking(null))['id:A/tries'];
+    ], [conn('Trigger', 0, 'A', 0)], 'Trigger'), { profile: 'v1' }).initialMarking(null))['id:A/tries'];
     expect(tries(1)).toBe(1);        // clamped up to 2 attempts
     expect(tries(10)).toBe(4);       // clamped down to 5
     expect(tries(0)).toBe(2);        // 0 is falsy: n8n's default 3
@@ -82,7 +82,7 @@ describe('initialMarking', () => {
   });
 
   it('chooseBranch: no ready variant is pre-filled, both free tokens present', () => {
-    const m = named(compile(chooseBranch).initialMarking(null));
+    const m = named(compile(chooseBranch, { profile: 'v1' }).initialMarking(null));
     expect(Object.keys(m).filter((n) => n.includes('/ready_'))).toEqual([]);
     expect(m['id:Merge/free_0']).toBe(1);
     expect(m['id:Merge/free_1']).toBe(1);
@@ -92,7 +92,7 @@ describe('initialMarking', () => {
     const wf = workflow('start-join', [
       node('T1', 'trigger', [0, 0]), node('T2', 'trigger', [0, 100]), node('Merge', 'merge', [200, 50]),
     ], [conn('T1', 0, 'Merge', 0), conn('T2', 0, 'Merge', 1)], 'Merge');
-    const c = compile(wf);
+    const c = compile(wf, { profile: 'v1' });
     const merge = gadget(c, 'Merge');
     expect(merge.isStart).toBe(true);
     const m = c.initialMarking('items');
@@ -108,7 +108,7 @@ describe('initialMarking', () => {
     const wf = workflow('cb-start', [
       node('T', 'trigger', [0, 0]), node('M', 'mergeChoose', [100, 0]), node('X', 'set', [200, 0]),
     ], [conn('T', 0, 'M', 0), conn('M', 0, 'X', 0), conn('X', 0, 'M', 1)], 'M');
-    const c = compile(wf);
+    const c = compile(wf, { profile: 'v1' });
     const m = gadget(c, 'M');
     expect(m.form).toBe('choose-branch');
     expect(m.inputs.map((i) => [i.index, i.emptyCapable, asSlot(i, 'ready-split').readyEmpty?.name ?? null])).toEqual([
@@ -126,7 +126,7 @@ describe('initialMarking', () => {
     const wf = workflow('or-start', [
       node('T1', 'trigger', [0, 0]), node('T2', 'trigger', [0, 100]), node('C', 'set', [200, 50]),
     ], [conn('T1', 0, 'C', 0), conn('T2', 0, 'C', 0)], 'C');
-    const c = compile(wf);
+    const c = compile(wf, { profile: 'v1' });
     const g = gadget(c, 'C');
     expect(g.form).toBe('or');
     expect(g.inputs[0]!.unreachableEdges).toBe(2);
@@ -139,18 +139,18 @@ describe('initialMarking', () => {
   });
 
   it('an OR input seeds one empty per unreachable tree producer, none when every producer is reachable', () => {
-    expect(named(compile(ifBothOutputs).initialMarking(null))['id:C/ready_0']).toBeUndefined();
+    expect(named(compile(ifBothOutputs, { profile: 'v1' }).initialMarking(null))['id:C/ready_0']).toBeUndefined();
     const wf = workflow('or-partial', [
       node('T', 'trigger', [0, 0]), node('Other', 'trigger', [0, 200]), node('IF', 'if', [200, 0]), node('C', 'set', [400, 0]),
     ], [conn('T', 0, 'IF', 0), conn('IF', 0, 'C', 0), conn('IF', 1, 'C', 0), conn('Other', 0, 'C', 0)], 'T');
-    const c = compile(wf);
+    const c = compile(wf, { profile: 'v1' });
     expect(orInputOf(gadget(c, 'C')).round).toBe(3);
     expect(named(c.initialMarking(null))['id:C/ready_0']).toBe(1);
   });
 
   it('a dead required input keeps its free token and is never pre-filled', () => {
     const wf = workflow('dead', [node('T', 'trigger', [0, 0]), node('M', 'mergeChoose', [100, 0])], [conn('T', 0, 'M', 1)], 'T');
-    const m = named(compile(wf).initialMarking(null));
+    const m = named(compile(wf, { profile: 'v1' }).initialMarking(null));
     expect(m['id:M/free_0']).toBe(1);
     expect(m['id:M/free_1']).toBe(1);
     expect(Object.keys(m).filter((n) => n.includes('/ready_'))).toEqual([]);
@@ -160,7 +160,7 @@ describe('initialMarking', () => {
     const wf = workflow('ref-unreachable', [
       node('T', 'trigger', [0, 0]), node('Other', 'trigger', [0, 100]), node('A', 'set', [200, 0]),
     ], [conn('T', 0, 'A', 0)], 'T', { references: { A: ['Other'] } });
-    const c = compile(wf);
+    const c = compile(wf, { profile: 'v1' });
     expect(named(c.initialMarking(null))['id:Other/skipped']).toBe(1);
     expect(gadget(c, 'Other').skipped!.name).toBe('id:Other/skipped');
   });
@@ -170,7 +170,7 @@ describe('initialMarking', () => {
       node('T1', 'trigger', [0, 0]), node('T2', 'trigger', [0, 100]), node('X', 'set', [100, 100]),
       node('Merge', 'merge', [200, 50]),
     ], [conn('T1', 0, 'Merge', 0), conn('T2', 0, 'X', 0), conn('X', 0, 'Merge', 1)], 'T1');
-    const c = compile(wf);
+    const c = compile(wf, { profile: 'v1' });
     const m = named(c.initialMarking(null));
     expect(m['id:Merge/ready_1']).toBe(1);
     expect(m['id:X/in']).toBeUndefined();

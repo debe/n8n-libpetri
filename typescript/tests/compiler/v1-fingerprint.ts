@@ -27,10 +27,12 @@
  *
  * Subjects: every fixture in `tests/fixtures/workflows.ts` — `ALL`, the ones kept out of it
  * (`fanOut3`, the agent fixtures, `agentNested`) and `agentToolPolicy` under each policy the
- * scheduler suite runs it with — compiled with default options, as the compiler suite
- * compiles them; and every committed workflow under `scripts/testbed/workflows/`, read the way
- * the verify CLI reads a file given no `--node-types` (`parseWorkflowJson`, then
- * `compile(…, { budget: 1 })` as `verify()` does). That is the CLI path CI can reproduce: the
+ * scheduler suite runs it with — compiled with `{ profile: 'v1' }` and otherwise default
+ * options, as the compiler suite compiles them; and every committed workflow under
+ * `scripts/testbed/workflows/`, read the way the verify CLI reads a file given `--profile v1` and
+ * no `--node-types` (`parseWorkflowJson(…, { profile: 'v1' })`, then
+ * `compile(…, { profile: 'v1', budget: 1 })` as `verify()` does). The profile is named, never
+ * defaulted: since ADR 0013 the default is `engineV2`, and this file pins the v1 net. That is the CLI path CI can reproduce: the
  * node-type catalogue is generated from a local `.n8n` build, so these nets use
  * `BUILT_IN_SHAPES` and the connection heuristic, and the shape guesses are part of what is
  * pinned. A subject that does not compile pins its refusal instead.
@@ -148,7 +150,7 @@ export function fingerprint(c: CompiledWorkflow): string[] {
 // ==================== subjects ====================
 
 function fixture(key: string, workflow: WorkflowDescription): Subject {
-  return { key: `fixture:${key}`, source: 'tests/fixtures/workflows.ts', compile: () => compile(workflow) };
+  return { key: `fixture:${key}`, source: 'tests/fixtures/workflows.ts', compile: () => compile(workflow, { profile: 'v1' }) };
 }
 
 /** The `agentToolPolicy` variants `tests/scheduler/agent.test.ts` compiles; `route` pins its refusal. */
@@ -182,8 +184,8 @@ function testbedSubjects(): Subject[] {
     key: `testbed:${file}`,
     source: `scripts/testbed/workflows/${file}`,
     compile: () => compile(
-      parseWorkflowJson(readFileSync(new URL(file, TESTBED_WORKFLOWS), 'utf8')).description,
-      { budget: 1 },
+      parseWorkflowJson(readFileSync(new URL(file, TESTBED_WORKFLOWS), 'utf8'), { profile: 'v1' }).description,
+      { profile: 'v1', budget: 1 },
     ),
   }));
 }

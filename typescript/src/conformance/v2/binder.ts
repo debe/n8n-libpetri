@@ -9,6 +9,11 @@
  * in the reference: `ExecutionStartHandler` writes its row completed with slot 0 filled, and
  * `outcome` is never asked about it.
  *
+ * A step that suspends in the reference ({@link Outcome}`.suspends`, master's `waiting`) is, in the
+ * net, a run that stays in flight until it settles: `X/running` holds its token across the wait
+ * and the resume. So the policy reads only the outcome the resume emits, and the net run is the
+ * same whether the step waited or not.
+ *
  * Every action (start, skip, run and route) awaits a seeded number of macrotask ticks, 0 to 3,
  * before it writes, so firings overlap and complete out of order: the interleavings are the
  * executor's, not a schedule this module picks. The draws come from one stream per run, in the

@@ -15,7 +15,7 @@ const linear = workflow('internal-linear', [
 
 describe('InternalSchedulerError', () => {
   it('is what binding a transition the gadget was not built with throws, message unchanged', () => {
-    const { netMap } = compile(linear);
+    const { netMap } = compile(linear, { profile: 'v1' });
     // `A` routes in `X_run`, so a per-output `X_route_o` for it is an invariant broken.
     const info: TransitionInfo = { role: 'route', node: 'A', name: 'A/route_0', port: 0 };
     let thrown: unknown;

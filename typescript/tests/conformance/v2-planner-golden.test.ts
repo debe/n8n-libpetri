@@ -15,6 +15,7 @@
  * by re-recording. Re-recording is for a new stamp (n8n, its dist, or libpetri), which the recorder
  * refuses to do silently. Results are settlement-level evidence, not conformance numbers.
  */
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +25,7 @@ import type { CompiledWorkflow } from '../../src/compiler/index.js';
 import { v2Actions } from '../../src/conformance/v2/binder.js';
 import { compareRuns, compareStateTo } from '../../src/conformance/v2/differential.js';
 import {
-  asGolden, decodeRows, GOLDEN_FORMAT, runResultOf, selectStates, stampDifferences, stateKey,
+  asGolden, decodeRows, GOLDEN_FORMAT, GOLDEN_STAMPED_DIST, runResultOf, selectStates, stampDifferences, stateKey,
 } from '../../src/conformance/v2/golden.js';
 import type { GoldenEntry, GoldenRow, GoldenStamp } from '../../src/conformance/v2/golden.js';
 import { graphToDescription } from '../../src/conformance/v2/graph.js';
@@ -36,6 +37,8 @@ const repo = resolve(here, '../../..');
 const golden = asGolden(JSON.parse(readFileSync(resolve(here, '../fixtures/v2/settlement-golden.json'), 'utf8')));
 const entries: readonly (readonly [string, GoldenEntry])[] = golden.entries.map((e) => [e.id, e]);
 const FIXTURES = { ...SETTLEMENT_SHAPES, ...ACCEPTED };
+const n8nPkg = resolve(repo, '.n8n/packages/@n8n');
+const haveDist = GOLDEN_STAMPED_DIST.every((f) => existsSync(resolve(n8nPkg, f)));
 
 const compileV2 = (e: GoldenEntry): CompiledWorkflow => compile(graphToDescription(e.graph).description, { profile: 'engineV2' });
 const text = (rows: readonly GoldenRow[]) => rows.map((r) => `${r[0]}@${r[1]}=${r[2]}[${r[3]}]`).join(' ');
@@ -44,12 +47,28 @@ describe('the settlement golden', () => {
   it('is stamped as decision 16 asks', () => {
     expect(golden.format).toBe(GOLDEN_FORMAT);
     expect(golden.stamp.n8n).toMatch(/^n8n@\d+\.\d+\.\d+$/);
-    expect(Object.keys(golden.stamp.dist).sort()).toEqual([
-      'engine/dist/execution/completion.js', 'engine/dist/execution/iteration-mapping.js', 'engine/dist/execution/loop-ledger.js',
-      'engine/dist/execution/settlement.js', 'engine/dist/graph/loops.js', 'node-engine-compatibility/dist/v1-workflow-converter.js',
-    ]);
+    expect(Object.keys(golden.stamp.dist).sort()).toEqual([...GOLDEN_STAMPED_DIST].sort());
     for (const h of Object.values(golden.stamp.dist)) expect(h).toMatch(/^[0-9a-f]{64}$/);
     expect(golden.stamp.libpetri.version).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  // Review finding: the stamp hashed only the decision core, not the handlers and the store whose
+  // waiting and cancellation semantics `simulate` ports.
+  it('stamps the handlers and the step store the reference loop ports, not only the decision core', () => {
+    expect(GOLDEN_STAMPED_DIST).toEqual(expect.arrayContaining([
+      'engine/dist/execution/settlement.js', 'engine/dist/execution/completion.js',
+      'engine/dist/execution/execution.types.js', 'engine/dist/execution/step-ready-handler.js',
+      'engine/dist/execution/step-settled-handler.js', 'engine/dist/database/typeorm-step-store.js',
+      'engine/dist/execution/cancel-execution.service.js', 'engine/dist/execution/wait-sweeper.js',
+    ]));
+  });
+
+  // Where the pinned checkout is built, a drifted dist file fails here, not only at the next
+  // re-record. CI has no `.n8n` and skips it; `scripts/check-n8n-drift.sh` covers a resync there.
+  it.skipIf(!haveDist)('matches the pinned checkout\'s dist, file by file', () => {
+    const local: Record<string, string> = Object.fromEntries(GOLDEN_STAMPED_DIST.map((f) =>
+      [f, createHash('sha256').update(readFileSync(resolve(n8nPkg, f))).digest('hex')]));
+    expect(local).toEqual(golden.stamp.dist);
   });
 
   it('covers every fixture graph as it is now, and only committed workflows', () => {
@@ -178,6 +197,11 @@ describe('golden.ts', () => {
     expect(() => asGolden({ ...golden, format: 2 })).toThrow(/format 1/);
     const g = golden.entries[0]!.graph;
     expect(() => decodeRows(g, [[99, 0, 'completed', '1']])).toThrow(/node index 99/);
-    expect(() => decodeRows(g, [[0, 0, 'waiting' as never, '']])).toThrow(/unknown status 'waiting'/);
+    expect(() => decodeRows(g, [[0, 0, 'paused' as never, '']])).toThrow(/unknown status 'paused'/);
+  });
+
+  it('reads master\'s waiting status (ADR 0013 (a))', () => {
+    const g = golden.entries[0]!.graph;
+    expect(decodeRows(g, [[0, 0, 'waiting', '']])[0]!.status).toBe('waiting');
   });
 });

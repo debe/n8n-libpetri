@@ -49,6 +49,7 @@
  * The parts live under `workflow-json/`: the `--node-types` file, node entries, connections,
  * shapes and the start node. This module assembles the description and re-exports them.
  */
+import { DEFAULT_COMPILE_PROFILE } from '../compiler/index.js';
 import type { CompileProfile, ExecutionPolicy, NodeTypeShape, WorkflowDescription } from '../compiler/index.js';
 import { strayConnectionsIn } from '../n8n/adapter/engine-v2.js';
 import { scheduledNodesOf } from '../n8n/adapter/graph.js';
@@ -86,7 +87,8 @@ export interface WorkflowJsonOptions {
   /** Overrides the start-node choice. */
   readonly startNode?: string;
   /**
-   * The target the description is for; default `v1`. Under `engineV2` no start node is picked:
+   * The target the description is for; default `engineV2`, the compiler's default (ADR 0013
+   * decision 2). A description for a v1 compile names `'v1'`. Under `engineV2` no start node is picked:
    * n8n's converter resolves the trigger that fired itself — the one named, or the workflow's only
    * trigger — and so does the compiler (`CompileOptions.trigger`). A {@link startNode} given
    * under `engineV2` is refused: name the fired trigger with the compile option instead.
@@ -116,7 +118,7 @@ function policiesOf(settings: unknown, { nodes, records }: JsonNodes, diagnostic
 /** Parses an n8n workflow JSON export (the object, not the text). */
 export function describeWorkflowJson(raw: unknown, options: WorkflowJsonOptions = {}): WorkflowJsonResult {
   const root = asRecord(raw, 'workflow');
-  const engineV2 = options.profile === 'engineV2';
+  const engineV2 = (options.profile ?? DEFAULT_COMPILE_PROFILE) === 'engineV2';
   const json = nodesOf(root, engineV2);
   const { names } = json;
   const parsed = connectionsOf(root['connections'], names, engineV2, json.nameless.at(-1));
@@ -158,10 +160,10 @@ export function describeWorkflowJson(raw: unknown, options: WorkflowJsonOptions 
   const policyDiagnostics: string[] = [...parsed.diagnostics];
   const policies = policiesOf(root['settings'], json, policyDiagnostics);
 
-  if (options.profile === 'engineV2' && options.startNode !== undefined) {
+  if (engineV2 && options.startNode !== undefined) {
     throw new Error('under engineV2 the start node is the trigger that fired: name it with the trigger option, not a start node');
   }
-  const startNode = options.profile === 'engineV2' ? undefined : startNodeOf(options.startNode, scheduled, names, connections);
+  const startNode = engineV2 ? undefined : startNodeOf(options.startNode, scheduled, names, connections);
 
   const references = new Map<string, string[]>(scheduled.map((node) => [
     node.name, scanExpressionReferences(parametersOf.get(node.name) ?? {}, names)]));

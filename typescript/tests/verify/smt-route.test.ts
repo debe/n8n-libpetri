@@ -42,6 +42,7 @@ describe('the SMT route is refused above the measured size ceiling', () => {
     const workflow = generateWorkflow(12);
     expect(workflow.nodes.length).toBe(49);
     const report = await verify(workflow, {
+      profile: 'v1',
       properties: ['proper-completion', 'budget'], maxClasses: 1_000, timeoutMs: TEST_TIMEOUT_MS,
     });
     expect(report.stateSpace.complete).toBe(false);
@@ -55,8 +56,8 @@ describe('the SMT route is refused above the measured size ceiling', () => {
   });
 
   it('the ceiling is a join-input count and a places count, and `force` lifts both', () => {
-    const big = flatten(compile(generateWorkflow(12)).net);
-    const small = flatten(compile(generateWorkflow(1)).net);
+    const big = flatten(compile(generateWorkflow(12), { profile: 'v1' }).net);
+    const small = flatten(compile(generateWorkflow(1), { profile: 'v1' }).net);
     expect(big.places.length).toBeGreaterThan(SMT_MAX_FLAT_PLACES);
     expect(smtRefusalFor(big, 24, 'auto')).toContain('526 flat places');
     expect(smtRefusalFor(big, 24, 'force')).toBeNull();
@@ -71,6 +72,7 @@ describe('the SMT route is refused above the measured size ceiling', () => {
 
   it('`smtFallback: \'off\'` leaves the graph deciding and asks nothing of z3', { timeout: CASE_TIMEOUT_MS }, async () => {
     const report = await verify(loopOverItems, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 500, smtFallback: 'off', timeoutMs: TEST_TIMEOUT_MS,
     });
     expect(report.checks.every((c) => c.query.route !== 'smt'), digest(report)).toBe(true);
@@ -81,6 +83,7 @@ describe('the SMT route is refused above the measured size ceiling', () => {
 describe('the whole-net deadlockFree fallback asks the graph\'s own question (VER-014)', () => {
   it('a truncated cyclic graph asks it, declaring the pause and halt widenings as conditional sinks', { timeout: CASE_TIMEOUT_MS }, async () => {
     const report = await verify(loopOverItems, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 2_000, timeoutMs: TEST_TIMEOUT_MS,
     });
     const whole = wholeNet(report);
@@ -104,6 +107,7 @@ describe('the whole-net deadlockFree fallback asks the graph\'s own question (VE
     // switch20 truncates with six quiescent classes, all of them inside the rest set; the
     // fallback runs here as everywhere the graph did not close.
     const report = await verify(switch20, {
+      profile: 'v1',
       properties: ['proper-completion'], maxClasses: 500, timeoutMs: 100, smtFallback: 'force',
     });
     const whole = wholeNet(report);

@@ -197,7 +197,7 @@ async function main(): Promise<void> {
   const sizeRows: string[][] = [['workflow', 'nodes', 'places', 'transitions', 'flat transitions', 'compile ms', 'queried']];
   for (const [label, workflow] of all) {
     const t0 = performance.now();
-    const compiled = compile(workflow, { budget: 1 });
+    const compiled = compile(workflow, { profile: 'v1', budget: 1 });
     const compileMs = performance.now() - t0;
     const flat = flatten(compiled.net);
     sizeRows.push([
@@ -210,7 +210,7 @@ async function main(): Promise<void> {
   const rows: Row[] = [];
   const pipelineRows: string[][] = [['workflow', 'phases 1-3 (semiflows on)', 'phases 1-3 (semiflows off)']];
   for (const [label, workflow] of selected) {
-    const compiled = compile(workflow, { budget: 1 });
+    const compiled = compile(workflow, { profile: 'v1', budget: 1 });
     const pipeline: string[] = [label];
     // Phases 1-3 of the pipeline, with a 1 ms solver budget: what every query pays before z3.
     for (const semiflows of [true, false]) {

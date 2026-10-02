@@ -31,7 +31,7 @@ import { loop } from '../../fixtures/v2-graphs.js';
 import { diamond, linear, loopOverItems, twoTriggers } from '../../fixtures/workflows.js';
 import { execute, fakeNodeHelpers, fakeWorkflow, newRunExecutionData, ranNodes } from '../../scheduler/support.js';
 
-const v1Of = (): CompiledWorkflow => compile(diamond);
+const v1Of = (): CompiledWorkflow => compile(diamond, { profile: 'v1' });
 const v2Of = (): CompiledWorkflow => compile(diamond, { profile: 'engineV2' });
 
 /** The pending state of a fresh execution of `linear`: one stack entry for its trigger. */
@@ -131,7 +131,7 @@ describe('action binders refuse the other profile', () => {
   });
 
   it('settlementActions (the engineV2 binder) refuses a v1 net', () => {
-    expectRefused(() => compile(diamond, { actions: settlementPlaceholderActions() }), 'settlementActions', 'engineV2', 'v1');
+    expectRefused(() => compile(diamond, { profile: 'v1', actions: settlementPlaceholderActions() }), 'settlementActions', 'engineV2', 'v1');
     expectRefused(() => v1Of().withActions(settlementActions({ filled: () => true })), 'settlementActions', 'engineV2', 'v1');
   });
 });
@@ -145,7 +145,7 @@ describe('the v1 consumers refuse an engineV2 compiled workflow at entry', () =>
   it('decodeExecutionData', () => {
     expectRefused(() => decodeExecutionData(compile(linear, { profile: 'engineV2' }), freshState()), 'decodeExecutionData', 'v1', 'engineV2');
     // The same state decodes on the v1 net of the same workflow.
-    expect(() => decodeExecutionData(compile(linear), freshState())).not.toThrow();
+    expect(() => decodeExecutionData(compile(linear, { profile: 'v1' }), freshState())).not.toThrow();
   });
 
   it('deposits', () => {
@@ -185,12 +185,12 @@ describe('the v1 consumers refuse an engineV2 compiled workflow at entry', () =>
   it('loopTransitions, on a batch loop too', () => {
     const v2 = compile(graphToDescription(loop).description, { profile: 'engineV2' });
     expectRefused(() => loopTransitions(v2), 'loopTransitions', 'v1', 'engineV2');
-    expect(loopTransitions(compile(loopOverItems)).size).toBeGreaterThan(0);
+    expect(loopTransitions(compile(loopOverItems, { profile: 'v1' })).size).toBeGreaterThan(0);
   });
 
   it('alternativeEntryReach', () => {
     expectRefused(() => alternativeEntryReach(compile(linear, { profile: 'engineV2' })), 'alternativeEntryReach', 'v1', 'engineV2');
-    expect([...alternativeEntryReach(compile(twoTriggers))]).toEqual([['TrigB', 'TrigB']]);
+    expect([...alternativeEntryReach(compile(twoTriggers, { profile: 'v1' }))]).toEqual([['TrigB', 'TrigB']]);
   });
 
   it('the counterexample decoders stay profile-neutral, and render an arrived place by its input slot', () => {
@@ -201,7 +201,7 @@ describe('the v1 consumers refuse an engineV2 compiled workflow at entry', () =>
   });
 
   it('verify(workflow) compiles v1, whatever the workflow', async () => {
-    const report = await verify(linear, { properties: ['no-double-activation'] });
+    const report = await verify(linear, { profile: 'v1', properties: ['no-double-activation'] });
     expect(report.checks.length).toBeGreaterThan(0);
   });
 
@@ -209,7 +209,7 @@ describe('the v1 consumers refuse an engineV2 compiled workflow at entry', () =>
     /** A caller's cache holding an engineV2 net under the key the scheduler computes for `linear`. */
     function poisonedCache(): CompiledWorkflowCache {
       const cache = new CompiledWorkflowCache();
-      cache.set(CompiledWorkflowCache.key(structuralHash(analyse(linear)), 1), compile(linear, { profile: 'engineV2' }));
+      cache.set(CompiledWorkflowCache.key(structuralHash(analyse(linear, { profile: 'v1' })), 1), compile(linear, { profile: 'engineV2' }));
       return cache;
     }
 

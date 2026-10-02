@@ -280,16 +280,22 @@ with an unmodified `IRunExecutionData`, and the patches never touch persistence.
 
 ## Verification
 
-The CLI compiles workflow JSON to the same net used by `PetriScheduler`:
+The compiler has two targets, and so does the CLI. Since
+[ADR 0013](docs/adr/0013-engine-v2-primary.md) the default profile is `engineV2`, n8n's
+durable step engine: `compile()`, `verify()` and the CLI compile for it unless told otherwise,
+and the CLI then runs the `settlement` family. `v1`, n8n's default engine and the net
+`PetriScheduler` executes, is frozen but still available, and every v1 caller names it
+(`profile: 'v1'`, `--profile v1`):
 
 ```bash
 cd typescript
 npm ci
 npm run build
-npx n8n-libpetri verify ../workflow.json --budget 2 --property dead-nodes
+npx n8n-libpetri verify ../workflow.json                     # engineV2: settlement
+npx n8n-libpetri verify ../workflow.json --profile v1 --budget 2 --property dead-nodes
 ```
 
-Available properties:
+`--budget` and `--start` exist only under `--profile v1`. Available v1 properties:
 
 - `proper-completion`
 - `dead-nodes`

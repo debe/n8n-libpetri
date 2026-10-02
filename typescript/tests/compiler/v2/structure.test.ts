@@ -204,6 +204,6 @@ describe('what an engineV2 net does not compile', () => {
     expect(() => c.netMap.nodes).toThrow(InternalCompilerError);
     expect(() => c.netMap.shared).toThrow(InternalCompilerError);
     expect(() => c.netMap.settlement('nope')).toThrow(CompileError);
-    expect(() => compile(ALL.diamond!).netMap.settlements).toThrow(InternalCompilerError);
+    expect(() => compile(ALL.diamond!, { profile: 'v1' }).netMap.settlements).toThrow(InternalCompilerError);
   });
 });

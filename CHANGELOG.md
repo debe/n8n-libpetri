@@ -5,7 +5,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Breaking
+- **`engineV2` is the default compile profile (ADR 0013 decision 2).** `analyse()`, `compile()`,
+  `verify()`, `describeWorkflowJson()` / `parseWorkflowJson()` and the verify CLI compile for
+  n8n's engine v2 unless `profile: 'v1'` (CLI `--profile v1`) is named.
+  - A v1 caller that names no profile now gets an engineV2 net, or a refusal where engine v2
+    refuses. `compile(wf, { budget: 2 })` without a profile is now `CompileError`
+    `invalid-options`: engine v2 has no concurrency budget.
+  - `verify()` with no profile runs the `settlement` family. A v1 family asked without
+    `profile: 'v1'` is recorded as not applicable (an `unknown` check), not run.
+  - The verify CLI: `--budget`, `--start`, `--mutex` and `--all-pairs` without `--profile v1`
+    are usage errors (exit 2). `--property` of a v1 family is recorded not applicable.
+  - `PetriScheduler`, the v1 codec, conformance and the testbed are unchanged: they compile v1.
+    The v1 net is byte-identical (`tests/fixtures/v1-fingerprint.json`).
+
 ### Added
+- **Master's `waiting` step status and `cancelPendingSteps` in the v2 planner** (ADR 0013 (a)).
+  `decodeStepRows` reads a `waiting` row as a run in flight, and a row cancelled after a failure
+  as before. The reference loop can suspend and resume steps (`Behaviour.pWait`, differential
+  and exhaustive spike `--wait`): 0 disagreements. Cancellation on request is not modelled
+  (`docs/divergences.md` row 35): the decoder refuses a row set with a cancelled row and no
+  failed one, but row sets from a cancellation that cancelled no row decode and plan, so a
+  caller has to check liveness, as n8n's `StepSettledHandler` does.
 - `scripts/check-n8n-drift.sh`: a read-only dry-run of the patches in a throwaway index
   against the pin, `stable`, `beta`, the newest release and master. It also lists what touched
   the seam and n8n's engine v2 since the pin.

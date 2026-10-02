@@ -14,7 +14,7 @@ import { inputOf, readyOf } from '../compiler/support.js';
 
 describe('a foreign token on a join input', () => {
   it('is a diagnostic naming node and place and is skipped, not written back as an arrived empty', () => {
-    const c = compile(diamond);
+    const c = compile(diamond, { profile: 'v1' });
     const wf = fakeWorkflow(diamond);
     const merge = gadget(c, 'Merge');
     const m = c.sharedMarking();

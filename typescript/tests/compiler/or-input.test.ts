@@ -12,7 +12,7 @@ import { failed, gadget, inhibitorNames, orInputOf, inputNames, outputNames, rea
 const ITEMS = { items: [{ json: { n: 1 } }] };
 
 describe('OR form structure (multiProducer: A and B both feed C.0)', () => {
-  const c = compile(multiProducer);
+  const c = compile(multiProducer, { profile: 'v1' });
 
   it('arms: data → and(ready_i, hasdata_i), empty → ready_i, no free slot, halt-inhibited', () => {
     const data = c.netMap.transitionObject('id:C/arm_e0_data');
@@ -73,7 +73,7 @@ describe('OR form structure (multiProducer: A and B both feed C.0)', () => {
       ],
       startNode: 'T',
     };
-    const cl = compile(wf);
+    const cl = compile(wf, { profile: 'v1' });
     const l = gadget(cl, 'L');
     expect(l.form).toBe('or');
     expect(orInputOf(l).round).toBe(2);
@@ -97,7 +97,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('OR input end to end on %s (I
   const count = (c: ReturnType<typeof compile>, m: Awaited<ReturnType<typeof runCompiled>>['marking'], name: string) => m.tokenCount(c.netMap.place(name)!.place);
 
   it('IF routes data to one output: C runs once, Merge fires once with data, nothing stranded', async () => {
-    const c = compile(ifBothOutputs).withActions(routingActions(ifPolicy('true-only')));
+    const c = compile(ifBothOutputs, { profile: 'v1' }).withActions(routingActions(ifPolicy('true-only')));
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), executor);
     expect(failed(store)).toEqual([]);
     expect(count(c, marking, 'id:C/done')).toBe(1);
@@ -119,7 +119,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('OR input end to end on %s (I
   });
 
   it('IF routes empty on both outputs: one skip, Merge still fires (Trigger data on input 1)', async () => {
-    const c = compile(ifBothOutputs).withActions(routingActions(ifPolicy('none')));
+    const c = compile(ifBothOutputs, { profile: 'v1' }).withActions(routingActions(ifPolicy('none')));
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), executor);
     expect(failed(store)).toEqual([]);
     expect(count(c, marking, 'id:C/done')).toBe(0);
@@ -134,7 +134,7 @@ describe.each<Executor>(['precompiled', 'bitmap'])('OR input end to end on %s (I
   });
 
   it('IF routes data on both outputs: two runs of C, one round cleared, Merge fires once and the second slot strands (divergence 2)', async () => {
-    const c = compile(ifBothOutputs).withActions(routingActions(ifPolicy('both')));
+    const c = compile(ifBothOutputs, { profile: 'v1' }).withActions(routingActions(ifPolicy('both')));
     const { marking, store } = await runCompiled(c, c.initialMarking(ITEMS), executor);
     expect(failed(store)).toEqual([]);
     expect(count(c, marking, 'id:C/done')).toBe(2);

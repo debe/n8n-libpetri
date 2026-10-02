@@ -87,11 +87,11 @@ describe('the v1 phases, not run under engineV2', () => {
   it('restrict no budget: a batch loop is a cycle, but engine v2 has no budget to force to 1', () => {
     const { description } = graphToDescription(loop);
     expect(kSafety(analyse(description, { profile: 'engineV2' }))).toBeNull();
-    expect(kSafety(analyse(description))).toMatchObject({ reason: 'cyclic' });
+    expect(kSafety(analyse(description, { profile: 'v1' }))).toMatchObject({ reason: 'cyclic' });
   });
 
   it('leave a v1 analysis without engine v2 facts', () => {
-    expect(analyse(diamond).engineV2).toBeNull();
+    expect(analyse(diamond, { profile: 'v1' }).engineV2).toBeNull();
     expect(analyse(diamond, { profile: 'engineV2' }).engineV2!.trigger).toBe('Trigger');
   });
 });
