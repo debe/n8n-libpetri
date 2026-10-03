@@ -4,6 +4,13 @@ Status: **accepted** (2026-10-04). Supersedes ADR 0013 decisions 2 (engineV2 as 
 and 3 (v1 frozen). It keeps ADR 0013 decision 1 (the pin is n8n master) and everything ADR 0014
 built.
 
+**Scope amendment (2026-10-04, owner):** engine v2 is left out of the product work for now. The
+install step, the Docker image and the docs cover the v1 path only (patches 0001/0002). The v2 seam
+(patches 0003/0004, `src/settlement/`, the engineV2 profile) stays in the repository, maintained
+and tested, and is not shipped. Engine v2 itself is too limited today (no Code node with task
+runners, no agents, no sub-workflows, no retries) to offer it to users. The compile default is
+`v1`.
+
 ## Context
 
 The project owner's goal is to offer n8n-libpetri as an **optional, more capable scheduler for
