@@ -1091,3 +1091,24 @@ Model first, seam second, upstream alongside both.
 - [ ] **Upstream, in this order**: read the contribution terms (CLA, Sustainable Use License);
       offer the property test for `settlement.ts`; then the seam RFC; restate the §4b asks for
       v2 (`onFailure` as v2's missing retry model)
+
+### 10. The installer and the image (ADR 0015, v1 path)
+
+`n8n-libpetri install` and the image are built and measured (`tasks/inject-plan.md`, step
+records; `docs/install.md`). Nothing is published. Open:
+
+- [ ] **Licensing review (owner).** The patches and seams derive from n8n-core under the
+      Sustainable Use License; `NOTICE` files in `patches/n8n/` and `typescript/seams/` say so
+      and carry its text, and `package.json` now declares
+      `Apache-2.0 AND LicenseRef-n8n-sustainable-use`. Whether that expression, the NOTICE
+      wording and redistributing the image are right is the owner's call with a legal review,
+      before `"private": true` is lifted
+- [ ] **Upstream: hook files before the `WaitTracker`.** Divergence row 40: in regular mode n8n
+      starts its `WaitTracker` before it loads `EXTERNAL_HOOK_FILES`, so an execution that became
+      overdue while n8n was down may resume on n8n's own loop. Smoke leg 5 measured the safe order
+      in every run; nothing guarantees it. The fix is an ordering change in n8n's `start.ts`
+- [ ] **n8n 2.40.3.** Same `before` hashes as 2.41.x per the plan; supporting it costs one
+      `scripts/release/neutrality.sh n8n@2.40.3` run and a seam build
+- [ ] **Whole-package check (optional).** The installer hashes only the files it replaces and
+      the names it creates (`docs/install.md`, pinned by an installer test). Refusing a modified
+      n8n-core anywhere would need the release tarball's full file list in the manifest

@@ -25,6 +25,11 @@ Every scheduler milestone is complete:
 - The live testbed boots the real editor with the scheduler installed, in `regular` mode and in
   queue mode, where a separate worker process executes and the marking round-trips through the
   database between jobs.
+- `n8n-libpetri install` adds the v1 seam (patches 0001/0002, rebuilt per release) to a released
+  n8n's `n8n-core`, from npm or in an image on top of `n8nio/n8n`, and `uninstall` restores the
+  touched files byte for byte (ADR 0015, [`install.md`](install.md)). Supported: n8n 2.41.5/2.41.6
+  and 2.42.2. Engine v2 is not part of the install path (ADR 0015 scope amendment). Nothing is
+  published.
 
 The implementation requires libpetri 7.0.0 or later (`^7.0.0`, and the lock pins 7.0.0). Its
 verifier surface dates from 6.0.0. 7.0.0 is the floor for the [VER-020] soundness fix in the
@@ -45,6 +50,7 @@ longer exist.
 | n8n integration | `patches/n8n/` | Adds a scheduler seam and registry to the pinned n8n commit. |
 | Node-type catalogue | `scripts/node-types/` | Reads port counts and `canWait` from n8n's own generated types, so the verify CLI does not guess them. |
 | Live testbed | `scripts/testbed/` | Boots the real n8n server with the scheduler installed, seeds demo workflows, and compares both engines on data and order. |
+| Installer | `typescript/src/install/`, `typescript/seams/`, `typescript/hook/`, `docker/` | Adds the v1 seam to a released n8n's `n8n-core` and removes it again; the hook registers `PetriScheduler` when `N8N_EXECUTION_ENGINE=libpetri`. |
 
 ## Evidence
 
@@ -62,7 +68,10 @@ npm run build
 ### Pinned n8n
 
 n8n master `944afe5` (2026-10-02), commit `944afe5c889f130ac07c1831dd88fa7c7103a5c1`
-(`scripts/n8n-pin.sh`). Engine v2 is the primary target and v1 is frozen (ADR 0013). Earlier
+(`scripts/n8n-pin.sh`). ADR 0015 (2026-10-03) superseded ADR 0013's "engine v2 primary, v1
+frozen": the engine picks the path, the compile default is `v1`, and both seams are maintained.
+Its scope amendment leaves engine v2 out of the product work for now, so the installer ships the
+v1 path only; the v2 seam below stays built and tested. Earlier
 pins were the release `n8n@2.41.3` ([`conformance-2.41.3.md`](conformance-2.41.3.md)) and
 master `441970b`. The resync is measured in [`conformance-master.md`](conformance-master.md).
 
@@ -79,7 +88,7 @@ n8n's. Kinds of result, kept apart:
   Every execution equals n8n's own planner and shadow agrees on 6,066 of 6,066 settlements.
   Webhook `runEnd`, concurrent executions and a live cancel race were not exercised.
 
-The frozen v1 path, as a regression check:
+The v1 path, the one the installer ships, as a regression check at the pin:
 
 | Surface | Legacy | Petri | Interpretation |
 |---|---:|---:|---|

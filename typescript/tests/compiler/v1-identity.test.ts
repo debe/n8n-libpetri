@@ -38,8 +38,9 @@ describe('v1 net fingerprint', () => {
   });
 });
 
-// ADR 0013 decision 2: engineV2 is the default profile, so the subjects must name v1. This pins
-// that they do: the recorded v1 lines are not what a compile with no profile produces.
+// The subjects name v1 explicitly, so the fingerprint does not depend on the library default.
+// ADR 0015 made that default v1 again: a compile with no profile is the recorded v1 net, and an
+// engineV2 compile is not.
 describe('the fingerprint compiles v1 by name', () => {
   it('every subject compiles to a v1 net', () => {
     for (const subject of current) {
@@ -49,12 +50,13 @@ describe('the fingerprint compiles v1 by name', () => {
     }
   });
 
-  it('the default compile is not the recorded v1 net', () => {
+  it('the default compile is the recorded v1 net, and an engineV2 compile is not', () => {
     const want = recorded.subjects['fixture:diamond'];
     if (want === undefined || 'error' in want) throw new Error('fixture:diamond has no recorded lines');
-    expect(compile(diamond).netMap.profile).toBe('engineV2');
-    expect(diffLines(want.lines, fingerprint(compile(diamond)))).not.toEqual([]);
+    expect(compile(diamond).netMap.profile).toBe('v1');
+    expect(diffLines(want.lines, fingerprint(compile(diamond)))).toEqual([]);
     expect(diffLines(want.lines, fingerprint(compile(diamond, { profile: 'v1' })))).toEqual([]);
+    expect(diffLines(want.lines, fingerprint(compile(diamond, { profile: 'engineV2' })))).not.toEqual([]);
   });
 });
 

@@ -13,23 +13,28 @@ the verifier can send undecided queries to libpetri's `SmtVerifier`, which uses 
 ```bash
 cd typescript
 npm run build
-npx n8n-libpetri verify ../workflow.json               # profile engineV2, the default
-npx n8n-libpetri verify ../workflow.json --profile v1  # the v1 net PetriScheduler runs
+npx n8n-libpetri verify ../workflow.json                     # --profile auto, the default
+npx n8n-libpetri verify ../workflow.json --profile engineV2  # the engine v2 net, whatever the workflow says
 ```
 
-The default profile is `engineV2` ([ADR 0013](adr/0013-engine-v2-primary.md), decision 2), as
-it is for `compile()` and `verify()`. The six v1 families, `--budget`, `--start`, `--mutex` and
-`--all-pairs` need `--profile v1`: without it `--budget`, `--start`, `--mutex` and `--all-pairs`
-are usage errors (exit 2), and a v1 family named with `--property` is reported not applicable
-under `engineV2` (an `unknown` check, which `--strict` fails; if nothing else was decided the run
-exits 3). The v1 forms below
-therefore name the profile.
+The default profile is `auto` ([ADR 0015](adr/0015-both-engines-injectable.md), decision 1).
+It follows the engine, as n8n decides it: a workflow whose `settings.engineType` is `'v2'` is
+compiled for `engineV2`, and any other workflow for `v1`, the net `PetriScheduler` runs.
+`compile()` and `verify()` never read the workflow's engine; with no profile they compile for
+`v1`. The report header and `--json` state the profile that was used.
+
+The six v1 families, `--budget`, `--start`, `--mutex` and `--all-pairs` exist only under `v1`,
+and `--trigger` only under `engineV2`. Each of these flags is a usage error (exit 2) under the
+other profile. Under `auto` the message also says what the workflow set, since the fix may be
+the flag or the workflow. A v1 family named with `--property` is reported not applicable under
+`engineV2` (an `unknown` check, which `--strict` fails; if nothing else was decided, the run
+exits 3).
 
 Useful forms:
 
 ```bash
 # One v1 property and a concurrency budget
-npx n8n-libpetri verify ../workflow.json --profile v1 \
+npx n8n-libpetri verify ../workflow.json \
   --budget 2 \
   --property proper-completion
 
@@ -37,10 +42,10 @@ npx n8n-libpetri verify ../workflow.json --profile v1 \
 npx n8n-libpetri verify ../workflow.json --strict --json --out verification.json
 
 # Check one exclusion pair (v1)
-npx n8n-libpetri verify ../workflow.json --profile v1 --mutex FetchA,FetchB
+npx n8n-libpetri verify ../workflow.json --mutex FetchA,FetchB
 
 # Bound or disable the state graph and control the SMT fallback (v1)
-npx n8n-libpetri verify ../workflow.json --profile v1 \
+npx n8n-libpetri verify ../workflow.json \
   --max-classes 50000 \
   --smt-fallback auto \
   --timeout 30000
@@ -50,7 +55,7 @@ Options:
 
 | Option | Meaning |
 |---|---|
-| `--profile engineV2\|v1` | Compile target. Default `engineV2` (ADR 0013), which runs the `settlement` family (below). `v1` runs the six v1 families. |
+| `--profile auto\|v1\|engineV2` | Compile target. Default `auto` (ADR 0015): `engineV2` when the workflow's `settings.engineType` is `'v2'`, otherwise `v1`. `v1` runs the six v1 families; `engineV2` runs the `settlement` family (below). |
 | `--trigger NODE` | `engineV2` only: the trigger that fired. Default: the workflow's only trigger; required when it has several, as n8n's converter requires the name. |
 | `--budget k` | `v1` only: requested concurrency budget. The compiler may lower it for unsafe shapes. A usage error under `engineV2`. |
 | `--property NAME` | Select a property family. Repeatable. |

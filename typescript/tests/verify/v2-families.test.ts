@@ -296,19 +296,19 @@ describe('profile routing', () => {
     expect(withPairs.checks.filter((k) => k.property === 'mutual-exclusion').map((k) => k.verdict)).toEqual(['unknown']);
   });
 
-  // ADR 0013 decision 2: verify() compiles as compile() does, so its default is engineV2 too.
-  it('compiles for engineV2 when no profile is named, and for v1 when v1 is named', async () => {
-    const byDefault = await verify(linear);
-    expect(byDefault.profile).toBe('engineV2');
-    expect(byDefault.properties).toEqual(['settlement']);
-    expect(byDefault.structuralHash).toBe(compile(linear, { profile: 'engineV2' }).structuralHash);
-    const v1 = await verify(linear, { profile: 'v1', properties: ['no-double-activation'], smtFallback: 'off' });
-    expect(v1.profile).toBe('v1');
-    expect(v1.structuralHash).toBe(compile(linear, { profile: 'v1' }).structuralHash);
+  // ADR 0015 decision 1: verify() compiles as compile() does, so its default is v1 too.
+  it('compiles for v1 when no profile is named, and for engineV2 when engineV2 is named', async () => {
+    const byDefault = await verify(linear, { properties: ['no-double-activation'], smtFallback: 'off' });
+    expect(byDefault.profile).toBe('v1');
+    expect(byDefault.structuralHash).toBe(compile(linear, { profile: 'v1' }).structuralHash);
+    const v2 = await verify(linear, { profile: 'engineV2' });
+    expect(v2.profile).toBe('engineV2');
+    expect(v2.properties).toEqual(['settlement']);
+    expect(v2.structuralHash).toBe(compile(linear, { profile: 'engineV2' }).structuralHash);
   });
 
-  it('a v1 family asked without a profile is not applicable, and says to name v1', async () => {
-    const report = await verify(linear, { properties: ['budget'] });
+  it('a v1 family asked of an engineV2 net is not applicable, and says to name v1', async () => {
+    const report = await verify(linear, { profile: 'engineV2', properties: ['budget'] });
     expect(report.profile).toBe('engineV2');
     expect(report.checks[0]!.reason).toMatch(/compile with profile v1 \(CLI --profile v1\) to ask the v1 family$/);
   });
@@ -341,6 +341,9 @@ const CHAIN_JSON = JSON.stringify({
     Set: { main: [[{ node: 'End', type: 'main', index: 0 }]] },
   },
 });
+
+/** The same chain exported from a workflow that runs on engine v2, which `--profile auto` reads. */
+const CHAIN_V2_JSON = JSON.stringify({ ...(JSON.parse(CHAIN_JSON) as object), settings: { engineType: 'v2' } });
 
 /**
  * Two triggers into one node's one slot. n8n's converter needs the fired one named
@@ -377,13 +380,32 @@ function io(files: Readonly<Record<string, string>>): CliIo & { out: string; err
 }
 
 describe('verify CLI --profile engineV2', () => {
-  // ADR 0013 decision 2: engineV2 is the CLI's default; v1 is still there, named.
-  it('compiles for engineV2 when no --profile is given, and for v1 under --profile v1', async () => {
-    const byDefault = io({ 'wf.json': CHAIN_JSON });
+  // ADR 0015 decision 1: the CLI's default is --profile auto, which follows the workflow's engine;
+  // a named profile beats it.
+  it('compiles a v2 export for engineV2 and a v1 export for v1 under the default auto, and states which', async () => {
+    const byDefault = io({ 'wf.json': CHAIN_V2_JSON });
     expect(await runCli(['verify', 'wf.json', '--json', '--quiet'], byDefault)).toBe(0);
     const v2 = JSON.parse(byDefault.out) as VerificationReport;
     expect(v2.profile).toBe('engineV2');
     expect(v2.properties).toEqual(['settlement']);
+    const auto = io({ 'wf.json': CHAIN_V2_JSON });
+    expect(await runCli(['verify', 'wf.json', '--profile', 'auto', '--json', '--quiet'], auto)).toBe(0);
+    expect((JSON.parse(auto.out) as VerificationReport).structuralHash).toBe(v2.structuralHash);
+    const v1Default = io({ 'wf.json': CHAIN_JSON });
+    expect(await runCli(['verify', 'wf.json', '--property', 'budget', '--json', '--quiet'], v1Default)).not.toBe(2);
+    const v1Auto = JSON.parse(v1Default.out) as VerificationReport;
+    expect(v1Auto.profile).toBe('v1');
+    // The text header states the resolved profile, v1's as well as engineV2's.
+    const v1Text = io({ 'wf.json': CHAIN_JSON });
+    await runCli(['verify', 'wf.json', '--property', 'budget', '--quiet'], v1Text);
+    expect(v1Text.out).toContain('n8n-libpetri verify — cli-v2-chain (profile v1)');
+    const v2Text = io({ 'wf.json': CHAIN_V2_JSON });
+    expect(await runCli(['verify', 'wf.json', '--quiet'], v2Text)).toBe(0);
+    expect(v2Text.out).toContain('n8n-libpetri verify — cli-v2-chain (profile engineV2)');
+    // Explicit beats auto, in both directions.
+    const forcedV1 = io({ 'wf.json': CHAIN_V2_JSON });
+    expect(await runCli(['verify', 'wf.json', '--profile', 'v1', '--property', 'budget', '--json', '--quiet'], forcedV1)).not.toBe(2);
+    expect((JSON.parse(forcedV1.out) as VerificationReport).structuralHash).toBe(v1Auto.structuralHash);
     const named = io({ 'wf.json': CHAIN_JSON });
     expect(await runCli(['verify', 'wf.json', '--profile', 'engineV2', '--json', '--quiet'], named)).toBe(0);
     expect((JSON.parse(named.out) as VerificationReport).structuralHash).toBe(v2.structuralHash);
@@ -419,18 +441,29 @@ describe('verify CLI --profile engineV2', () => {
     expect(await runCli(['wf.json', '--profile', 'engineV2', '--property', 'settlement', '--property', 'budget', '--strict', '--quiet'], cli)).toBe(1);
   });
 
-  it('refuses --budget under engineV2, named or by default, as a usage error that names --profile v1 (exit 2)', async () => {
-    for (const argv of [['wf.json', '--profile', 'engineV2', '--budget', '2', '--quiet'], ['wf.json', '--budget', '2', '--quiet']]) {
-      const cli = io({ 'wf.json': CHAIN_JSON });
+  it('refuses --budget under engineV2, named or resolved by auto, as a usage error that names --profile v1 (exit 2)', async () => {
+    for (const [file, argv] of [[CHAIN_JSON, ['wf.json', '--profile', 'engineV2', '--budget', '2', '--quiet']],
+      [CHAIN_V2_JSON, ['wf.json', '--budget', '2', '--quiet']]] as const) {
+      const cli = io({ 'wf.json': file });
       expect(await runCli(argv, cli), argv.join(' ')).toBe(2);
       expect(cli.err).toMatch(/--budget is the v1 concurrency budget and engine v2 has none; pass --profile v1/);
+      expect(cli.err).toContain('usage: n8n-libpetri verify');
+      expect(cli.out).toBe('');
     }
+    // Under auto the message says what the workflow set, since the fix may be the workflow.
+    const auto = io({ 'wf.json': CHAIN_V2_JSON });
+    await runCli(['wf.json', '--budget', '2', '--quiet'], auto);
+    expect(auto.err).toContain("(--profile auto: the workflow sets settings.engineType 'v2')");
+    // A v1 export takes --budget under auto.
+    const v1 = io({ 'wf.json': CHAIN_JSON });
+    expect(await runCli(['wf.json', '--budget', '2', '--property', 'budget', '--json', '--quiet'], v1)).not.toBe(2);
+    expect((JSON.parse(v1.out) as VerificationReport).requestedBudget).toBe(2);
   });
 
   it('refuses --mutex and --all-pairs under engineV2 as a usage error (exit 2), not a run that checked nothing', async () => {
     for (const argv of [['wf.json', '--mutex', 'Set,End', '--quiet'], ['wf.json', '--all-pairs', '--quiet'],
       ['wf.json', '--profile', 'engineV2', '--mutex', 'Set,End', '--quiet']]) {
-      const cli = io({ 'wf.json': CHAIN_JSON });
+      const cli = io({ 'wf.json': CHAIN_V2_JSON });
       expect(await runCli(argv, cli), argv.join(' ')).toBe(2);
       expect(cli.err).toMatch(/asks the v1 mutual-exclusion family, which is not ported to engine v2; pass --profile v1/);
       expect(cli.out).toBe('');
@@ -469,16 +502,21 @@ describe('verify CLI --profile engineV2', () => {
     expect(v1.err).toContain('--trigger names the fired trigger of --profile engineV2');
     const v2 = io({ 'wf.json': CHAIN_JSON });
     expect(await runCli(['wf.json', '--profile', 'engineV2', '--start', 'Trigger', '--quiet'], v2)).toBe(2);
-    expect(v2.err).toContain('under --profile engineV2 (the default) name the fired trigger with --trigger');
-    // engineV2 is the default (ADR 0013), so --start without a profile is the same usage error.
-    const byDefault = io({ 'wf.json': CHAIN_JSON });
+    expect(v2.err).toContain('under --profile engineV2 name the fired trigger with --trigger');
+    // Under auto a v2 export resolves to engineV2, so --start is the same usage error; a v1 export
+    // resolves to v1, where --trigger is.
+    const byDefault = io({ 'wf.json': CHAIN_V2_JSON });
     expect(await runCli(['wf.json', '--start', 'Trigger', '--quiet'], byDefault)).toBe(2);
     expect(byDefault.err).toContain('or pass --profile v1');
+    const v1Auto = io({ 'wf.json': CHAIN_JSON });
+    expect(await runCli(['wf.json', '--trigger', 'Trigger', '--quiet'], v1Auto)).toBe(2);
+    expect(v1Auto.err).toContain("--trigger names the fired trigger of --profile engineV2; a v1 run starts from --start " +
+      "(--profile auto: the workflow does not set settings.engineType 'v2')");
   });
 
-  it('takes only the two profile names', async () => {
+  it('takes only auto and the two profile names', async () => {
     const cli = io({ 'wf.json': CHAIN_JSON });
     expect(await runCli(['wf.json', '--profile', 'v3'], cli)).toBe(2);
-    expect(cli.err).toContain('--profile must be one of v1, engineV2');
+    expect(cli.err).toContain('--profile must be one of auto, v1, engineV2');
   });
 });

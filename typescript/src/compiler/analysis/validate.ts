@@ -44,12 +44,15 @@ export const requireNonNegativeInt = raising(nonNegativeInt, 'non-negative');
 export const requirePositiveInt = raising(positiveInt, 'positive');
 
 /**
- * The profile a caller that names none compiles for: `engineV2` since ADR 0013 (decision 2).
- * v1 stays available, frozen, as `profile: 'v1'`, and every v1 consumer in this repository
- * names it — the scheduler, the codec, the conformance harness and the testbed — so this
- * default only decides what a caller gets that did not say.
+ * The profile a caller that names none compiles for: `v1`, as n8n runs engine v1 unless a
+ * workflow sets `settings.engineType: 'v2'` (ADR 0015 decision 1, which reverses ADR 0013's
+ * engineV2 default). `engineV2` stays available as `profile: 'engineV2'`. The compiler never
+ * guesses the engine; `profileForWorkflow` in `verify/workflow-json.ts` reads it off an export
+ * for the callers that ask (`--profile auto`). The scheduler, the codec, the conformance harness
+ * and the testbed name their profile, so this default only decides what a caller gets that did
+ * not say.
  */
-export const DEFAULT_COMPILE_PROFILE: CompileProfile = 'engineV2';
+export const DEFAULT_COMPILE_PROFILE: CompileProfile = 'v1';
 
 /**
  * The profile an option names, default {@link DEFAULT_COMPILE_PROFILE}. Checked at run time

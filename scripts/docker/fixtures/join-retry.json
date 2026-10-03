@@ -1,0 +1,27 @@
+{
+  "id": "LpSmokeJoinRtry1",
+  "name": "n8n-libpetri smoke: join and retry",
+  "active": false,
+  "nodes": [
+    { "id": "6f0c1a10-0000-4000-8000-000000000001", "name": "Start", "type": "n8n-nodes-base.manualTrigger", "typeVersion": 1, "position": [0, 0], "parameters": {} },
+    { "id": "6f0c1a10-0000-4000-8000-000000000002", "name": "Branch A", "type": "n8n-nodes-base.set", "typeVersion": 3.4, "position": [240, -120],
+      "parameters": { "assignments": { "assignments": [{ "id": "a1", "name": "branch", "value": "a", "type": "string" }] }, "options": {} } },
+    { "id": "6f0c1a10-0000-4000-8000-000000000003", "name": "Unreachable Service", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [240, 120],
+      "retryOnFail": true, "maxTries": 2, "waitBetweenTries": 1000, "onError": "continueErrorOutput",
+      "parameters": { "url": "http://127.0.0.1:1/", "options": { "timeout": 2000 } } },
+    { "id": "6f0c1a10-0000-4000-8000-000000000004", "name": "Fallback", "type": "n8n-nodes-base.set", "typeVersion": 3.4, "position": [480, 200],
+      "parameters": { "assignments": { "assignments": [{ "id": "f1", "name": "branch", "value": "fallback after two tries", "type": "string" }] }, "options": {} } },
+    { "id": "6f0c1a10-0000-4000-8000-000000000005", "name": "Join", "type": "n8n-nodes-base.merge", "typeVersion": 3, "position": [720, 0], "parameters": {} },
+    { "id": "6f0c1a10-0000-4000-8000-000000000006", "name": "Done", "type": "n8n-nodes-base.set", "typeVersion": 3.4, "position": [960, 0],
+      "parameters": { "assignments": { "assignments": [{ "id": "d1", "name": "outcome", "value": "joined", "type": "string" }] }, "includeOtherFields": true, "options": {} } }
+  ],
+  "connections": {
+    "Start": { "main": [[{ "node": "Branch A", "type": "main", "index": 0 }, { "node": "Unreachable Service", "type": "main", "index": 0 }]] },
+    "Branch A": { "main": [[{ "node": "Join", "type": "main", "index": 0 }]] },
+    "Unreachable Service": { "main": [[], [{ "node": "Fallback", "type": "main", "index": 0 }]] },
+    "Fallback": { "main": [[{ "node": "Join", "type": "main", "index": 1 }]] },
+    "Join": { "main": [[{ "node": "Done", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

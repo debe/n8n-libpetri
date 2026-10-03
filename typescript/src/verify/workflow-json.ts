@@ -39,6 +39,10 @@
  *   and an all-required node with an unwired lower input is exactly the workflow the dead
  *   join diagnostic is for. Supply `--node-types` for such a workflow.
  *
+ * The profile is `v1` unless one is named, as it is for `compile()`. `'auto'` reads it off the
+ * export as n8n does ({@link profileForWorkflow}); it exists only here and in the CLI, which
+ * defaults to it, and `compile()` never guesses. The result states the profile it resolved.
+ *
  * The start node is the first node with no incoming main connection, preferring one whose
  * type looks like a trigger, in canvas order; `--start` overrides it. Under the `engineV2`
  * profile none is picked: the compiler resolves the trigger that fired as n8n's converter does
@@ -73,6 +77,8 @@ export { looksLikeTrigger, pickStartNode } from './workflow-json/start-node.js';
 
 export interface WorkflowJsonResult {
   readonly description: WorkflowDescription;
+  /** The profile the description is for: the one named, or what `'auto'` read off the export. */
+  readonly profile: CompileProfile;
   /**
    * Every node whose shape was guessed, and how. Printed by the CLI, never swallowed, and
    * carried into the report as its `shapeWarnings` — so *only* shape guesses belong here.
@@ -87,13 +93,34 @@ export interface WorkflowJsonOptions {
   /** Overrides the start-node choice. */
   readonly startNode?: string;
   /**
-   * The target the description is for; default `engineV2`, the compiler's default (ADR 0013
-   * decision 2). A description for a v1 compile names `'v1'`. Under `engineV2` no start node is picked:
+   * The target the description is for; default `v1`, the compiler's default (ADR 0015
+   * decision 1). `'auto'` takes the export's own engine ({@link profileForWorkflow}), and
+   * {@link WorkflowJsonResult.profile} says which it was. Under `engineV2` no start node is picked:
    * n8n's converter resolves the trigger that fired itself — the one named, or the workflow's only
    * trigger — and so does the compiler (`CompileOptions.trigger`). A {@link startNode} given
    * under `engineV2` is refused: name the fired trigger with the compile option instead.
    */
-  readonly profile?: CompileProfile;
+  readonly profile?: ProfileChoice;
+}
+
+/** A named profile, or `'auto'`: the export's own engine, read by {@link profileForWorkflow}. */
+export type ProfileChoice = CompileProfile | 'auto';
+
+/**
+ * The profile an export runs under, decided as n8n decides it: `engineV2` when its
+ * `settings.engineType` is `'v2'`, and `v1` for anything else, a missing or malformed
+ * `settings` included (`EngineV2DispatcherService` routes on `settings?.engineType === 'v2'`).
+ * ADR 0015 decision 1: the compile profile follows the engine.
+ */
+export function profileForWorkflow(raw: unknown): CompileProfile {
+  const settings = recordOf(recordOf(raw)?.['settings']);
+  return settings?.['engineType'] === 'v2' ? 'engineV2' : 'v1';
+}
+
+/** The profile {@link describeWorkflowJson} compiles `raw` for, `'auto'` resolved. */
+export function resolveProfile(choice: ProfileChoice | undefined, raw: unknown): CompileProfile {
+  if (choice === 'auto') return profileForWorkflow(raw);
+  return choice ?? DEFAULT_COMPILE_PROFILE;
 }
 
 /**
@@ -118,7 +145,8 @@ function policiesOf(settings: unknown, { nodes, records }: JsonNodes, diagnostic
 /** Parses an n8n workflow JSON export (the object, not the text). */
 export function describeWorkflowJson(raw: unknown, options: WorkflowJsonOptions = {}): WorkflowJsonResult {
   const root = asRecord(raw, 'workflow');
-  const engineV2 = (options.profile ?? DEFAULT_COMPILE_PROFILE) === 'engineV2';
+  const profile = resolveProfile(options.profile, root);
+  const engineV2 = profile === 'engineV2';
   const json = nodesOf(root, engineV2);
   const { names } = json;
   const parsed = connectionsOf(root['connections'], names, engineV2, json.nameless.at(-1));
@@ -184,16 +212,19 @@ export function describeWorkflowJson(raw: unknown, options: WorkflowJsonOptions 
     ...(startNode === undefined ? {} : { startNode }),
     ...recordedLookups(shapes, references),
   };
-  return { description, warnings };
+  return { description, profile, warnings };
+}
+
+/** `JSON.parse(text)`, with a clearer error on bad JSON. */
+export function parseWorkflowText(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`workflow file is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** `describeWorkflowJson(JSON.parse(text))`, with a clearer error on bad JSON. */
 export function parseWorkflowJson(text: string, options: WorkflowJsonOptions = {}): WorkflowJsonResult {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (e) {
-    throw new Error(`workflow file is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  return describeWorkflowJson(raw, options);
+  return describeWorkflowJson(parseWorkflowText(text), options);
 }

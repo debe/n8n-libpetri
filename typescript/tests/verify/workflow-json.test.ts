@@ -7,8 +7,10 @@
  * guess must show up as a warning. That is what this file pins.
  */
 import { analyse, compile } from '../../src/compiler/index.js';
+import type { WorkflowDescription } from '../../src/compiler/index.js';
 import {
   BUILT_IN_SHAPES, connectionsOf, describeWorkflowJson, looksLikeTrigger, parseWorkflowJson, pickStartNode,
+  profileForWorkflow,
 } from '../../src/verify/index.js';
 import type { NodeTypesFile } from '../../src/verify/workflow-json.js';
 import { agentOf } from '../compiler/support.js';
@@ -31,6 +33,9 @@ const EXPORT = {
     Right: { main: [[{ node: 'Merge', type: 'main', index: 1 }]] },
   },
 };
+
+/** A description's data, without the shape and reference lookups (closures compare by identity). */
+const dataOf = (d: WorkflowDescription) => ({ nodes: d.nodes, connections: d.connections, startNode: d.startNode });
 
 describe('workflow JSON adapter', () => {
   it('drops sticky notes, name or no name, and keeps every other node', () => {
@@ -55,17 +60,51 @@ describe('workflow JSON adapter', () => {
     expect(description.nodes.map((n) => n.id)).toEqual(plain.nodes.map((n) => n.id));
   });
 
-  // ADR 0013 decision 2: the description is for the compiler's default profile, engineV2, unless
-  // v1 is named — under engineV2 no start node is picked and sticky notes are kept.
-  it('describes for engineV2 when no profile is named', () => {
-    const byDefault = describeWorkflowJson(EXPORT).description;
-    const named = describeWorkflowJson(EXPORT, { profile: 'engineV2' }).description;
-    expect(byDefault.nodes).toEqual(named.nodes);
-    expect(byDefault.connections).toEqual(named.connections);
-    expect(compile(byDefault).structuralHash).toBe(compile(named, { profile: 'engineV2' }).structuralHash);
-    expect(byDefault.startNode).toBeUndefined();
-    expect(describeWorkflowJson(EXPORT, { profile: 'v1' }).description.startNode).toBe('Webhook');
-    expect(() => describeWorkflowJson(EXPORT, { startNode: 'Webhook' })).toThrow(/under engineV2 the start node is the trigger/);
+  // ADR 0015 decision 1: the description is for the compiler's default profile, v1, unless
+  // engineV2 is named — under engineV2 no start node is picked and sticky notes are kept.
+  it('describes for v1 when no profile is named, and says so', () => {
+    const byDefault = describeWorkflowJson(EXPORT);
+    const named = describeWorkflowJson(EXPORT, { profile: 'v1' });
+    expect(byDefault.profile).toBe('v1');
+    expect(dataOf(byDefault.description)).toEqual(dataOf(named.description));
+    expect(compile(byDefault.description).structuralHash).toBe(compile(named.description, { profile: 'v1' }).structuralHash);
+    expect(byDefault.description.startNode).toBe('Webhook');
+    expect(describeWorkflowJson(EXPORT, { profile: 'engineV2' }).description.startNode).toBeUndefined();
+    expect(describeWorkflowJson(EXPORT, { startNode: 'Webhook' }).description.startNode).toBe('Webhook');
+    expect(() => describeWorkflowJson(EXPORT, { profile: 'engineV2', startNode: 'Webhook' }))
+      .toThrow(/under engineV2 the start node is the trigger/);
+  });
+
+  // `auto` follows the engine as n8n decides it: settings.engineType 'v2' and nothing else.
+  it('profileForWorkflow reads settings.engineType as n8n does: v2 is engineV2, anything else v1', () => {
+    expect(profileForWorkflow(EXPORT)).toBe('v1');
+    expect(profileForWorkflow({ ...EXPORT, settings: { engineType: 'v2' } })).toBe('engineV2');
+    expect(profileForWorkflow({ ...EXPORT, settings: { engineType: 'v1' } })).toBe('v1');
+    expect(profileForWorkflow({ ...EXPORT, settings: { engineType: 'V2' } })).toBe('v1');
+    expect(profileForWorkflow({ ...EXPORT, settings: { executionOrder: 'v1' } })).toBe('v1');
+    expect(profileForWorkflow({ ...EXPORT, settings: 'v2' })).toBe('v1');
+    expect(profileForWorkflow({ ...EXPORT, settings: null })).toBe('v1');
+    expect(profileForWorkflow(null)).toBe('v1');
+  });
+
+  it("detects the profile under 'auto' and states it; a named profile beats the export's", () => {
+    const v2Export = { ...EXPORT, settings: { engineType: 'v2' } };
+    const v1Export = { ...EXPORT, settings: { engineType: 'v1' } };
+    const v2 = describeWorkflowJson(v2Export, { profile: 'auto' });
+    expect(v2.profile).toBe('engineV2');
+    expect(dataOf(v2.description)).toEqual(dataOf(describeWorkflowJson(v2Export, { profile: 'engineV2' }).description));
+    expect(compile(v2.description, { profile: 'engineV2' }).structuralHash)
+      .toBe(compile(describeWorkflowJson(v2Export, { profile: 'engineV2' }).description, { profile: 'engineV2' }).structuralHash);
+    const v1 = describeWorkflowJson(v1Export, { profile: 'auto' });
+    expect(v1.profile).toBe('v1');
+    expect(dataOf(v1.description)).toEqual(dataOf(describeWorkflowJson(v1Export, { profile: 'v1' }).description));
+    expect(describeWorkflowJson(EXPORT, { profile: 'auto' }).profile).toBe('v1');
+    // Explicit beats auto: a v2 export described for v1 is a v1 description, and the reverse.
+    expect(describeWorkflowJson(v2Export, { profile: 'v1' }).profile).toBe('v1');
+    expect(describeWorkflowJson(v2Export, { profile: 'v1' }).description.startNode).toBe('Webhook');
+    expect(describeWorkflowJson(v1Export, { profile: 'engineV2' }).profile).toBe('engineV2');
+    // No profile at all is the library default, v1, even for a v2 export: compile() never guesses.
+    expect(describeWorkflowJson(v2Export).profile).toBe('v1');
   });
 
   it('still rejects a nameless node that is not an annotation', () => {

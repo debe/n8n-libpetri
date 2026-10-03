@@ -2,7 +2,7 @@
  * The scheduler: `PetriScheduler` (one per execution), its action binder, the compiled
  * workflow cache and the registry hook. Milestone M2, track D.
  */
-export { PetriScheduler, type PetriSchedulerOptions, type SchedulerOutcome } from './petri-scheduler.js';
+export { LEGACY_ROUTE_PREFIX, legacyRouteDiagnostic, PetriScheduler, type PetriSchedulerOptions, type SchedulerOutcome } from './petri-scheduler.js';
 export { ENGINE_ENTERED_DIAGNOSTIC, registerPetriScheduler, type RegisterPetriSchedulerOptions, type PetriSchedulerRegistration } from './register.js';
 export { CompiledWorkflowCache } from './cache.js';
 export { schedulerActions, UnexpectedTokenError, type ExecutionEnv, type SchedulerState } from './actions.js';

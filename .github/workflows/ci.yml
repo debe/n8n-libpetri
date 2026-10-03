@@ -44,3 +44,8 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
+      # The EXTERNAL_HOOK_FILES shim require()s the built ESM dist from CommonJS; a top-level
+      # await anywhere in its graph breaks that, and only the built dist can show it.
+      - run: npx vitest run tests/install/hook-dist.test.ts
+        env:
+          N8N_LIBPETRI_REQUIRE_DIST: '1'

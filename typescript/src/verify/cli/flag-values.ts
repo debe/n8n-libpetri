@@ -4,7 +4,7 @@
  */
 import { UsageError } from '../../cli/flags.js';
 import { PROPERTY_NAMES } from '../types.js';
-import type { CompileProfile } from '../../compiler/index.js';
+import type { ProfileChoice } from '../workflow-json.js';
 import type { PropertyName, SmtFallbackMode } from '../types.js';
 
 /** `--budget k`: a positive integer. */
@@ -55,8 +55,13 @@ export function mutexPairOf(v: string): readonly [string, string] {
   return [parts[0]!, parts[1]!] as const;
 }
 
-/** `--profile NAME`: `v1` or `engineV2`, the target the workflow is compiled for. */
-export function profileOf(name: string): CompileProfile {
-  if (name !== 'v1' && name !== 'engineV2') throw new UsageError('--profile must be one of v1, engineV2');
+/**
+ * `--profile NAME`: `auto`, `v1` or `engineV2`, the target the workflow is compiled for. `auto`
+ * is resolved once the workflow is read (`profileForWorkflow`).
+ */
+export function profileOf(name: string): ProfileChoice {
+  if (name !== 'auto' && name !== 'v1' && name !== 'engineV2') {
+    throw new UsageError('--profile must be one of auto, v1, engineV2');
+  }
   return name;
 }

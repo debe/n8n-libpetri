@@ -210,7 +210,7 @@ export interface MultiProducerInput {
 
 export interface WorkflowAnalysis {
   /**
-   * The target this analysis was made for (`AnalysisOptions.profile`, default `engineV2`). It is
+   * The target this analysis was made for (`AnalysisOptions.profile`, default `v1`). It is
    * hashed, and `compile` refuses an analysis whose profile differs from the one it was asked
    * for, so a v1 analysis never builds an engine v2 net or the reverse.
    */

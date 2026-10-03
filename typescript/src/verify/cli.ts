@@ -8,7 +8,7 @@
  * `main.ts` is the process entry point the `bin` maps to.
  *
  * ```
- *   --profile NAME         engineV2 (default) | v1 — the target the workflow is compiled for
+ *   --profile NAME         auto (default) | v1 | engineV2 — the target the workflow is compiled for
  *   --budget k             v1 concurrency budget (default 1; the compiler may lower it; refused under engineV2)
  *   --property NAME        run only this property family; repeatable
  *   --timeout MS           per-query z3 timeout for the SMT fallback (default 60000)
@@ -47,10 +47,14 @@
  * verdict is sound within the graph's closed prefix and is deliberately not a proof, so a
  * gate that demands proofs must not accept it.
  *
- * The default profile is `engineV2` (ADR 0013 decision 2): the CLI compiles for engine v2
- * (`tasks/v2-profile-plan.md`) unless `--profile v1` asks for the frozen v1 target, whose six
- * families, `--budget`, `--start`, `--mutex` and `--all-pairs` exist only there (each of the four
- * flags without `--profile v1` is a usage error, exit 2). Under engineV2 it runs the `settlement` family over
+ * The default profile is `auto` (ADR 0015 decision 1): the profile follows the engine, as n8n
+ * decides it — a workflow whose `settings.engineType` is `'v2'` compiles for engine v2
+ * (`engineV2`, `tasks/v2-profile-plan.md`), and every other workflow for `v1`, the net
+ * `PetriScheduler` runs. `--profile v1` and `--profile engineV2` name one regardless of the
+ * workflow, and the report header and `--json` state the one that was used. The six v1
+ * families, `--budget`, `--start`, `--mutex` and `--all-pairs` exist only under v1, and
+ * `--trigger` only under engineV2: each given under the other profile is a usage error (exit 2),
+ * which under `auto` says what the workflow set. Under engineV2 it runs the `settlement` family over
  * the state-class graph alone (`settlement.ts`); `--property` of a v1 family then records it as
  * not applicable. The workflow goes through the compiler's port of
  * n8n's converter (plan step 13): it is rooted at the trigger that fired — `--trigger`, or the
@@ -71,14 +75,15 @@
  */
 import type { CliIo } from '../cli/io.js';
 import { messageOf } from '../internal/errors.js';
-import { parseArgs, USAGE } from './cli/args.js';
+import { UsageError } from '../cli/flags.js';
+import { parseArgs, USAGE, withProfile } from './cli/args.js';
 import type { ParsedArgs } from './cli/args.js';
 import { exitCodeOf } from './cli/exit-code.js';
 import { renderReport, renderSubject } from './report.js';
 import { rethrowIfBug } from './state-class.js';
 import type { PropertyCheck, VerificationReport, VerifyOptions } from './types.js';
 import { verify } from './verify.js';
-import { parseNodeTypesFile, parseWorkflowJson } from './workflow-json.js';
+import { describeWorkflowJson, parseNodeTypesFile, parseWorkflowText, resolveProfile } from './workflow-json.js';
 import type { NodeTypesFile, WorkflowJsonResult } from './workflow-json.js';
 
 // The command-line kernel every CLI here shares; re-exported so `n8n-libpetri/verify/cli`
@@ -86,7 +91,7 @@ import type { NodeTypesFile, WorkflowJsonResult } from './workflow-json.js';
 export { UsageError } from '../cli/flags.js';
 export { nodeIo } from '../cli/io.js';
 export type { CliIo } from '../cli/io.js';
-export { parseArgs, USAGE } from './cli/args.js';
+export { parseArgs, USAGE, withProfile } from './cli/args.js';
 export type { ParsedArgs } from './cli/args.js';
 
 /** A usage or input error: the run ends here, the reason already on stderr. */
@@ -117,13 +122,40 @@ function readNodeTypes(parsed: ParsedArgs, io: CliIo): NodeTypesFile | undefined
   }
 }
 
-function readWorkflow(parsed: ParsedArgs, nodeTypes: NodeTypesFile, io: CliIo): WorkflowJsonResult | undefined {
+/** The workflow read and described, and the arguments with its profile resolved. */
+interface ReadWorkflow {
+  readonly parsed: ParsedArgs;
+  readonly workflow: WorkflowJsonResult;
+}
+
+/**
+ * Reads the workflow, resolves `--profile auto` from it (`profileForWorkflow`), checks the
+ * profile's flags — a usage error, with the usage text, as when the profile was named — and
+ * describes the workflow for that profile.
+ */
+function readWorkflow(args: ParsedArgs, nodeTypes: NodeTypesFile, io: CliIo): ReadWorkflow | undefined {
+  let raw: unknown;
   try {
-    return parseWorkflowJson(io.readFile(parsed.file), {
+    raw = parseWorkflowText(io.readFile(args.file));
+  } catch (e) {
+    io.stderr(`${args.file}: ${messageOf(e)}\n`);
+    return undefined;
+  }
+  let parsed: ParsedArgs;
+  try {
+    parsed = withProfile(args, resolveProfile(args.profile, raw));
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    io.stderr(`${messageOf(e)}\n${USAGE}\n`);
+    return undefined;
+  }
+  try {
+    const workflow = describeWorkflowJson(raw, {
       nodeTypes,
       ...(parsed.startNode === undefined ? {} : { startNode: parsed.startNode }),
       ...(parsed.options.profile === undefined ? {} : { profile: parsed.options.profile }),
     });
+    return { parsed, workflow };
   } catch (e) {
     io.stderr(`${parsed.file}: ${messageOf(e)}\n`);
     return undefined;
@@ -172,12 +204,13 @@ function writeReport(parsed: ParsedArgs, report: VerificationReport, io: CliIo):
 
 /** Runs the command line against `io`; resolves to the process exit code. */
 export async function runCli(argv: readonly string[], io: CliIo): Promise<number> {
-  const parsed = parsedOrUsage(argv, io);
-  if (parsed === undefined) return INPUT_ERROR;
-  const nodeTypes = readNodeTypes(parsed, io);
+  const args = parsedOrUsage(argv, io);
+  if (args === undefined) return INPUT_ERROR;
+  const nodeTypes = readNodeTypes(args, io);
   if (nodeTypes === undefined) return INPUT_ERROR;
-  const workflow = readWorkflow(parsed, nodeTypes, io);
-  if (workflow === undefined) return INPUT_ERROR;
+  const read = readWorkflow(args, nodeTypes, io);
+  if (read === undefined) return INPUT_ERROR;
+  const { parsed, workflow } = read;
   for (const w of workflow.warnings) io.stderr(`warning: ${w}\n`);
 
   const report = await verified(parsed, workflow, io);

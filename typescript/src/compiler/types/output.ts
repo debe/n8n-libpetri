@@ -579,8 +579,8 @@ export interface CompiledWorkflow {
 
 export interface CompileOptions {
   /**
-   * The engine the net is compiled for (ADR 0012 §1); default `engineV2` (ADR 0013
-   * decision 2, `DEFAULT_COMPILE_PROFILE`). A v1 caller names `'v1'`. Under `engineV2` the net has
+   * The engine the net is compiled for (ADR 0012 §1); default `v1` (ADR 0015 decision 1,
+   * `DEFAULT_COMPILE_PROFILE`). An engine v2 caller names `'engineV2'`. Under `engineV2` the net has
    * no `_budget` and no agent round, so {@link budget}, {@link maxAgentRounds} and
    * {@link maxAgentToolCalls} are refused beside it, and a precomputed {@link analysis} must
    * carry the same profile.

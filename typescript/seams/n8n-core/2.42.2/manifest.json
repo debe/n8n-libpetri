@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "package": "n8n-core",
+  "version": "2.42.2",
+  "n8n": [
+    "2.42.2"
+  ],
+  "tarball": {
+    "name": "n8n-core-2.42.2.tgz",
+    "integrity": "sha512-mUs5pEOuUTCjQkJBg9b8WCCYLmhPZfIefFsqhCPbwyR9TPr2bQoCB0ILNe61+QiEXg/f+3Wo0UJF1yJLC69wUg=="
+  },
+  "sourcePatches": {
+    "0001-extract-scheduler-loop.patch": "ea664636cd440d873e6b74961201833d015c16108eda1daed1ec552b18e7ced4",
+    "0002-scheduler-registry.patch": "66feeb99aae714dcefafb8225dee48594deeb333ef42f8f6f0793a0fa8d630ad"
+  },
+  "toolchain": {
+    "generator": "scripts/release/build-seams.mjs",
+    "typescript": "6.0.2",
+    "method": "transpileModule per file, module CommonJS, compiler options parsed from packages/core/tsconfig.build.json, @/ rewritten relative as tsc-alias does",
+    "gate": "the unpatched transpile of every stock touched file equals the published JS byte for byte"
+  },
+  "files": [
+    {
+      "path": "dist/execution-engine/workflow-execute.js",
+      "before": "3bc32b348c647c2b73408eb6633f9170c8ae69f047ae21e67e14e5c9acddf2ba",
+      "after": "07a648111e348da090b62c2788c2527c8b22fab46563bea96a9bdbe97f0b1f21",
+      "delta": "workflow-execute.js.delta.json",
+      "deltaSha256": "2eb7342d03f6616db7f745c20fde2d9b890cde48e06994b726f7ebdc0bd5f9bc",
+      "deltaSource": "dist/execution-engine/workflow-execute.js",
+      "deltaSourceSha256": "3bc32b348c647c2b73408eb6633f9170c8ae69f047ae21e67e14e5c9acddf2ba"
+    },
+    {
+      "path": "dist/execution-engine/index.js",
+      "before": "d09aa125eadd9131b9cc3f86b9df6f092faf676c3b1a789da915ade00fa20649",
+      "after": "366d1d0d0d4de81675f1c30552c6f99182c00c6112601efa3d0536e5c301711e",
+      "delta": "index.js.delta.json",
+      "deltaSha256": "e9af401e53b4b744ea125091ef219320d3c3c46af831012a55404ae40ab84aba",
+      "deltaSource": "dist/execution-engine/index.js",
+      "deltaSourceSha256": "d09aa125eadd9131b9cc3f86b9df6f092faf676c3b1a789da915ade00fa20649"
+    },
+    {
+      "path": "dist/execution-engine/stack-scheduler.js",
+      "before": null,
+      "after": "8d233b97267cf1f536d167f355b504268c38477ea5574233abcdb3caef963140",
+      "delta": "stack-scheduler.js.delta.json",
+      "deltaSha256": "dd8ffa45ffe67b387a1831e9e88434476e16e383647ff219c54ec99409e8c3ee",
+      "deltaSource": "dist/execution-engine/workflow-execute.js",
+      "deltaSourceSha256": "3bc32b348c647c2b73408eb6633f9170c8ae69f047ae21e67e14e5c9acddf2ba"
+    },
+    {
+      "path": "dist/execution-engine/scheduler-registry.js",
+      "before": null,
+      "after": "ccc5c2ec04d7becd02b5a7da7c247386261ec8c1a1297970f6112c7dda36ab27",
+      "delta": "scheduler-registry.js.delta.json",
+      "deltaSha256": "6df206bb2ef60072b9f55e00a05c580a30053f856f0b5947918a487cf6275f0a",
+      "deltaSource": "dist/execution-engine/workflow-execute.js",
+      "deltaSourceSha256": "3bc32b348c647c2b73408eb6633f9170c8ae69f047ae21e67e14e5c9acddf2ba"
+    },
+    {
+      "path": "dist/execution-engine/workflow-scheduler.js",
+      "before": null,
+      "after": "2d6ea7d97b00c85947c73b412a6861da5fa56eedce453195be9254a57f055bd5",
+      "delta": "workflow-scheduler.js.delta.json",
+      "deltaSha256": "875a9d59dddb6e75f6e64c58606390a5a5d9be3ba630c17b063e7c4963e14b3f",
+      "deltaSource": "dist/execution-engine/workflow-execute.js",
+      "deltaSourceSha256": "3bc32b348c647c2b73408eb6633f9170c8ae69f047ae21e67e14e5c9acddf2ba"
+    }
+  ],
+  "maps": {
+    "ifPresent": "dist/execution-engine/workflow-execute.js.map",
+    "files": [
+      {
+        "path": "dist/execution-engine/workflow-execute.js.map",
+        "before": "a9bf4c2ddf3581a839a9df64605642e3caa2f0c6ffb741e711acbafec551a9e9",
+        "after": "ea7614e2282d1d9da148217040727e9e7c53ea0b60733c21ddb726c7bdd09a69",
+        "file": "workflow-execute.js.map"
+      },
+      {
+        "path": "dist/execution-engine/index.js.map",
+        "before": "b78550f21d7664d55c47a9cf14b6d67ffeed94a339b534fc6519ccbea8613589",
+        "after": "ef4f1e4649ec6aa4e7b9e7f3339cff7d55cbe857895f3c6f108fa610b4323987",
+        "file": "index.js.map"
+      },
+      {
+        "path": "dist/execution-engine/stack-scheduler.js.map",
+        "before": null,
+        "after": "1cc74bdc27a69af8f714a138c8f6469c3eb473a78cd271d75c661e4138ea0667",
+        "file": "stack-scheduler.js.map"
+      },
+      {
+        "path": "dist/execution-engine/scheduler-registry.js.map",
+        "before": null,
+        "after": "79c96fa075d7e8b95017b5a0334c709f922cca5f716a7004a67fb96e7ced71f4",
+        "file": "scheduler-registry.js.map"
+      },
+      {
+        "path": "dist/execution-engine/workflow-scheduler.js.map",
+        "before": null,
+        "after": "52588edae77710b162ae9c1ff41229b22853ca9ff9f723fe038ef02000240ac7",
+        "file": "workflow-scheduler.js.map"
+      }
+    ]
+  },
+  "inserted": {
+    "bytes": 1515,
+    "byFile": {
+      "workflow-execute.js": 189,
+      "index.js": 419,
+      "stack-scheduler.js": 367,
+      "scheduler-registry.js": 524,
+      "workflow-scheduler.js": 16
+    }
+  },
+  "neutrality": {
+    "date": "2026-10-03",
+    "passed": true,
+    "summary": "n8n@2.42.2 (eb8d7c2) with 0001/0002 applied and nothing registered: n8n-core's execution-engine suite identical to the unpatched baseline, 1,746/1,746 (loop-driving 45/45, pure-helper 1,701/1,701); n8n-core typecheck passed. A patch-neutrality leg of the patched source; the shipped seams are the per-file transpile of that source, whose unpatched transpile reproduces the published JS byte for byte (build-seams gate).",
+    "tag": "n8n@2.42.2",
+    "commit": "eb8d7c295a984bac558d3e38bb3e383485940fad",
+    "suite": "packages/core src/execution-engine (vitest, CI=true junit)",
+    "script": "scripts/release/neutrality.sh",
+    "report": "docs/conformance-release.md",
+    "baseline": {
+      "cases": 1746,
+      "passed": 1746,
+      "failed": 0,
+      "skipped": 0
+    },
+    "legacy": {
+      "cases": 1746,
+      "passed": 1746,
+      "differingFromBaseline": 0,
+      "loopDriving": "45/45",
+      "helper": "1701/1701"
+    },
+    "petriScheduler": {
+      "note": "an engine leg, not a neutrality criterion",
+      "cases": 1746,
+      "passed": 1742,
+      "loopDriving": "41/45",
+      "helper": "1701/1701"
+    }
+  }
+}

@@ -2,14 +2,14 @@
  * Compiles and verifies every workflow in `.templates/` and reports what happened, in
  * aggregate — the cheap half of testing this engine against workflows nobody here wrote.
  *
- *   node scripts/templates/survey.mjs [--profile engineV2|v1] [--budget 4] [--timeout 45] [--jobs 4]
+ *   node scripts/templates/survey.mjs [--profile v1|engineV2] [--budget 4] [--timeout 45] [--jobs 4]
  *
  * `--profile` is the compile target, handed to the CLI by name on every run, never left to its
- * default. It defaults to `engineV2`, the CLI's own default since ADR 0013 (decision 2): the
- * survey runs the `settlement` family and has no budget, so `--budget` is refused beside it.
- * `--profile v1` is the survey recorded before ADR 0013 (`docs/conformance-2.41.3.md`, "Template
- * survey"), with the same CLI arguments as then, so that survey stays reproducible; its rows go
- * to `rows.v1.json`, the engineV2 survey's to `rows.engineV2.json`.
+ * default (`auto`, which would compile each template for whatever engine it names). It defaults
+ * to `v1`, the library's default again since ADR 0015 (decision 1), with the same CLI arguments as
+ * the survey recorded before ADR 0013 (`docs/conformance-2.41.3.md`, "Template survey"), so that
+ * survey stays reproducible. `--profile engineV2` runs the `settlement` family and has no budget,
+ * so `--budget` is refused beside it. Rows go to `rows.v1.json` and `rows.engineV2.json`.
  *
  * It drives the shipped `n8n-libpetri verify` CLI, one process per workflow, for two reasons:
  * a workflow that makes the compiler throw takes its own process down and not the survey, and
@@ -50,7 +50,7 @@ const arg = (name, fallback) => {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : fallback;
 };
-const profile = arg('profile', 'engineV2');
+const profile = arg('profile', 'v1');
 if (profile !== 'v1' && profile !== 'engineV2') {
   console.error(`--profile must be v1 or engineV2, got '${profile}'`);
   process.exit(2);

@@ -7,7 +7,7 @@
  */
 import type { WorkflowScheduler, WorkflowSchedulerFactory } from '../../src/n8n/host.js';
 import { ENGINE_ENV, setupN8nVitest } from '../../src/n8n-vitest-setup.js';
-import { ENGINE_ENTERED_DIAGNOSTIC, PetriScheduler, registerPetriScheduler } from '../../src/scheduler/index.js';
+import { ENGINE_ENTERED_DIAGNOSTIC, legacyRouteDiagnostic, PetriScheduler, registerPetriScheduler } from '../../src/scheduler/index.js';
 import { linear } from '../fixtures/workflows.js';
 import { FakeHost, fakeHooks, fakeNodeHelpers, fakeWorkflow, items, newRunExecutionData } from '../scheduler/support.js';
 
@@ -74,9 +74,10 @@ describe('registerPetriScheduler', () => {
     expect(reg.cache.hits).toBe(1);
   });
 
-  it('a non-v1 workflow goes to a new instance of the injected StackScheduler', async () => {
+  it('a non-v1 workflow goes to a new instance of the injected StackScheduler, and says so after "engine entered"', async () => {
     const registry = registrySpy();
-    const reg = registerPetriScheduler({ setWorkflowSchedulerFactory: registry.set, nodeHelpers: fakeNodeHelpers, StackScheduler: FakeStackScheduler });
+    const messages: string[] = [];
+    const reg = registerPetriScheduler({ setWorkflowSchedulerFactory: registry.set, nodeHelpers: fakeNodeHelpers, StackScheduler: FakeStackScheduler, onDiagnostic: (m) => messages.push(m) });
     const wf = fakeWorkflow(linear, { executionOrder: 'v0' });
     const red = newRunExecutionData(wf.nodes.Trigger!);
     const host = new FakeHost(wf, red, {});
@@ -86,6 +87,10 @@ describe('registerPetriScheduler', () => {
     expect(FakeStackScheduler.instances).toBe(before + 1);
     expect(s.outcome).toBe('legacy');
     expect(host.calls).toEqual([]); // the fake legacy scheduler touches nothing
+    // "engine entered" is about the factory; the route line is about this execution.
+    expect(messages).toEqual([ENGINE_ENTERED_DIAGNOSTIC, legacyRouteDiagnostic('v0')]);
+    expect(messages[1]).toBe("legacy route: executionOrder 'v0' is not 'v1', so n8n's own stack loop runs this execution, not the net (divergence #3)");
+    expect(s.diagnostics).toEqual([legacyRouteDiagnostic('v0')]);
   });
 });
 

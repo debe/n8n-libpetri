@@ -1,4 +1,16 @@
 /**
+ * The diagnostic `run()` emits when it hands an execution to n8n's own stack loop because the
+ * workflow is not `executionOrder: 'v1'` (divergence #3). The factory's
+ * `ENGINE_ENTERED_DIAGNOSTIC` only says that n8n constructed a scheduler through it; this
+ * line says that, for this execution, the net did not run.
+ */
+export const LEGACY_ROUTE_PREFIX = 'legacy route:';
+export function legacyRouteDiagnostic(executionOrder: unknown): string {
+  const order = typeof executionOrder === 'string' ? `'${executionOrder}'` : 'unset';
+  return `${LEGACY_ROUTE_PREFIX} executionOrder ${order} is not 'v1', so n8n's own stack loop runs this execution, not the net (divergence #3)`;
+}
+
+/**
  * `PetriScheduler`: the `WorkflowScheduler` (patch 0001) that runs one execution on the
  * compiled net instead of n8n's stack loop.
  *
@@ -150,6 +162,7 @@ export class PetriScheduler implements WorkflowScheduler {
     this.reset(runExecutionData);
     if (workflow.settings.executionOrder !== 'v1') {
       this.outcome = 'legacy';
+      this.diagnostic(legacyRouteDiagnostic(workflow.settings.executionOrder));
       await runLegacy(this.options.legacy(), this.state, host, workflow, runExecutionData, hooks);
       return;
     }

@@ -31,49 +31,15 @@ if (process.env[ENGINE_ENV] === 'libpetri') {
   if (!resolveFrom) throw new Error('N8N_LIBPETRI_RESOLVE_FROM is not set (expected .n8n/packages/cli/package.json)');
   if (!hook) throw new Error('N8N_LIBPETRI_HOOK is not set (expected typescript/dist/index.js)');
 
-  const req = createRequire(resolveFrom);
-  const core = req('n8n-core');
-  const { NodeHelpers } = req('n8n-workflow');
-
-  // Patch 0002's seam. Its absence means `.n8n/packages/core/dist` was built from an unpatched
-  // tree — the one failure mode that would otherwise look like a working legacy run.
-  if (typeof core.setWorkflowSchedulerFactory !== 'function') {
-    throw new Error(
-      'n8n-core exports no setWorkflowSchedulerFactory: packages/core/dist predates patch 0002. ' +
-        'Run scripts/verify-patch.sh, then rebuild packages/core.',
-    );
-  }
-
-  const { registerPetriScheduler } = await import(pathToFileURL(hook).href);
-
-  const integer = (name, fallback) => {
-    const raw = process.env[name];
-    if (raw === undefined || raw === '') return fallback;
-    const value = Number.parseInt(raw, 10);
-    if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer, got '${raw}'`);
-    return value;
-  };
-
-  registerPetriScheduler({
-    setWorkflowSchedulerFactory: core.setWorkflowSchedulerFactory,
-    StackScheduler: core.StackScheduler,
-    nodeHelpers: NodeHelpers,
-    budget: integer('N8N_LIBPETRI_BUDGET', 1),
-    maxAgentRounds: integer('N8N_LIBPETRI_MAX_AGENT_ROUNDS', undefined),
-    maxAgentToolCalls: integer('N8N_LIBPETRI_MAX_AGENT_TOOL_CALLS', undefined),
-    // stderr, not console: n8n installs its own logger over the console early in boot, and the
-    // launcher greps this prefix out of .testbed/n8n.log to prove the engine was entered.
-    onDiagnostic: (message) => process.stderr.write(`[n8n-libpetri] ${message}\n`),
-  });
-
-  // Two distinct claims, deliberately two lines. This one says the factory was *installed*,
-  // which is true at boot. `ENGINE_ENTERED_DIAGNOSTIC` — emitted by the factory itself the
-  // first time n8n constructs a scheduler through it — says the engine was *entered*, which
-  // only an execution can establish. `docs/conformance-final.md` keeps the same distinction
-  // for the same reason: a registered engine is not a run engine.
-  process.stderr.write(
-    `[n8n-libpetri] scheduler registered: budget=${integer('N8N_LIBPETRI_BUDGET', 1)}, hook=${hook}\n`,
-  );
+  // The installed product's boot path (`src/n8n/boot.ts`, which `hook/n8n-hook.cjs` calls too),
+  // so the env parsing, the seam check and the two log lines cannot drift between the loaders.
+  // It throws when `.n8n/packages/core/dist` predates patch 0002 (run scripts/verify-patch.sh,
+  // then rebuild packages/core) — the one failure that would otherwise look like a working
+  // legacy run. The two claims stay two lines: `scheduler registered` here, at boot, and
+  // `ENGINE_ENTERED_DIAGNOSTIC` from the factory the first time n8n constructs a scheduler
+  // (`docs/conformance-final.md` keeps the same distinction).
+  const { bootFromEnv } = await import(new URL('./n8n/boot.js', pathToFileURL(hook)).href);
+  bootFromEnv({ resolveFrom, loader: hook });
 }
 
 /*

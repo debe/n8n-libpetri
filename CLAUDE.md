@@ -12,7 +12,7 @@ webhooks and queue mode. There is no n8n source fork: `.n8n/` is a gitignored cl
 commit, and the patches add extension points rather than changing behaviour:
 - v1 (n8n's default engine): patch 0001 extracts n8n's existing loop as `StackScheduler` behind a
   `WorkflowScheduler` interface, and patch 0002 adds the registry. `PetriScheduler` runs the net.
-- engine v2 (`packages/@n8n/engine`, primary since ADR 0013): patch 0003 extracts the settlement
+- engine v2 (`packages/@n8n/engine`, maintained but not shipped, ADR 0015): patch 0003 extracts the settlement
   decision as a `SettlementPolicy` (`decideSuccessors` + `isFinished` over a read-only reader),
   and patch 0004 adds an engine-side registry read only in `createEngineRuntime`. The net-backed
   policy is `createSettlementPolicy` in `src/settlement/` (ADR 0014).
@@ -33,10 +33,15 @@ budget, marking codec) and the design principles live in the root
   the `status` / `timedOut` fields the caller reads, and n8n polls it between activations —
   see ADR 0004, "The timeout is n8n's, not the net's".
 - Every n8n behaviour we do not reproduce is recorded in `docs/divergences.md`. No silent skips.
-- **The default compile profile is `engineV2` (ADR 0013).** Every v1 consumer names
-  `profile: 'v1'` / `--profile v1` explicitly. v1 is frozen, not deleted: it stays tested, its
-  net is pinned byte-identical by `tests/compiler/v1-identity.test.ts`, and it gets no new
-  features.
+- **The compile profile follows the engine (ADR 0015).** With no profile named, `compile()`,
+  `analyse()`, `verify()` and the JSON loader compile for `v1`, and they never guess the engine.
+  The verify CLI defaults to `--profile auto`: `engineV2` when the workflow's
+  `settings.engineType` is `'v2'`, `v1` otherwise (`profileForWorkflow`), and the report states
+  the profile it used. Runtime consumers still name their profile (`compileCached` names `'v1'`,
+  `src/settlement/` names `'engineV2'`). v1 gets the product work; its net is pinned
+  byte-identical by `tests/compiler/v1-identity.test.ts`. Engine v2 stays in the repository,
+  maintained and tested, and is left out of the install path, the Docker image and their docs
+  (ADR 0015 scope amendment).
 - **The engine v2 policy has no fallback to n8n's planner** (ADR 0014, plan decision 8). A compile
   refusal, a `CodecError` or a malformed store answer is a `settlement policy error` and a throw,
   and the execution stays `running` (divergence row 38). Named races (a failed row, a cancelled
@@ -128,7 +133,7 @@ Nothing moved. Terminal places ([EXEC-042]) and `terminationReason()` are not us
 
 Compiling is not verifying. At libpetri 7.0.0 (2026-10-02) the v1 survey decides at least one
 check on 121 of the 200; the other 79 come back all `unknown` (k = 4, `--smt-fallback off`). The
-default engineV2 survey compiles 91, decides something on 85, and refuses 109 (52 of them for
+engineV2 survey (`--profile engineV2`) compiles 91, decides something on 85, and refuses 109 (52 of them for
 having several triggers, which the survey does not enumerate yet).
 
 `scripts/link-libpetri.sh` points `node_modules/libpetri` at a sibling libpetri checkout, for
@@ -208,7 +213,7 @@ libpetri shells out to the `z3` executable (`PATH` or `LIBPETRI_Z3`, ≥ 4.8.0).
 verification returns `unknown`, never throws. CI installs z3 and fails if proofs become skips
 (`tests/z3-gate.test.ts`); the `n8n-libpetri verify` CLI exits **3** when no solver resolved (v1) or when no check was
 decided (engineV2). A v1 run whose checks all came back `unknown` with z3 present still exits 0:
-v1 is frozen, and the survey separates those runs itself (`scripts/templates/survey-outcome.mjs`).
+the survey separates those runs itself (`scripts/templates/survey-outcome.mjs`).
 
 What the surface proves, what it cannot, and what it costs is measured in
 [`docs/verification.md`](docs/verification.md) (ADR 0007). Two rules when touching it: report

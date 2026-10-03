@@ -57,8 +57,9 @@ transition that calls `runNode()`.*
 8. [In a real n8n](#in-a-real-n8n)
 9. [Engine v2: the net as the settlement policy](#engine-v2-the-net-as-the-settlement-policy)
 10. [Known limits](#known-limits)
-11. [Building and testing](#building-and-testing)
-12. [Repository map](#repository-map)
+11. [Installing into a released n8n](#installing-into-a-released-n8n)
+12. [Building and testing](#building-and-testing)
+13. [Repository map](#repository-map)
 
 ## The scheduler in n8n today
 
@@ -286,22 +287,24 @@ with an unmodified `IRunExecutionData`, and the patches never touch persistence.
 
 ## Verification
 
-The compiler has two targets, and so does the CLI. Since
-[ADR 0013](docs/adr/0013-engine-v2-primary.md) the default profile is `engineV2`, n8n's
-durable step engine: `compile()`, `verify()` and the CLI compile for it unless told otherwise,
-and the CLI then runs the `settlement` family. `v1`, n8n's default engine and the net
-`PetriScheduler` executes, is frozen but still available, and every v1 caller names it
-(`profile: 'v1'`, `--profile v1`):
+The CLI compiles workflow JSON to the same net `PetriScheduler` executes. The compiler has two
+targets: `v1`, n8n's default engine and the net `PetriScheduler` runs, and `engineV2`, n8n's
+durable step engine. Since [ADR 0015](docs/adr/0015-both-engines-injectable.md) the profile
+follows the engine. `compile()` and `verify()` compile for `v1` unless `profile: 'engineV2'` is
+named. The CLI defaults to `--profile auto`: a workflow whose `settings.engineType` is `'v2'` is
+compiled for `engineV2` and runs the `settlement` family, and every other workflow is compiled for
+`v1`. The report states which profile it used.
 
 ```bash
 cd typescript
 npm ci
 npm run build
-npx n8n-libpetri verify ../workflow.json                     # engineV2: settlement
-npx n8n-libpetri verify ../workflow.json --profile v1 --budget 2 --property dead-nodes
+npx n8n-libpetri verify ../workflow.json --budget 2 --property dead-nodes
 ```
 
-`--budget` and `--start` exist only under `--profile v1`. Available v1 properties:
+`--budget`, `--start`, `--mutex` and `--all-pairs` exist only under `v1`, and `--trigger` only
+under `engineV2`. `--profile v1` or `--profile engineV2` overrides the workflow's setting.
+Available v1 properties:
 
 - `proper-completion`
 - `dead-nodes`
@@ -521,6 +524,28 @@ comparison, and [`tasks/v2-seam-plan.md`](tasks/v2-seam-plan.md) has every step'
 [`docs/divergences.md`](docs/divergences.md) and
 [`docs/state-of-the-project.md`](docs/state-of-the-project.md) track these constraints.
 
+## Installing into a released n8n
+
+n8n-libpetri can be added to an n8n you already run, as an optional alternative scheduler for
+its default engine (v1). [`docs/install.md`](docs/install.md) is the full guide. In short:
+
+- `n8n-libpetri install` adds patches 0001/0002, rebuilt for the installed release, to the
+  `n8n-core` your n8n loads. It checks every file it replaces against the stock release's
+  sha256, keeps backups, and `uninstall` restores the touched files byte for byte. The seam
+  alone changes nothing: n8n keeps running its own loop.
+- `N8N_EXECUTION_ENGINE=libpetri` (plus the hook in `EXTERNAL_HOOK_FILES`; `eval "$(n8n-libpetri
+  env)"` sets both) activates the net. Unset, n8n runs its own loop; any other value stops n8n
+  at boot. Workflows that are not `executionOrder: "v1"` keep running on n8n's own loop.
+- `docker/Dockerfile` builds the same on top of the official `n8nio/n8n` image, where the one
+  variable is enough.
+
+Supported: n8n 2.41.5 and 2.41.6 (n8n-core 2.41.4) and n8n 2.42.2 (n8n-core 2.42.2). The install
+path covers engine v1 only; the engine v2 seam stays in this repository and its tests and is not
+installed ([ADR 0015](docs/adr/0015-both-engines-injectable.md), scope amendment). **Nothing is
+published:** the package is `"private": true`, the image is built locally, and both build from
+this checkout. Run `n8n-libpetri verify <workflow.json>` before activating the engine for a
+workflow, and read [`docs/divergences.md`](docs/divergences.md) for what it runs differently.
+
 ## Building and testing
 
 The integration targets n8n master `944afe5` (commit
@@ -581,6 +606,8 @@ scripts/run-conformance.sh --engines=libpetri --scope=engine-int   # policy-ente
 | `typescript/src/settlement/` | The net-backed engine v2 `SettlementPolicy`, its snapshot read and shadow mode |
 | `typescript/src/codec/v2/` | Engine v2 step rows to a marking (the frontier decode), and the plan from it |
 | `patches/n8n/` | Four rebasable n8n integration patches: 0001/0002 for v1, 0003/0004 for engine v2 |
+| `typescript/src/install/`, `typescript/seams/`, `typescript/hook/` | The installer, the per-release seams it applies (derived from n8n-core, see NOTICE) and the `EXTERNAL_HOOK_FILES` entry |
+| `docker/`, `scripts/docker/`, `scripts/release/` | The image on top of `n8nio/n8n`, its smoke test, and the seam generator, npm end-to-end and release-neutrality scripts |
 | `spec/` | Executable requirements and traceability |
 | `docs/adr/` | Architectural decisions and amendments |
 | `docs/conformance-*.md` | Recorded n8n suite evidence |
@@ -594,4 +621,7 @@ Milestone history belongs in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 
-Apache-2.0. See [`LICENSE`](LICENSE).
+Apache-2.0. See [`LICENSE`](LICENSE). The exceptions are the files derived from n8n's own code:
+the patches under `patches/n8n/` and the seams under `typescript/seams/` derive from `n8n-core`,
+which is under n8n's Sustainable Use License. The `NOTICE` files in those directories say so and
+carry that license's text.

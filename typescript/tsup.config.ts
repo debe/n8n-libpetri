@@ -7,6 +7,8 @@ export default defineConfig({
     'verify/index': 'src/verify/index.ts',
     'verify/cli': 'src/verify/cli.ts',
     'verify/main': 'src/verify/main.ts',
+    'cli/main': 'src/cli/main.ts',
+    'n8n/boot': 'src/n8n/boot.ts',
     'conformance/index': 'src/conformance/index.ts',
     codec: 'src/codec.ts',
     'n8n-v2': 'src/n8n-v2.ts',

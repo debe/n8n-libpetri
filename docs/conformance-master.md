@@ -1,7 +1,14 @@
 # Resync to n8n master `944afe5`
 
 On 2026-10-02 the pin moved from the release `n8n@2.41.3` (`7f7a8ac`) to n8n master `944afe5`
-(ADR 0013: engine v2 is primary, v1 is frozen). This report records what the move changed.
+(ADR 0013, which then made engine v2 primary and froze v1). This report records what the move
+changed. On 2026-10-03 ADR 0015 superseded ADR 0013's decisions 2 and 3: the engine picks the
+path, the compile default is `v1` again, and v1 is maintained, not frozen. Its scope amendment
+leaves engine v2 out of the product work for now, so the v1 path is the one the installer ships
+(`docs/install.md`). The pin stays master (ADR 0013 decision 1). The numbers below did not
+change with that decision: the step 1 record in `tasks/inject-plan.md` re-ran the
+execution-engine scope after the default flip and measured the same 41/45.
+
 Raw artefacts are in the gitignored `conformance-results/`, and the previous pin's are under
 `conformance-results/pin-2.41.3/`. libpetri was 7.0.0 from the registry. Machine: macOS,
 Node 26.
@@ -13,10 +20,12 @@ because a release tag is not an ancestor of master. The extracted `stack-schedul
 byte-identical. Upstream's only change in the patched files is three `oxlint-disable` comments,
 all outside the extracted loop.
 
-## The frozen v1 path
+## The v1 path
 
-These are regression checks of the frozen path (ADR 0013), not new engine results. The
-headline is still loop-driving cases passed.
+These are regression checks of the v1 path at the new pin, not new engine results. (ADR 0013
+called this path frozen when they were measured; ADR 0015 ended that.) The headline is still
+loop-driving cases passed. The same suite at the released n8n versions the installer supports
+is the release-neutrality run, recorded in [`conformance-release.md`](conformance-release.md).
 
 | scope | cases | legacy | libpetri k = 1 | loop-driving, libpetri |
 |---|---:|---|---|---|
@@ -54,7 +63,7 @@ The six dist files the golden stamps hash identically.
 | CI golden | re-recorded; only the stamp's version label moved (`n8n@2.41.3` → `n8n@2.42.0`, the package version on master), 0 findings |
 
 What master adds around the core, all outside the planner's inputs so far, is the work of
-ADR 0013 decision 4(a):
+ADR 0013 decision 4(a) (engine v2 work, maintained under ADR 0015 but not shipped):
 - the `waiting` step status (suspend and resume);
 - `cancelPendingSteps`, which cancels queued *and* waiting rows after a failure;
 - the execution status `waiting`;

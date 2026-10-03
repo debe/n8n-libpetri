@@ -9,7 +9,7 @@ import { table } from './table.js';
 export function renderHeader(report: VerificationReport): string[] {
   if (report.profile === 'engineV2') return renderSettlementHeader(report);
   return [
-    `n8n-libpetri verify — ${report.workflow}`,
+    `n8n-libpetri verify — ${report.workflow} (profile v1)`,
     ...table([
       ['  net', `${report.net.places} places, ${report.net.transitions} transitions, ${report.net.flatTransitions} flat (XOR-expanded, IO-016)`],
       ['  budget', budgetLine(report)],

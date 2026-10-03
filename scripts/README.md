@@ -11,6 +11,11 @@ ignored `conformance-results/` directory.
 | `n8n-pin.sh` | The pin (`N8N_TAG`, `N8N_COMMIT`), sourced by the three scripts above. |
 | `pg-stamp.sh` | Docker preflight and the Postgres stamp for the integration scopes, sourced by `bootstrap-n8n.sh` and `run-conformance.sh`. |
 | `run-conformance.sh` | Run selected n8n suites under the legacy or Petri scheduler and compare junit results. |
+| `release/build-seams.mjs` | Build the installer's seams (`typescript/seams/n8n-core/<version>/`) for released n8n tags from patches 0001/0002, gated on reproducing the published n8n-core JS byte for byte; `--check` compares with the committed seams. Reads `.n8n`'s object database only. |
+| `release/neutrality.sh` | The release-neutrality run for one n8n tag: a throwaway clone of `.n8n` under `/private/tmp` at the tag, bootstrap and unpatched baseline, 0001/0002 applied exactly, n8n-core typecheck, then the execution-engine suite with nothing registered (must be identical to the baseline) and under `PetriScheduler`. Writes `conformance-results/release/<version>/summary.json`, the source of a manifest's `neutrality` record (`docs/conformance-release.md`). A patch-neutrality leg. |
+| `release/e2e-npm.sh` | The installer end to end against a real `npm i -g n8n@<version>`: install, activate, one REST run with and without the engine, a refused typo, uninstall to the stock bytes. An integration result, not a conformance number. |
+| `docker/build.sh` | Build a local image `n8n-libpetri:<version>-n8n<n8n version>` from `docker/Dockerfile` on the official `n8nio/n8n` image, with an `npm pack` of this repository installed (v1 path only); `--allow-unverified` only for seams without a neutrality record. Never pushes. |
+| `docker/smoke.sh` | Seven legs against a built image, one container at a time under `--memory=700m`: status, engine off, engine on with data equal to off, a refused typo, an overdue wait at boot (measured), uninstall to the base image's bytes, a queue-mode worker boot. Removes every container, volume and network it made. An integration result, not a conformance number. |
 | `testbed/` | Boot the real n8n editor with the Petri scheduler installed, seed two demo workflows, and compare both engines in a live server. See [`testbed/README.md`](testbed/README.md). |
 
 All scripts use `set -euo pipefail`, validate their postconditions and fail if expected junit
@@ -51,6 +56,8 @@ Environment variables:
 | Variable | Default | Purpose |
 |---|---|---|
 | `N8N_DIR` | `<repo>/.n8n` | Reference checkout path. |
+| `N8N_RESULTS` | `<repo>/conformance-results` | Where baselines, junit files and matrices go (`release/neutrality.sh` gives each release its own directory). |
+| `N8N_BOOTSTRAP_COMMIT`, `N8N_BOOTSTRAP_TAG` | the pin | Bootstrap only: a checkout already at another commit, so the checkout step checks that HEAD is it (`release/neutrality.sh`). |
 | `N8N_TEST_FILTER` | Scope-specific | Override the vitest path filters (space-separated). |
 | `COREPACK_VERSION` | `0.36.0` | Fallback corepack package when no binary is on `PATH`. |
 | `COREPACK_HOME` | Corepack default | Corepack cache. |

@@ -72,5 +72,6 @@ export type {
 } from './types.js';
 export {
   BUILT_IN_SHAPES, connectionsOf, describeWorkflowJson, looksLikeTrigger, parseWorkflowJson, pickStartNode,
+  profileForWorkflow,
 } from './workflow-json.js';
-export type { NodeTypesFile, WorkflowJsonOptions, WorkflowJsonResult } from './workflow-json.js';
+export type { NodeTypesFile, ProfileChoice, WorkflowJsonOptions, WorkflowJsonResult } from './workflow-json.js';

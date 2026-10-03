@@ -1,7 +1,7 @@
 /**
  * Step 2 of `PetriScheduler.run()` (see `petri-scheduler.ts`): the workflow description
  * compiled once per `(structural hash, budget)` with the actions bound, and cached. Always the
- * `v1` profile, named explicitly (ADR 0013 decision 2): this is the v1 scheduler.
+ * `v1` profile, named explicitly: this is the v1 scheduler, whatever the compiler's default.
  */
 import {
   analyse, compile, structuralHash, type CompiledWorkflow, type WorkflowDescription,
@@ -38,8 +38,8 @@ function agentBudgets(options: AgentBudgetOptions) {
 export function compileCached(
   cache: CompiledWorkflowCache, description: WorkflowDescription, budget: number, options: AgentBudgetOptions,
 ): CompiledWorkflow {
-  // The scheduler runs n8n's v1 loop (patch 0001's seam), so it names the frozen v1 profile
-  // rather than taking the compiler's default, which is `engineV2` since ADR 0013.
+  // The scheduler runs n8n's v1 loop (patch 0001's seam), so it names the v1 profile rather
+  // than taking the compiler's default (`v1` again since ADR 0015, `engineV2` under ADR 0013).
   const analysis = analyse(description, { profile: 'v1', ...agentBudgets(options) });
   const hash = structuralHash(analysis);
   const key = CompiledWorkflowCache.key(hash, budget);

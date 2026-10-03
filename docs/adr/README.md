@@ -16,7 +16,7 @@
 | [0012](0012-engine-v2-target.md) | Engine v2 as a second target: model first, seam second | **proposed**: nothing built; plan for n8n's `packages/@n8n/engine` |
 | [0013](0013-engine-v2-primary.md) | Engine v2 is the primary target; v1 is frozen | accepted (2026-10-02) |
 | [0014](0014-settlement-policy-seam.md) | The engine v2 settlement seam, and the net behind it | accepted as built (2026-10-03); the upstream shape of 0004 is open |
-| [0015](0015-both-engines-injectable.md) | Both engines, injectable into a stock n8n; the engine picks the path | accepted (2026-10-04); supersedes 0013 decisions 2 and 3 |
+| [0015](0015-both-engines-injectable.md) | Both engines, injectable into a stock n8n; the engine picks the path | accepted (2026-10-03); supersedes 0013 decisions 2 and 3 |
 
 Each ADR has Context / Decision / Consequences / Evidence; Evidence names the spike under
 `typescript/tests/spikes/` that pins the behaviour it rests on.

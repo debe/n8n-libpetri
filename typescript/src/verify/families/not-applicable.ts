@@ -34,7 +34,7 @@ const NOT_UNDER_V1 =
   'with profile engineV2 (CLI --profile engineV2) to ask it';
 
 /**
- * Since ADR 0013 `engineV2` is the default profile, so a v1 family asked without naming a profile
+ * A v1 family asked of an `engineV2` net — named, or read off the workflow by `--profile auto` —
  * lands here; the reason says how to ask it of the net it reads.
  */
 const ASK_UNDER_V1 = '; compile with profile v1 (CLI --profile v1) to ask the v1 family';

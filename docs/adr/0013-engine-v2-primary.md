@@ -1,6 +1,6 @@
 # ADR 0013: Engine v2 is the primary target; v1 is frozen
 
-Status: **accepted** (2026-10-02); decisions 2 (fixed engineV2 default) and 3 (v1 frozen) **superseded by ADR 0015** (2026-10-04). Supersedes ADR 0012's ordering ("model first, seam second")
+Status: **accepted** (2026-10-02); decisions 2 (fixed engineV2 default) and 3 (v1 frozen) **superseded by ADR 0015** (2026-10-03). Supersedes ADR 0012's ordering ("model first, seam second")
 now that the model is measured, and keeps all of its findings.
 
 ## Context

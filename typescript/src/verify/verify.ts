@@ -162,9 +162,9 @@ export function selectProperties(options: VerifyOptions, profile: CompileProfile
 
 /**
  * Compiles `workflow` exactly as its target does, then verifies the net it produced: profile
- * `engineV2` (the default, as `compile`'s, ADR 0013 decision 2) with no budget option at all,
- * which the compiler would refuse (`tasks/v2-profile-plan.md` step 2); profile `v1`, which the
- * six v1 families need, as the scheduler compiles it, with the budget. An explicit `budget` or
+ * `engineV2` with no budget option at all, which the compiler would refuse
+ * (`tasks/v2-profile-plan.md` step 2); profile `v1` (the default, as `compile`'s, ADR 0015
+ * decision 1), which the six v1 families need, as the scheduler compiles it, with the budget. An explicit `budget` or
  * agent bound under `engineV2` is passed through, and refused there.
  */
 export async function verify(

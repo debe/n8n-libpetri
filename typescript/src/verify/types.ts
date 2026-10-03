@@ -389,8 +389,8 @@ export type MutualExclusionRequest = readonly (readonly [string, string])[] | 'a
 
 export interface VerifyOptions {
   /**
-   * The target {@link verify} compiles for. Default `'engineV2'`, the compiler's default (ADR 0013
-   * decision 2); the six v1 families need `'v1'`, named. Under `'engineV2'` the report runs the
+   * The target {@link verify} compiles for. Default `'v1'`, the compiler's default (ADR 0015
+   * decision 1), which the six v1 families need; `'engineV2'` is named. Under `'engineV2'` the report runs the
    * `'settlement'` family over the state-class graph alone (`settlement.ts`), and `budget`,
    * `maxAgentRounds` and `maxAgentToolCalls` are refused by the compiler, as they are there.
    * `timeoutMs`, `smtFallback`, `semiflowInvariants` and `triggerItems` have nothing to act on

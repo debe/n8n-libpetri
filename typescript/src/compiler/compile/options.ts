@@ -35,7 +35,7 @@ export function requestedBudgetOf(options: CompileOptions): number {
  * fresh `analyse(workflow)` under the options' profile and agent budgets. The budgets and a
  * passed analysis are exclusive — the analysis already resolved them — and a hash without its
  * analysis is refused rather than trusted. A passed analysis must carry the profile `compile`
- * was asked for (default `engineV2`): the profile is hashed and decides the gadget, so an analysis of
+ * was asked for (default `v1`): the profile is hashed and decides the gadget, so an analysis of
  * the other profile would build the other engine's net under this call's cache key.
  */
 export function analysisOf(workflow: WorkflowDescription, options: CompileOptions): WorkflowAnalysis {

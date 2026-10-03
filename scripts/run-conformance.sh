@@ -129,7 +129,8 @@
 #
 # Flags: --skip-patch --typecheck --engines=legacy,libpetri --budget=N --scope=NAME
 #        --settlement-mode=primary|shadow|primary-shadowed -h|--help
-# Env:   N8N_DIR (default <repo>/.n8n), N8N_TEST_FILTER (overrides the scope's path filters;
+# Env:   N8N_DIR (default <repo>/.n8n), N8N_RESULTS (default <repo>/conformance-results),
+#        N8N_TEST_FILTER (overrides the scope's path filters;
 #        space-separated, each one a vitest path filter),
 #        LIBPETRI_HOOK (default <repo>/typescript/dist/n8n-vitest-setup.js),
 #        SETTLEMENT_HOOK (default <repo>/typescript/dist/n8n-v2-vitest-setup.js)
@@ -137,7 +138,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 N8N_DIR="${N8N_DIR:-$ROOT/.n8n}"
-RESULTS="$ROOT/conformance-results"
+RESULTS="${N8N_RESULTS:-$ROOT/conformance-results}"
 CLI="$ROOT/typescript/src/conformance/cli.ts"
 # shellcheck source=pg-stamp.sh
 . "$ROOT/scripts/pg-stamp.sh"

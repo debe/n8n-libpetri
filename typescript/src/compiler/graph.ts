@@ -69,8 +69,8 @@ export const DEFAULT_MAX_AGENT_TOOL_CALLS = 64;
 /** Options `analyse` reads. Kept separate from `CompileOptions`, which carries the action binder. */
 export interface AnalysisOptions {
   /**
-   * The engine the analysis is for (ADR 0012 §1); default `engineV2` (ADR 0013 decision 2,
-   * `DEFAULT_COMPILE_PROFILE`); v1 callers name `'v1'`. Recorded on the analysis and
+   * The engine the analysis is for (ADR 0012 §1); default `v1` (ADR 0015 decision 1,
+   * `DEFAULT_COMPILE_PROFILE`); engine v2 callers name `'engineV2'`. Recorded on the analysis and
    * hashed. Under `engineV2` the agent budgets below are refused: v2 has no agent round. Its
    * converter drops an agent's sub-nodes, so the agent fails at its missing Chat Model input, and
    * only Agent V3 would send an `EngineRequest`, which `V1StepExecutor` refuses

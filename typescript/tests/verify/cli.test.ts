@@ -5,7 +5,7 @@
  * z3-gated. The exit code is the contract a CI job would use: 0 when nothing came back
  * `violated`, 1 when something did, 2 on a usage or input error.
  */
-import { parseArgs, runCli, USAGE } from '../../src/verify/cli.js';
+import { parseArgs, runCli, USAGE, withProfile } from '../../src/verify/cli.js';
 import type { CliIo } from '../../src/verify/cli.js';
 import { CASE_TIMEOUT_MS, describeZ3 } from './support.js';
 
@@ -133,30 +133,47 @@ describe('verify CLI arguments', () => {
     expect(parseArgs(['wf.json']).strict).toBe(false);
   });
 
-  // ADR 0013 decision 2: the CLI's default profile is engineV2, and the options always state it.
-  it('defaults to --profile engineV2, states the profile it resolved, and takes --profile v1', () => {
-    expect(parseArgs(['wf.json']).options.profile).toBe('engineV2');
+  // ADR 0015 decision 1: the CLI's default profile is auto, which only the workflow resolves;
+  // a named profile is stated in the options at once, auto's once `withProfile` has resolved it.
+  it('defaults to --profile auto, leaves it unresolved until the workflow is read, and takes a named one', () => {
+    expect(parseArgs(['wf.json']).profile).toBe('auto');
+    expect(parseArgs(['wf.json']).options.profile).toBeUndefined();
+    expect(parseArgs(['wf.json', '--profile', 'auto']).profile).toBe('auto');
     expect(parseArgs(['wf.json', '--profile', 'engineV2']).options.profile).toBe('engineV2');
     expect(parseArgs(['wf.json', '--profile', 'v1']).options.profile).toBe('v1');
-    expect(USAGE).toContain('profile: engineV2 by default');
+    expect(withProfile(parseArgs(['wf.json']), 'v1').options.profile).toBe('v1');
+    expect(withProfile(parseArgs(['wf.json']), 'engineV2').options.profile).toBe('engineV2');
+    expect(USAGE).toContain('profile: auto by default');
+    expect(USAGE).toContain('[--profile auto|v1|engineV2]');
   });
 
-  it('refuses the v1-only flags without --profile v1, naming the flag that fixes it', () => {
-    expect(() => parseArgs(['wf.json', '--budget', '2'])).toThrow(/--budget .*pass --profile v1/);
-    expect(() => parseArgs(['wf.json', '--start', 'T'])).toThrow(/--start .*--profile v1/);
+  it('refuses the v1-only flags under engineV2, named or resolved, naming the flag that fixes it', () => {
+    expect(() => parseArgs(['wf.json', '--profile', 'engineV2', '--budget', '2'])).toThrow(/--budget .*pass --profile v1/);
+    expect(() => parseArgs(['wf.json', '--profile', 'engineV2', '--start', 'T'])).toThrow(/--start .*--profile v1/);
     expect(parseArgs(['wf.json', '--profile', 'v1', '--budget', '2', '--start', 'T']).options.budget).toBe(2);
+    // Under auto nothing is refused until the workflow says which profile it is.
+    expect(parseArgs(['wf.json', '--budget', '2', '--start', 'T']).options.budget).toBe(2);
+    expect(withProfile(parseArgs(['wf.json', '--budget', '2', '--start', 'T']), 'v1').options.budget).toBe(2);
+    expect(() => withProfile(parseArgs(['wf.json', '--budget', '2']), 'engineV2'))
+      .toThrow(/--budget .*pass --profile v1 to use it \(--profile auto: the workflow sets settings\.engineType 'v2'\)/);
+    expect(() => withProfile(parseArgs(['wf.json', '--trigger', 'T']), 'v1'))
+      .toThrow(/--trigger names the fired trigger of --profile engineV2.*\(--profile auto: the workflow does not set settings\.engineType 'v2'\)/);
   });
 
   // Review finding: a v1 command line with --mutex or --all-pairs used to land on engineV2, where
   // the family is recorded not applicable, and exit 0 without --strict: a requested check that
-  // never ran. Refused like --budget, named profile or default.
-  it('refuses --mutex and --all-pairs under engineV2, named or by default, naming --profile v1', () => {
-    for (const named of [[], ['--profile', 'engineV2']]) {
-      expect(() => parseArgs(['wf.json', ...named, '--mutex', 'A,B'])).toThrow(/--mutex asks the v1 mutual-exclusion family, which is not ported to engine v2; pass --profile v1/);
-      expect(() => parseArgs(['wf.json', ...named, '--all-pairs'])).toThrow(/--all-pairs asks the v1 mutual-exclusion family.*pass --profile v1/);
+  // never ran. Refused like --budget, named profile or resolved.
+  it('refuses --mutex and --all-pairs under engineV2, named or resolved, naming --profile v1', () => {
+    for (const flags of [['--mutex', 'A,B'], ['--all-pairs']]) {
+      const want = flags[0] === '--mutex'
+        ? /--mutex asks the v1 mutual-exclusion family, which is not ported to engine v2; pass --profile v1/
+        : /--all-pairs asks the v1 mutual-exclusion family.*pass --profile v1/;
+      expect(() => parseArgs(['wf.json', '--profile', 'engineV2', ...flags])).toThrow(want);
+      expect(() => withProfile(parseArgs(['wf.json', ...flags]), 'engineV2')).toThrow(want);
     }
     expect(parseArgs(['wf.json', '--profile', 'v1', '--mutex', 'A,B']).options.mutualExclusion).toEqual([['A', 'B']]);
     expect(parseArgs(['wf.json', '--profile', 'v1', '--all-pairs']).options.mutualExclusion).toBe('all-pairs');
+    expect(withProfile(parseArgs(['wf.json', '--all-pairs']), 'v1').options.mutualExclusion).toBe('all-pairs');
   });
 
   it('--smt-fallback picks the mode, and only the three names are modes', () => {

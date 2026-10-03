@@ -1,0 +1,18 @@
+{
+  "id": "LpSmokeOverdueW1",
+  "name": "n8n-libpetri smoke: overdue wait",
+  "active": false,
+  "nodes": [
+    { "id": "7a1d2b20-0000-4000-8000-000000000001", "name": "Start", "type": "n8n-nodes-base.manualTrigger", "typeVersion": 1, "position": [0, 0], "parameters": {} },
+    { "id": "7a1d2b20-0000-4000-8000-000000000002", "name": "Wait 70 s", "type": "n8n-nodes-base.wait", "typeVersion": 1.1, "position": [240, 0], "webhookId": "7a1d2b20-0000-4000-8000-0000000000ff",
+      "parameters": { "resume": "timeInterval", "amount": 70, "unit": "seconds" } },
+    { "id": "7a1d2b20-0000-4000-8000-000000000003", "name": "After Wait", "type": "n8n-nodes-base.set", "typeVersion": 3.4, "position": [480, 0],
+      "parameters": { "assignments": { "assignments": [{ "id": "w1", "name": "resumed", "value": "yes", "type": "string" }] }, "options": {} } }
+  ],
+  "connections": {
+    "Start": { "main": [[{ "node": "Wait 70 s", "type": "main", "index": 0 }]] },
+    "Wait 70 s": { "main": [[{ "node": "After Wait", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

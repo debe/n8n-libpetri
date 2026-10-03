@@ -75,7 +75,9 @@
 # conformance-results/bootstrap.log if your shell has a wall-clock cap.
 #
 # Flags: --skip-install --skip-build --skip-test --full-install --allow-dirty --scope=NAME -h|--help
-# Env:   N8N_DIR (default <repo>/.n8n), N8N_TEST_FILTER (overrides the scope's path filters;
+# Env:   N8N_DIR (default <repo>/.n8n), N8N_RESULTS (default <repo>/conformance-results),
+#        N8N_BOOTSTRAP_COMMIT / N8N_BOOTSTRAP_TAG (another commit than the pin, for a clone that
+#        is already checked out at it: scripts/release/neutrality.sh), N8N_TEST_FILTER (overrides the scope's path filters;
 #        space-separated, each one a vitest path filter),
 #        COREPACK_VERSION (fallback corepack used through npx when none is on PATH; Node ≥ 25 no
 #        longer ships one), COREPACK_HOME (corepack's own cache, default ~/.cache/node/corepack).
@@ -97,7 +99,11 @@ BUILD_TARGET="n8n-nodes-base"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 N8N_DIR="${N8N_DIR:-$ROOT/.n8n}"
-RESULTS="$ROOT/conformance-results"
+RESULTS="${N8N_RESULTS:-$ROOT/conformance-results}"
+# A release-neutrality run (scripts/release/neutrality.sh) bootstraps a clone at a release tag:
+# it names that commit here, and the checkout step then only checks that HEAD is it.
+N8N_COMMIT="${N8N_BOOTSTRAP_COMMIT:-$N8N_COMMIT}"
+N8N_TAG="${N8N_BOOTSTRAP_TAG:-$N8N_TAG}"
 TIMINGS="$RESULTS/bootstrap-timings.tsv"
 
 SKIP_INSTALL=0; SKIP_BUILD=0; SKIP_TEST=0; FULL_INSTALL=0; ALLOW_DIRTY=0; SCOPE="${SCOPE:-execution-engine}"

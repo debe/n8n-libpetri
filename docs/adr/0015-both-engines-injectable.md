@@ -1,10 +1,10 @@
 # ADR 0015: Both engines, injectable into a stock n8n; the engine picks the path
 
-Status: **accepted** (2026-10-04). Supersedes ADR 0013 decisions 2 (engineV2 as the fixed default)
+Status: **accepted** (2026-10-03). Supersedes ADR 0013 decisions 2 (engineV2 as the fixed default)
 and 3 (v1 frozen). It keeps ADR 0013 decision 1 (the pin is n8n master) and everything ADR 0014
 built.
 
-**Scope amendment (2026-10-04, owner):** engine v2 is left out of the product work for now. The
+**Scope amendment (2026-10-03, owner):** engine v2 is left out of the product work for now. The
 install step, the Docker image and the docs cover the v1 path only (patches 0001/0002). The v2 seam
 (patches 0003/0004, `src/settlement/`, the engineV2 profile) stays in the repository, maintained
 and tested, and is not shipped. Engine v2 itself is too limited today (no Code node with task
@@ -64,12 +64,24 @@ there, and it freezes the only path that runs n8n's default agent.
 - The default compile profile changes again, from `engineV2` back to "follows the engine",
   meaning `v1` unless the workflow says v2. Call sites that rely on the bare default are reviewed
   in the same change. Explicit profiles are unaffected.
+  Implemented in `tasks/inject-plan.md` step 1: `DEFAULT_COMPILE_PROFILE` is `'v1'`, and
+  `profileForWorkflow` (`verify/workflow-json.ts`) is the only reader of `settings.engineType`,
+  used by `--profile auto` and the JSON loader's `profile: 'auto'`. No production caller relied on
+  the bare default: `compileCached` names `'v1'`, `src/settlement/` names `'engineV2'`, and
+  `verify()` passes the profile through. The v1 fingerprint and the v2 golden did not move.
 - The install step ships patches that contain n8n's own code, under the Sustainable Use License.
   The patches stay minimal and are applied on the user's machine. This needs a licensing note
   before the package or image is published.
 - Supported n8n versions become a maintained list, and each entry needs a passing neutrality run.
+  Implemented for the v1 path (`tasks/inject-plan.md` steps 2-11): `n8n-libpetri install`,
+  `uninstall` and `status` (`typescript/src/install/`), per-release seams for n8n-core 2.41.4 and
+  2.42.2, the hook, and the image. Both manifests carry a passing neutrality record
+  (`docs/conformance-release.md`: the patched release with nothing registered is identical to its
+  unpatched baseline). The licensing note is the `NOTICE` files in `patches/n8n/` and
+  `typescript/seams/`; the owner's review is still open (`tasks/todo.md` §10).
 
 ## Evidence
 
 ADR 0014 and `docs/testbed.md` for v2; `docs/conformance-master.md` and the v1 fingerprint for
-v1; `docs/divergences.md` for what each path does not reproduce.
+v1; `docs/conformance-release.md` for the released versions the installer supports;
+`docs/divergences.md` for what each path does not reproduce.

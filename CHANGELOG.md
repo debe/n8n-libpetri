@@ -6,20 +6,44 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Breaking
-- **`engineV2` is the default compile profile (ADR 0013 decision 2).** `analyse()`, `compile()`,
-  `verify()`, `describeWorkflowJson()` / `parseWorkflowJson()` and the verify CLI compile for
-  n8n's engine v2 unless `profile: 'v1'` (CLI `--profile v1`) is named.
-  - A v1 caller that names no profile now gets an engineV2 net, or a refusal where engine v2
-    refuses. `compile(wf, { budget: 2 })` without a profile is now `CompileError`
-    `invalid-options`: engine v2 has no concurrency budget.
-  - `verify()` with no profile runs the `settlement` family. A v1 family asked without
-    `profile: 'v1'` is recorded as not applicable (an `unknown` check), not run.
-  - The verify CLI: `--budget`, `--start`, `--mutex` and `--all-pairs` without `--profile v1`
-    are usage errors (exit 2). `--property` of a v1 family is recorded not applicable.
-  - `PetriScheduler`, the v1 codec, conformance and the testbed are unchanged: they compile v1.
-    The v1 net is byte-identical (`tests/fixtures/v1-fingerprint.json`).
+- **The compile profile follows the engine (ADR 0015 decision 1).** ADR 0013 made `engineV2` the
+  default of `analyse()`, `compile()`, `verify()`, the JSON readers and the verify CLI. ADR 0015
+  reverses that before any release:
+  - With no profile named, the library compiles for `v1` again, as n8n runs v1 unless a workflow
+    sets `settings.engineType: 'v2'`. `profile: 'engineV2'` stays an explicit choice, and the
+    library never guesses the engine.
+  - The verify CLI defaults to `--profile auto`: `engineV2` for a workflow whose
+    `settings.engineType` is `'v2'`, `v1` otherwise (`profileForWorkflow`). `--profile v1` and
+    `--profile engineV2` override it. A v2 export that used to compile for v1 now runs the
+    `settlement` family unless `--profile v1` is named.
+  - `--budget`, `--start`, `--mutex` and `--all-pairs` are usage errors (exit 2) under
+    `engineV2`, and `--trigger` under `v1`, named or resolved by `auto`. Under `auto` the message
+    says what the workflow set.
+  - `describeWorkflowJson()` / `parseWorkflowJson()` take `profile: 'auto'` and return the
+    resolved `profile`. The v1 report header states `(profile v1)`, as the engineV2 header
+    already stated its own.
+  - `PetriScheduler`, the v1 codec, conformance, the testbed and `src/settlement/` are unchanged:
+    they name their profile. The v1 net is byte-identical (`tests/fixtures/v1-fingerprint.json`).
 
 ### Added
+- **`n8n-libpetri install | uninstall | status | env`: the v1 seam in a released n8n (ADR 0015).**
+  The installer adds patches 0001/0002, rebuilt per release (`typescript/seams/`), to the
+  `n8n-core` an installed n8n loads; the hook (`EXTERNAL_HOOK_FILES`) registers `PetriScheduler`
+  when `N8N_EXECUTION_ENGINE=libpetri`; `docker/` builds the same on `n8nio/n8n`. v1 only;
+  nothing is published (`docs/install.md`).
+  - Supported: n8n 2.41.5/2.41.6 (n8n-core 2.41.4) and 2.42.2. Both manifests carry a passing
+    release-neutrality record: with 0001/0002 applied and nothing registered, n8n-core's
+    execution-engine suite is identical to the unpatched baseline at `n8n@2.41.6` (1,723 cases)
+    and `n8n@2.42.2` (1,746), loop-driving 45/45 each (`scripts/release/neutrality.sh`,
+    `docs/conformance-release.md`). A patch-neutrality result, not an engine result.
+  - Crash-safe ordering: install writes the created files before the replaced files that
+    require them, uninstall restores before it deletes, and both keep a journal, so n8n-core
+    stays loadable wherever a run stops and `uninstall` finishes from any stopping point. A lock
+    left by a killed run is taken over when its process is gone on the same host. Measured by
+    killing install and uninstall at every filesystem mutation (`tests/install/crash.test.ts`)
+    and, in the 2.41.6 image, at every rename.
+  - A workflow that is not `executionOrder: "v1"` still runs on n8n's own loop (divergence #3);
+    each such execution now logs `legacy route: …`, since `engine entered` cannot tell.
 - **The net answers engine v2's settlement decision (ADR 0014).**
   - Patches 0003/0004 extract engine v2's settlement decision as a `SettlementPolicy` and let it
     be registered. `createSettlementPolicy` (`src/settlement/`) answers it from the net. The

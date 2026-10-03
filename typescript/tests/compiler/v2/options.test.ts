@@ -22,26 +22,27 @@ function refusal(f: () => unknown): string {
 const compileAs = (wf: WorkflowDescription, options: CompileOptions): string => refusal(() => compile(wf, options));
 
 describe('the profile option', () => {
-  // ADR 0013 decision 2: engineV2 is the default; v1 stays available, named.
-  it('defaults to engineV2, in analyse and in compile', () => {
-    expect(DEFAULT_COMPILE_PROFILE).toBe('engineV2');
-    expect(analyse(diamond).profile).toBe('engineV2');
-    expect(compile(diamond).analysis.profile).toBe('engineV2');
-    expect(compile(diamond).netMap.profile).toBe('engineV2');
-    expect(compile(diamond, { profile: 'engineV2' }).structuralHash).toBe(compile(diamond).structuralHash);
+  // ADR 0015 decision 1: a caller that names no profile gets v1, as n8n runs v1 unless the
+  // workflow says v2; engineV2 stays available, named.
+  it('defaults to v1, in analyse and in compile', () => {
+    expect(DEFAULT_COMPILE_PROFILE).toBe('v1');
+    expect(analyse(diamond).profile).toBe('v1');
+    expect(compile(diamond).analysis.profile).toBe('v1');
+    expect(compile(diamond).netMap.profile).toBe('v1');
+    expect(compile(diamond, { profile: 'v1' }).structuralHash).toBe(compile(diamond).structuralHash);
   });
 
-  it('keeps v1 available when it is named', () => {
-    expect(analyse(diamond, { profile: 'v1' }).profile).toBe('v1');
-    expect(compile(diamond, { profile: 'v1' }).analysis.profile).toBe('v1');
-    expect(compile(diamond, { profile: 'v1' }).netMap.profile).toBe('v1');
-    expect(compile(diamond, { profile: 'v1' }).structuralHash).not.toBe(compile(diamond).structuralHash);
+  it('keeps engineV2 available when it is named', () => {
+    expect(analyse(diamond, { profile: 'engineV2' }).profile).toBe('engineV2');
+    expect(compile(diamond, { profile: 'engineV2' }).analysis.profile).toBe('engineV2');
+    expect(compile(diamond, { profile: 'engineV2' }).netMap.profile).toBe('engineV2');
+    expect(compile(diamond, { profile: 'engineV2' }).structuralHash).not.toBe(compile(diamond).structuralHash);
   });
 
-  it('applies the v1 refusals only to a v1 compile: no profile now refuses a budget, as engineV2 does', () => {
-    expect(compileAs(linear, { budget: 2 })).toBe(
+  it('applies the engineV2 refusals only to an engineV2 compile: no profile takes a budget, as v1 does', () => {
+    expect(compile(linear, { budget: 2 }).requestedBudget).toBe(2);
+    expect(compileAs(linear, { profile: 'engineV2', budget: 2 })).toBe(
       'invalid-options: compile: budget is the v1 concurrency budget; the engineV2 profile has no _budget');
-    expect(compile(linear, { profile: 'v1', budget: 2 }).requestedBudget).toBe(2);
   });
 
   it('is recorded on the analysis compile builds', () => {
@@ -100,10 +101,10 @@ describe('refusals, all invalid-options', () => {
     expect(compileAs(linear, { profile: 'v1', analysis: v2 })).toBe(
       "invalid-options: compile: the precomputed analysis is for profile 'engineV2', but compile was asked for " +
       "'v1'; analyse with the same profile");
-    // No profile option is the engineV2 default (ADR 0013), not "whatever the analysis says".
-    expect(compileAs(linear, { analysis: v1 })).toBe(
-      "invalid-options: compile: the precomputed analysis is for profile 'v1', but compile was asked for " +
-      "'engineV2'; analyse with the same profile");
+    // No profile option is the v1 default (ADR 0015), not "whatever the analysis says".
+    expect(compileAs(linear, { analysis: v2 })).toBe(
+      "invalid-options: compile: the precomputed analysis is for profile 'engineV2', but compile was asked for " +
+      "'v1'; analyse with the same profile");
   });
 
   it('refuses any budget under engineV2, a valid one included, before the budget is checked', () => {
