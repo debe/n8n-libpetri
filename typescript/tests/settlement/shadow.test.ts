@@ -7,6 +7,9 @@
  * - A candidate throw, synchronous or a rejection, is contained: `candidate-threw`, primary's answer.
  * - The named races (decision 8) are `race`, not `disagree`, and only when the answers differ.
  * - The report carries both sides' reads and rows, and `skew` when a row moved between them.
+ * - A side whose `isFinished` reused its settlement's snapshot is reported with the rows of its
+ *   `decideSuccessors`; its false against a fresh true is `stale`, its true against a fresh false
+ *   is `disagree`.
  * - The primary's own throw still reaches the handler, and a report listener's throw does not.
  */
 import { describe, expect, it } from 'vitest';
@@ -112,12 +115,13 @@ describe('a candidate throw is contained', () => {
   });
 
   it('a candidate CodecError on rows n8n accepts is reported, not thrown', async () => {
-    // n8n's default stand-in answers on any rows; the net refuses two rows of a node outside a loop.
+    // n8n's default stand-in answers on any rows; the net refuses B completed with no row for A,
+    // B's only input.
     const lenient: V2SettlementPolicy = { decideSuccessors: async () => ({ toQueue: [], toSkip: [] }), isFinished: async () => false };
     const { policy, reports } = shadowOf(lenient, createSettlementPolicy());
-    expect(await policy.isFinished(chain, memoryReader([done('T'), done('A', 0), done('A', 1)]))).toBe(false);
+    expect(await policy.isFinished(chain, memoryReader([done('T'), done('B')]))).toBe(false);
     expect(reports[0]).toMatchObject({ verdict: 'candidate-threw' });
-    expect(reports[0]!.error).toMatch(/outside every loop/);
+    expect(reports[0]!.error).toMatch(/never found the start or skip of \(B, 0\)/);
   });
 
   it('but the primary\'s throw reaches the handler, and the candidate is not asked', async () => {
@@ -152,6 +156,9 @@ describe('the named races', () => {
     await policy.isFinished(chain, memoryReader(rows));
     expect(reports.map((r) => [r.verdict, r.race])).toEqual([['race', 'failure'], ['race', 'failure']]);
     expect(reports[1]!.primaryReads).toBe(1);
+    // Ours took its settlement's snapshot: no read, and the rows of its decideSuccessors.
+    expect(reports[1]).toMatchObject({ candidateReads: 0, reused: 'candidate' });
+    expect(reports[1]!.candidateRows).toEqual(reports[0]!.candidateRows);
   });
 
   it('a cancelled row and no failed one is the race cancel', async () => {
@@ -172,14 +179,14 @@ describe('the named races', () => {
 
 describe('skew', () => {
   it('is flagged when a row both sides read moved between their reads', async () => {
-    // The body completes between the primary's read and the candidate's.
+    // The body completes between the primary's keyed read and the candidate's.
     const before = [done('T'), done('B', 0, [false, true]), row('Body', 0, 'running')];
     const after = [done('T'), done('B', 0, [false, true]), done('Body', 0)];
     let calls = 0;
     const moving: V2SettlementReader = {
       executionId: 'e',
-      loadLatestStepSummaries: (ids) => memoryReader(calls++ === 0 ? before : after).loadLatestStepSummaries(ids),
-      loadStepSummariesByKeys: (keys) => memoryReader(after).loadStepSummariesByKeys(keys),
+      loadLatestStepSummaries: (ids) => memoryReader(after).loadLatestStepSummaries(ids),
+      loadStepSummariesByKeys: (keys) => memoryReader(calls++ === 0 ? before : after).loadStepSummariesByKeys(keys),
       countSettledSteps: () => memoryReader(after).countSettledSteps(),
     };
     const { policy, reports } = shadowOf(createSettlementPolicy(), createSettlementPolicy());
@@ -187,7 +194,38 @@ describe('skew', () => {
     expect(text(await policy.decideSuccessors(graph, done('B', 0, [false, true]), moving))).toEqual({ toQueue: [], toSkip: [] });
     expect(reports[0]).toMatchObject({ verdict: 'agree', skew: true });
     calls = 0;
-    expect(await policy.isFinished(graph, moving)).toBe(false);
-    expect(reports[1]).toMatchObject({ skew: true });
+    // Another settlement (its own graph object), so both sides read afresh.
+    expect(await policy.isFinished({ ...graph }, moving)).toBe(false);
+    expect(reports[1]).toMatchObject({ skew: true, reused: null });
+  });
+});
+
+describe('a reused snapshot', () => {
+  /** n8n's stand-in: reads the count, answers `finished`. */
+  const counting = (finished: boolean): V2SettlementPolicy => ({
+    decideSuccessors: async (_g, _s, reader) => { await reader.loadStepSummariesByKeys([{ nodeId: 'T', iteration: 0 }]); return { toQueue: [], toSkip: [] }; },
+    isFinished: async (_g, reader) => { await reader.countSettledSteps(); return finished; },
+  });
+  // T -> A -> B, B running when ours reads; it completes before isFinished.
+  const settling = [done('T'), done('A'), row('B', 0, 'running')];
+
+  it('false where the fresh side says true is stale, in both directions', async () => {
+    for (const [primary, candidate, reusedSide] of [
+      [counting(true), createSettlementPolicy(), 'candidate'],
+      [createSettlementPolicy(), counting(true), 'primary'],
+    ] as const) {
+      const { policy, reports } = shadowOf(primary, candidate);
+      await policy.decideSuccessors(chain, done('A'), memoryReader(settling));
+      await policy.isFinished(chain, memoryReader([done('T'), done('A'), done('B')]));
+      expect(reports[1]).toMatchObject({ method: 'isFinished', verdict: 'stale', race: null, reused: reusedSide });
+    }
+  });
+
+  it('true where the fresh side says false is a disagreement', async () => {
+    const { policy, reports } = shadowOf(counting(false), createSettlementPolicy());
+    const final = [done('T'), done('A'), done('B')];
+    await policy.decideSuccessors(chain, done('B'), memoryReader(final));
+    await policy.isFinished(chain, memoryReader(final));
+    expect(reports[1]).toMatchObject({ verdict: 'disagree', reused: 'candidate', candidate: true, primary: false });
   });
 });

@@ -15,8 +15,10 @@
  *   calls the handler makes when the settlement queues nothing (an upper bound when it queues).
  * - **agreement** (information): on S without a failed row, ours equals n8n's default per settlement
  *   (ordered decisions, and `isFinished`); a failed S is the named race, counted.
- * - **long loop**: a Loop Over Items at batch size 1 at pass k (k = 1 … 1000), rows built directly:
- *   the snapshot grows with k, which is what F4 watches live.
+ * - **long loop**: a Loop Over Items at batch size 1 at pass k (k = 1 … 10,000), rows built
+ *   directly. The policy reads S's frontier (step 14), so its keys stay flat in k; the same policy
+ *   with the full snapshot (`snapshot: 'full'`, the global decoder) is timed beside it, and its keys
+ *   grow with k, which is what F4 watches live.
  *
  *   npx tsx tasks/v2-policy-cost.mts [--behaviours 4] [--orders 3] [--max-settlements 300] [--limit N] [--json out.json]
  *
@@ -243,32 +245,60 @@ const loopRows = (k: number): StepRow[] => {
   for (let i = 0; i < k; i++) rows.push({ nodeId: 'Body', iteration: i, status: 'completed', filledOutputSlots: [true] });
   return rows;
 };
-const longLoopResults: { k: number; rows: number; reads: number; ours: ReturnType<typeof stats>; n8n: ReturnType<typeof stats>; agree: boolean }[] = [];
+/** `memoryReader(rows)`, also recording the most keys one keyed read asked for. */
+const keyed = (rows: readonly StepRow[]) => {
+  const inner = memoryReader(rows);
+  let keys = 0;
+  return {
+    keys: () => keys,
+    total: () => inner.total(),
+    reader: {
+      executionId: inner.executionId,
+      loadLatestStepSummaries: inner.loadLatestStepSummaries.bind(inner),
+      loadStepSummariesByKeys: (asked: StepKey[]) => { keys = Math.max(keys, asked.length); return inner.loadStepSummariesByKeys(asked); },
+      countSettledSteps: inner.countSettledSteps.bind(inner),
+    },
+  };
+};
+const longLoopResults: {
+  k: number; rows: number; reads: number; keys: number; fullKeys: number;
+  ours: ReturnType<typeof stats>; full: ReturnType<typeof stats>; n8n: ReturnType<typeof stats>; agree: boolean;
+}[] = [];
 {
   const policy = createSettlementPolicy();
-  for (const k of [1, 10, 100, 300, 1000]) {
+  const fullPolicy = createSettlementPolicy({ snapshot: 'full' });
+  for (const k of [1, 10, 100, 300, 1000, 10_000]) {
     const rows = loopRows(k);
     const settled = { nodeId: 'B', iteration: k };
-    const reps = k >= 300 ? 20 : 60;
+    const reps = k >= 10_000 ? 10 : k >= 300 ? 20 : 60;
     const ours: number[] = [];
+    const full: number[] = [];
     const n8n: number[] = [];
     let reads = 0;
+    let keys = 0;
+    let fullKeys = 0;
     let agree = true;
     for (let r = 0; r < reps; r++) {
       const g = structuredClone(longLoop);
-      const ro = memoryReader(rows);
-      const [d, msD] = await timed(() => policy.decideSuccessors(g, settled, ro));
-      const rf = memoryReader(rows);
-      const [f, msF] = await timed(() => policy.isFinished(g, rf));
+      const ro = keyed(rows);
+      const [d, msD] = await timed(() => policy.decideSuccessors(g, settled, ro.reader));
+      const rf = keyed(rows);
+      const [f, msF] = await timed(() => policy.isFinished(g, rf.reader));
       ours.push(msD + msF);
       reads = Math.max(reads, ro.total(), rf.total());
+      keys = Math.max(keys, ro.keys(), rf.keys());
+      const fo = keyed(rows);
+      const [fd, fmsD] = await timed(() => fullPolicy.decideSuccessors(g, settled, fo.reader));
+      const [ff, fmsF] = await timed(() => fullPolicy.isFinished(g, memoryReader(rows)));
+      full.push(fmsD + fmsF);
+      fullKeys = Math.max(fullKeys, fo.keys());
       const [nd, nmsD] = await timed(() => defaultSettlementPolicy.decideSuccessors(g, settled, memoryReader(rows)));
       const [nfin, nmsF] = await timed(() => defaultSettlementPolicy.isFinished(g, memoryReader(rows)));
       n8n.push(nmsD + nmsF);
-      if (seq(d) !== seq(nd) || f !== nfin) agree = false;
+      if (seq(d) !== seq(nd) || f !== nfin || seq(fd) !== seq(nd) || ff !== nfin) agree = false;
     }
     // The first rep is cold for this k's row count only (the memo is warm from k = 1); drop it.
-    longLoopResults.push({ k, rows: rows.length, reads, ours: stats(ours.slice(1)), n8n: stats(n8n.slice(1)), agree });
+    longLoopResults.push({ k, rows: rows.length, reads, keys, fullKeys, ours: stats(ours.slice(1)), full: stats(full.slice(1)), n8n: stats(n8n.slice(1)), agree });
   }
 }
 
@@ -290,7 +320,7 @@ console.log(`\nreader calls per policy call: ours ≤ ${count.maxReadsOurs}, n8n
 console.log(`agreement (information; failed S are the named race): decideSuccessors ${count.decideCompared - count.decideDisagree}/${count.decideCompared}, isFinished ${count.finishedCompared - count.finishedDisagree}/${count.finishedCompared}, races ${count.races}, our throws ${count.ourErrors}`);
 console.log('\nlong loop (Loop Over Items, batch size 1), settlement of B@k, decide + isFinished, warm:');
 for (const r of longLoopResults) {
-  console.log(`  k=${String(r.k).padStart(5)} rows ${String(r.rows).padStart(5)} reads ${r.reads}  ours p50 ${msText(r.ours.p50).padStart(9)} p95 ${msText(r.ours.p95).padStart(9)}   n8n p50 ${msText(r.n8n.p50).padStart(9)} p95 ${msText(r.n8n.p95).padStart(9)}   ${r.agree ? 'agree' : 'DISAGREE'}`);
+  console.log(`  k=${String(r.k).padStart(6)} rows ${String(r.rows).padStart(6)} reads ${r.reads} keys ${String(r.keys).padStart(2)} (full ${String(r.fullKeys).padStart(5)})  ours p50 ${msText(r.ours.p50).padStart(9)} p95 ${msText(r.ours.p95).padStart(9)}   full p50 ${msText(r.full.p50).padStart(9)} p95 ${msText(r.full.p95).padStart(9)}   n8n p50 ${msText(r.n8n.p50).padStart(9)} p95 ${msText(r.n8n.p95).padStart(9)}   ${r.agree ? 'agree' : 'DISAGREE'}`);
 }
 if (findings.length > 0) {
   console.log(`\nfindings (${findings.length}, first 30):`);

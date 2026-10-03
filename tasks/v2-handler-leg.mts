@@ -57,11 +57,29 @@
  *   npx tsx tasks/v2-handler-leg.mts [--behaviours 20] [--orders 20] [--limit N] [--wait 0]
  *                                    [--concurrency 1] [--p-fail 0.05] [--p-cancel 0]
                                      [--mutate FAULT]
- *                                    [--max-events 20000] [--json out.json]
+ *                                    [--max-items 3] [--max-events 20000] [--json out.json]
+ *
+ * (d4), step 14's frontier: at every policy call, our policy as registered (the frontier snapshot,
+ * `codec/v2/frontier.ts`) and our policy with the full snapshot (the global decoder) are both asked
+ * on the frozen S, and must answer alike, a throw on one side only being a finding. The leg reports
+ * the most keys and reader calls the frontier policy made in one call, against the full snapshot's.
+ * `--max-items N` gives each fired slot 1–N items instead of 1–3, so a batch node at batch size 1
+ * runs more passes; the default reproduces every run from before.
  *
  * `--p-fail` raises the failure chance of every 4th behaviour, to make the races of
  * `--concurrency` frequent; `--mutate` plants a fault in our policy (a mutation check, see
  * `MUTATE`).
+ *
+ * (d5), step 12's rerun: the answering policy of ours keeps `decideSuccessors`' snapshot for the
+ * same settlement's `isFinished` (`policy.ts`), as registered. Every comparison and re-ask uses a
+ * second instance that reads afresh, so (d1) and (d4) compare at the S they name. (d5) checks the
+ * safety argument in `tasks/v2-seam-plan.md`: whenever our answering `isFinished` says true, the
+ * live rows at that moment must be final, by our fresh full-snapshot answer and by n8n's count; a
+ * miss is a finding. A reused false where n8n's fresh answer at the live rows is true is the safe
+ * direction, counted as stale and not as a disagreement. `--stale` injects the stalest snapshot a
+ * handler could legally read: our answering `decideSuccessors` reads the rows as they were the
+ * moment the settled step settled (taken after the store call that settled it, so a batch of
+ * created rows is whole), however much ran since; `isFinished` then reuses that.
  *
  * Needs `.n8n/` at the pin with patches 0001–0004 applied and `@n8n/engine` built
  * (`pnpm --filter @n8n/engine build`).
@@ -131,13 +149,19 @@ const CONCURRENCY = Math.max(1, Number(arg('concurrency', '1')));
 /** The share of runs into which a cancel on request is sent (n8n's `CancelExecutionService`). */
 const P_CANCEL = Number(arg('p-cancel', '0'));
 const MAX_EVENTS = Number(arg('max-events', '20000'));
+/** Items per fired slot are 1 .. MAX_ITEMS (3, every run from before). */
+const MAX_ITEMS = Number(arg('max-items', '3'));
 const JSON_OUT = arg('json', '');
 /**
  * A deliberate fault in our policy, to show the leg catches it (a mutation check, never a result):
  * `reverse` reverses both lists, `no-skip` drops every skip, `never-finish` answers `isFinished`
- * false, `finish-on-failed` answers it true on any failed row.
+ * false, `finish-on-failed` answers it true on any failed row, `cross-bind` hands our policy one
+ * graph object per execution, so a kept snapshot can cross from one handler to another (binding B
+ * of the safety argument broken).
  */
 const MUTATE = arg('mutate', '');
+/** Our answering `decideSuccessors` reads the rows as they were when the settled step settled (d5). */
+const STALE = process.argv.includes('--stale');
 
 // ---- corpus, as the differential reads it ----
 const files = [
@@ -147,7 +171,7 @@ const files = [
 const converter = new V1WorkflowConverter();
 
 type PolicyName = 'default' | 'ours';
-type Leg = 'd1' | 'd2' | 'd3' | 'error';
+type Leg = 'd1' | 'd2' | 'd3' | 'd4' | 'd5' | 'error';
 interface Finding { readonly leg: Leg; readonly entry: string; readonly behaviour: number; readonly order: number; readonly detail: string }
 const findings: Finding[] = [];
 const KEEP = 200;
@@ -187,6 +211,12 @@ const count = {
   suspended: 0, resumed: 0, cancelledRows: 0,
   /** Final rows past iteration 0 (later loop passes), and runs that have one. */
   laterPassRows: 0, runsWithLaterPass: 0, maxIteration: 0,
+  // (d4): the frontier policy against the full snapshot at every call's S
+  frontierDecideCompared: 0, frontierFinishCompared: 0, frontierDisagreements: 0,
+  frontierMaxKeys: 0, frontierMaxReads: 0, fullMaxKeys: 0, fullMaxReads: 0,
+  // (d5): the reused snapshot
+  finishReused: 0, finishFresh: 0, finishStale: 0, reusedTrue: 0, safetyViolations: 0,
+  staleDecides: 0, staleBehind: 0, overruns: 0,
 };
 
 const keyText = (k: V2StepKey) => `${k.nodeId}@${k.iteration}`;
@@ -235,9 +265,9 @@ interface RunRecord {
 /** Per handled event: whether the answering policy's `isFinished` said true in it. */
 const handling = new AsyncLocalStorage<{ saidFinished: boolean }>();
 
-/** Items for one output slot: 1–3 of them, fixed by the behaviour. */
+/** Items for one output slot: 1 .. MAX_ITEMS of them (1–3 by default), fixed by the behaviour. */
 function items(seed: number, nodeId: string, iteration: number, slot: number): unknown[] {
-  const n = 1 + (hash(seed, nodeId, iteration, 'items', slot) % 3);
+  const n = 1 + (hash(seed, nodeId, iteration, 'items', slot) % MAX_ITEMS);
   return Array.from({ length: n }, (_, i) => ({ json: { node: nodeId, iteration, slot, i } }));
 }
 
@@ -258,9 +288,10 @@ interface RunContext {
  * One run of n8n's handlers with `answering` deciding, and the other policy asked at every call
  * (d1). Returns what (d2) and (d3) compare.
  */
-async function runOnce(ctx: RunContext, answering: PolicyName, ours: V2SettlementPolicy): Promise<RunRecord> {
+async function runOnce(ctx: RunContext, answering: PolicyName, ours: V2SettlementPolicy, oursFresh: V2SettlementPolicy): Promise<RunRecord> {
   const { graph, behaviour, b, o, tag } = ctx;
   const executionId = `x-${answering}`;
+  shared.clear();
   const tickDraw = rng(hash(behaviour.seed, 'ticks', o));
   const storeOptions = {
     order: hash(behaviour.seed, 'store-order', o),
@@ -301,7 +332,16 @@ async function runOnce(ctx: RunContext, answering: PolicyName, ours: V2Settlemen
   };
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   let rowsAfterCancel = 0;
+  /** (d5) `--stale`: the rows as they were when each key settled, after the store call that settled it. */
+  const settledAt = new Map<string, { rows: MemoryStepRecord[]; version: number }>();
+  const SETTLED_NOW = new Set(['completed', 'skipped', 'failed', 'cancelled']);
   stepStore.onTransition = (row, from) => {
+    if (STALE && SETTLED_NOW.has(row.status)) {
+      const k = keyText(row);
+      // A microtask: the rest of a `createSteps` batch is inserted synchronously first, and every
+      // other store write waits for a macrotask (`pause`), so this is one instant of the store.
+      queueMicrotask(() => settledAt.set(k, { rows: stepStore.snapshot(executionId), version: stepStore.version }));
+    }
     if (row.status === 'waiting') {
       count.suspended++;
       pending.push({ queue: 'resume', stepId: row.id, key: { nodeId: row.nodeId, iteration: row.iteration } });
@@ -321,35 +361,50 @@ async function runOnce(ctx: RunContext, answering: PolicyName, ours: V2Settlemen
 
   // (d1): the answering policy decides; the other is asked at the same S.
   const calls: string[] = [];
-  const other = answering === 'default' ? ours : defaultSettlementPolicy;
+  // The other side and every re-ask read afresh: they answer at the S they are given.
+  const other = answering === 'default' ? oursFresh : defaultSettlementPolicy;
   const primary = answering === 'default' ? defaultSettlementPolicy : ours;
+  const reask = answering === 'default' ? defaultSettlementPolicy : oursFresh;
   const frozenReader = (S: readonly MemoryStepRecord[]) => settlementReaderFor(MemoryStepStore.frozen(S, { order: storeOptions.order }), executionId);
   const where = () => `[${answering} answering]`;
   const policy: V2SettlementPolicy = {
     async decideSuccessors(g, settled, reader) {
-      const S = stepStore.snapshot(reader.executionId);
+      const stale = STALE && answering === 'ours' ? settledAt.get(keyText(settled)) : undefined;
+      if (stale !== undefined) {
+        count.staleDecides++;
+        if (stale.version !== stepStore.version) count.staleBehind++;
+      }
+      const S = stale?.rows ?? stepStore.snapshot(reader.executionId);
       const v0 = stepStore.version;
       let answer: V2SuccessorDecisions;
       try {
-        answer = await primary.decideSuccessors(g, settled, reader);
+        answer = await primary.decideSuccessors(g, settled, stale === undefined ? reader : frozenReader(S));
       } catch (e) {
         calls.push(`decide ${keyText(settled)} threw ${errText(e)}`);
         throw e;
       }
       calls.push(`decide ${keyText(settled)} ${seqText(answer)}`);
-      const skew = stepStore.version !== v0;
-      const mine: Answer<V2SuccessorDecisions> = skew ? await attempt(() => primary.decideSuccessors(g, settled, frozenReader(S))) : { value: answer };
+      const skew = stale === undefined && stepStore.version !== v0;
+      const mine: Answer<V2SuccessorDecisions> = skew ? await attempt(() => reask.decideSuccessors(g, settled, frozenReader(S))) : { value: answer };
       if (skew && !('value' in mine && seqText(mine.value) === seqText(answer))) count.skewMoved++;
       const theirs = await attempt(() => other.decideSuccessors(g, settled, frozenReader(S)));
       recordDecide(ctx, S, settled, answering === 'default' ? mine : theirs, answering === 'default' ? theirs : mine, skew, where());
+      await compareSnapshots(ctx, S, `decideSuccessors(${keyText(settled)})`, (p) => p.decideSuccessors(g, settled, frozenReader(S)), (a) => seqText(a), where());
       return answer;
     },
     async isFinished(g, reader) {
       const S = stepStore.snapshot(reader.executionId);
       const v0 = stepStore.version;
       let answer: boolean;
+      let reads = 0;
+      const counted: V2SettlementReader = {
+        executionId: reader.executionId,
+        loadLatestStepSummaries: (ids) => { reads++; return reader.loadLatestStepSummaries(ids); },
+        loadStepSummariesByKeys: (keys) => { reads++; return reader.loadStepSummariesByKeys(keys); },
+        countSettledSteps: () => { reads++; return reader.countSettledSteps(); },
+      };
       try {
-        answer = await primary.isFinished(g, reader);
+        answer = await primary.isFinished(g, counted);
       } catch (e) {
         calls.push(`finished threw ${errText(e)}`);
         throw e;
@@ -359,11 +414,21 @@ async function runOnce(ctx: RunContext, answering: PolicyName, ours: V2Settlemen
         const h = handling.getStore();
         if (h !== undefined) h.saidFinished = true;
       }
-      const skew = stepStore.version !== v0;
-      const mine: Answer<boolean> = skew ? await attempt(() => primary.isFinished(g, frozenReader(S))) : { value: answer };
+      const reused = answering === 'ours' && reads === 0;
+      if (answering === 'ours') {
+        if (reused) count.finishReused++;
+        else count.finishFresh++;
+      }
+      // A reused answer rests on the snapshot of its decideSuccessors, not on S: it is not re-asked.
+      const skew = !reused && stepStore.version !== v0;
+      const mine: Answer<boolean> = skew ? await attempt(() => reask.isFinished(g, frozenReader(S))) : { value: answer };
       if (skew && !('value' in mine && mine.value === answer)) count.skewMoved++;
       const theirs = await attempt(() => other.isFinished(g, frozenReader(S)));
-      recordFinished(ctx, S, answering === 'default' ? mine : theirs, answering === 'default' ? theirs : mine, skew, where());
+      // The rows at return: a fresh read may have seen rows later than S; a reused answer made no
+      // store call, so nothing moved since S.
+      if (answering === 'ours' && answer) await checkSafety(ctx, g, stepStore.snapshot(executionId), executionId, reused, `${where()} reads ${reads}`);
+      recordFinished(ctx, S, answering === 'default' ? mine : theirs, answering === 'default' ? theirs : mine, skew, where(), reused);
+      await compareSnapshots(ctx, S, 'isFinished', (p) => p.isFinished(g, frozenReader(S)), String, where());
       return answer;
     },
   };
@@ -445,6 +510,48 @@ async function runOnce(ctx: RunContext, answering: PolicyName, ours: V2Settlemen
   };
 }
 
+/** A policy whose every call's reads are measured into `count` under `prefix`. */
+function measured(policy: V2SettlementPolicy, prefix: 'frontier' | 'full'): V2SettlementPolicy {
+  const wrap = (reader: V2SettlementReader): { reader: V2SettlementReader; done: () => void } => {
+    let reads = 0;
+    let keys = 0;
+    return {
+      reader: {
+        executionId: reader.executionId,
+        loadLatestStepSummaries: (ids) => { reads++; return reader.loadLatestStepSummaries(ids); },
+        loadStepSummariesByKeys: (asked) => { reads++; keys = Math.max(keys, asked.length); return reader.loadStepSummariesByKeys(asked); },
+        countSettledSteps: () => { reads++; return reader.countSettledSteps(); },
+      },
+      done: () => {
+        count[`${prefix}MaxKeys`] = Math.max(count[`${prefix}MaxKeys`], keys);
+        count[`${prefix}MaxReads`] = Math.max(count[`${prefix}MaxReads`], reads);
+      },
+    };
+  };
+  return {
+    async decideSuccessors(g, settled, reader) {
+      const w = wrap(reader);
+      try { return await policy.decideSuccessors(g, settled, w.reader); } finally { w.done(); }
+    },
+    async isFinished(g, reader) {
+      const w = wrap(reader);
+      try { return await policy.isFinished(g, w.reader); } finally { w.done(); }
+    },
+  };
+}
+
+/** (d4) at one call's S: the frontier policy against the full snapshot, `ask` putting the question to each. */
+async function compareSnapshots<T>(ctx: RunContext, S: readonly MemoryStepRecord[], what: string, ask: (p: V2SettlementPolicy) => Promise<T>, show: (a: T) => string, where: string): Promise<void> {
+  const local = await attempt(() => ask(frontierPolicy));
+  const global = await attempt(() => ask(fullPolicy));
+  if (what === 'isFinished') count.frontierFinishCompared++;
+  else count.frontierDecideCompared++;
+  const text = (a: Answer<T>) => ('error' in a ? `threw ${a.error.split(':')[0]}` : show(a.value));
+  if (text(local) === text(global)) return;
+  count.frontierDisagreements++;
+  addFinding({ leg: 'd4', entry: ctx.tag, behaviour: ctx.b, order: ctx.o, detail: `${where} ${what}: frontier ${text(local)}, full ${text(global)}\n      rows ${rowsText(S)}` });
+}
+
 function recordDecide(ctx: RunContext, S: readonly MemoryStepRecord[], settled: V2StepKey, d: Answer<V2SuccessorDecisions>, ours: Answer<V2SuccessorDecisions>, skew: boolean, where: string): void {
   count.decideCalls++;
   if (skew) count.skewedCalls++;
@@ -483,7 +590,23 @@ function recordDecide(ctx: RunContext, S: readonly MemoryStepRecord[], settled: 
   if (d.value.toQueue.length > 1 || d.value.toSkip.length > 1) count.decideOrdered++;
 }
 
-function recordFinished(ctx: RunContext, S: readonly MemoryStepRecord[], d: Answer<boolean>, ours: Answer<boolean>, skew: boolean, where: string): void {
+/**
+ * (d5) Our answering `isFinished` said true at the live rows S: S must be final, by our fresh
+ * full-snapshot answer and by n8n's count (the safety argument, `tasks/v2-seam-plan.md`).
+ */
+async function checkSafety(ctx: RunContext, g: V2Graph, S: readonly MemoryStepRecord[], executionId: string, reused: boolean, where: string): Promise<void> {
+  count.reusedTrue += reused ? 1 : 0;
+  const reader = () => settlementReaderFor(MemoryStepStore.frozen(S), executionId);
+  const fresh = await attempt(() => safetyPolicy.isFinished(g, reader()));
+  const theirs = await attempt(() => defaultSettlementPolicy.isFinished(g, reader()));
+  const ok = (a: Answer<boolean>) => 'value' in a && a.value;
+  if (ok(fresh) && ok(theirs)) return;
+  count.safetyViolations++;
+  const text = (a: Answer<boolean>) => ('error' in a ? `threw ${a.error}` : String(a.value));
+  addFinding({ leg: 'd5', entry: ctx.tag, behaviour: ctx.b, order: ctx.o, detail: `${where} isFinished true${reused ? ' (reused snapshot)' : ''} at rows that are not final: fresh full snapshot ${text(fresh)}, n8n's count ${text(theirs)}\n      rows ${rowsText(S)}` });
+}
+
+function recordFinished(ctx: RunContext, S: readonly MemoryStepRecord[], d: Answer<boolean>, ours: Answer<boolean>, skew: boolean, where: string, reused = false): void {
   count.finishCalls++;
   if (skew) count.skewedCalls++;
   if (S.some((r) => r.status === 'waiting')) count.waitingAtCall++;
@@ -517,6 +640,11 @@ function recordFinished(ctx: RunContext, S: readonly MemoryStepRecord[], d: Answ
     return;
   }
   count.finishCompared++;
+  // A reused false where the fresh answer at S is true: the safe direction (d5), not a disagreement.
+  if (reused && !('error' in d) && d.value && !ours.value) {
+    count.finishStale++;
+    return;
+  }
   if ('error' in d || d.value !== ours.value) {
     count.finishDisagreements++;
     addFinding({ leg: 'd1', entry: ctx.tag, behaviour: ctx.b, order: ctx.o, detail: detail() });
@@ -608,10 +736,24 @@ const onDiagnostic = (diag: SettlementDiagnostic) => {
   else if (diag.kind === 'error') count.oursErrors++;
   else if (diag.kind === 'race') count.oursRaceDiagnostics++;
 };
-const unmutated = createSettlementPolicy({ cache, onDiagnostic });
+const unmutated = createSettlementPolicy({ cache, onDiagnostic: (diag) => { if (diag.kind === 'snapshot' && diag.event === 'overrun') count.overruns++; onDiagnostic(diag); } });
+// The other side of (d1) and every re-ask: ours, reading afresh at the S it is given.
+const oursFresh = createSettlementPolicy({ cache, reuseSnapshot: false });
+// (d4): our policy's frontier snapshot and the full snapshot, measured, without diagnostics, fresh.
+const frontierPolicy = measured(createSettlementPolicy({ cache, reuseSnapshot: false }), 'frontier');
+const fullPolicy = measured(createSettlementPolicy({ cache, snapshot: 'full', reuseSnapshot: false }), 'full');
+// (d5): the judge of "final" at the live rows.
+const safetyPolicy = createSettlementPolicy({ cache, snapshot: 'full', reuseSnapshot: false });
+/** `cross-bind`: the first graph object seen per execution stands for every later one. */
+const shared = new Map<string, V2Graph>();
+const bound = (g: V2Graph, executionId: string): V2Graph => {
+  if (MUTATE !== 'cross-bind') return g;
+  if (!shared.has(executionId)) shared.set(executionId, g);
+  return shared.get(executionId)!;
+};
 const ours: V2SettlementPolicy = MUTATE === '' ? unmutated : {
   async decideSuccessors(g, settled, reader) {
-    const d = await unmutated.decideSuccessors(g, settled, reader);
+    const d = await unmutated.decideSuccessors(bound(g, reader.executionId), settled, reader);
     if (MUTATE === 'reverse') return { toQueue: [...d.toQueue].reverse(), toSkip: [...d.toSkip].reverse() };
     if (MUTATE === 'no-skip') return { toQueue: d.toQueue, toSkip: [] };
     return d;
@@ -622,10 +764,10 @@ const ours: V2SettlementPolicy = MUTATE === '' ? unmutated : {
       const latest = await reader.loadLatestStepSummaries(g.nodes.map((n) => n.id));
       if (Object.values(latest).some((r) => r.status === 'failed')) return true;
     }
-    return await unmutated.isFinished(g, reader);
+    return await unmutated.isFinished(bound(g, reader.executionId), reader);
   },
 };
-if (MUTATE !== '' && !['reverse', 'no-skip', 'never-finish', 'finish-on-failed'].includes(MUTATE)) throw new Error(`--mutate ${MUTATE}: unknown`);
+if (MUTATE !== '' && !['reverse', 'no-skip', 'never-finish', 'finish-on-failed', 'cross-bind'].includes(MUTATE)) throw new Error(`--mutate ${MUTATE}: unknown`);
 
 for (const file of files) {
   const wf = JSON.parse(readFileSync(file, 'utf8'));
@@ -652,8 +794,8 @@ for (const file of files) {
       const behaviour: Behaviour = { seed, pFail: b % 4 === 0 ? P_FAIL : 0, emptyTerminal: 0, pWait: P_WAIT };
       for (let o = 0; o < ORDERS; o++) {
         const ctx: RunContext = { tag, graph, behaviour, b, o };
-        const d = await runOnce(ctx, 'default', ours);
-        const mine = await runOnce(ctx, 'ours', ours);
+        const d = await runOnce(ctx, 'default', ours, oursFresh);
+        const mine = await runOnce(ctx, 'ours', ours, oursFresh);
         checkEnd(ctx, 'default', d);
         checkEnd(ctx, 'ours', mine);
         comparePair(ctx, d, mine);
@@ -664,7 +806,7 @@ for (const file of files) {
 
 const wall = (performance.now() - started) / 1000;
 console.log(`stamp: n8n@${n8nVersion} with patches 0001–0004; ${STAMP_FILES.map((f) => `${basename(f)} ${sha(f)}`).join(', ')}; libpetri ${libpetriVersion}${libpetriLinked ? ' (LINKED checkout)' : ' (registry)'}; node ${process.version}`);
-console.log(`corpus: workflows ${count.workflows}, entries ${count.entries}, accepted ${count.accepted}; behaviours ${BEHAVIOURS} x orders ${ORDERS}, pFail ${P_FAIL} on every 4th behaviour${P_WAIT > 0 ? `, pWait ${P_WAIT}` : ''}${P_CANCEL > 0 ? `, pCancel ${P_CANCEL}` : ''}, concurrency ${CONCURRENCY}`);
+console.log(`corpus: workflows ${count.workflows}, entries ${count.entries}, accepted ${count.accepted}; behaviours ${BEHAVIOURS} x orders ${ORDERS}, pFail ${P_FAIL} on every 4th behaviour${P_WAIT > 0 ? `, pWait ${P_WAIT}` : ''}${P_CANCEL > 0 ? `, pCancel ${P_CANCEL}` : ''}, concurrency ${CONCURRENCY}${STALE ? ', --stale' : ''}`);
 if (MUTATE !== '') console.log(`MUTATION CHECK: our policy carries the fault '${MUTATE}'; findings are expected, and nothing below is a result`);
 console.log(`runs ${count.runs} (${count.pairs} pairs), events handled ${count.events}; suspended ${count.suspended}, resumed ${count.resumed}, rows cancelled ${count.cancelledRows}; rows past iteration 0 ${count.laterPassRows} in ${count.runsWithLaterPass} runs (highest iteration ${count.maxIteration})`);
 console.log(`(d1) decideSuccessors: calls ${count.decideCalls}; compared (no failed or cancelled row) ${count.decideCompared} (${count.decideNonEmpty} non-empty, ${count.decideOrdered} with two or more keys in one list); disagreements ${count.decideDisagreements}; failure race ${count.decideRaces} (answers differ on ${count.decideRacesDiffer}), cancel race ${count.decideCancelRaces} (default plans on ${count.decideCancelRacesDefaultPlans})`);
@@ -677,6 +819,8 @@ for (const name of ['default', 'ours'] as const) {
 for (const name of ['default', 'ours'] as const) {
   console.log(`(race) ${name.padEnd(7)}: ended 'failed' through isFinished ${count.failedByIsFinished[name]}; 'failed' endings with lastStep the failed step ${count.failedLastStepFailed[name]}, a settled sibling ${count.failedLastStepSibling[name]}${P_CANCEL > 0 ? `; cancel sent ${count.cancelSent[name]}, won ${count.cancelWon[name]} (not 'cancelled' ${count.cancelWonNotCancelled[name]}, rows left queued or running ${count.cancelWonRowsLeftPending[name]}), rows created after it ${count.rowsCreatedAfterCancel[name]} in ${count.runsWithRowsAfterCancel[name]} runs` : ''}`);
 }
+console.log(`(d4) frontier vs full snapshot: decideSuccessors ${count.frontierDecideCompared}, isFinished ${count.frontierFinishCompared}; disagreements ${count.frontierDisagreements}; most per call: frontier ${count.frontierMaxKeys} keys in ${count.frontierMaxReads} reads, full ${count.fullMaxKeys} keys in ${count.fullMaxReads} reads${MAX_ITEMS !== 3 ? ` (maxItems ${MAX_ITEMS})` : ''}`);
+console.log(`(d5) reused snapshot: ours isFinished reused ${count.finishReused}, read afresh ${count.finishFresh}; stale (reused false, fresh true at S) ${count.finishStale}; ours said true ${count.reusedTrue} times on a reused snapshot; safety violations ${count.safetyViolations}${STALE ? `; --stale: decides from the rows at settlement ${count.staleDecides}, of which the store had moved on ${count.staleBehind}` : ''}; scoped-read overruns ${count.overruns}`);
 console.log(`wall clock ${wall.toFixed(1)} s`);
 const total = [...kept.values()].reduce((a, n) => a + n, 0);
 console.log(`findings ${total}${total > findings.length ? ` (${findings.length} kept, at most ${KEEP} per leg: ${[...kept].map(([l, n]) => `(${l}) ${n}`).join(', ')})` : ''}`);

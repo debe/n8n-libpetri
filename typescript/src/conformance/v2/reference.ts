@@ -133,6 +133,11 @@ export interface Behaviour {
    * from before master's `waiting`.
    */
   readonly pWait?: number;
+  /**
+   * The most steps a batch node runs (`1 + hash % maxPasses`); absent is 3, which reproduces every
+   * run from before. Raised to reach deep loops (`tasks/v2-seam-plan.md` step 14's frontier).
+   */
+  readonly maxPasses?: number;
 }
 
 /** One step's outcome: the row status and, when completed, its filled output slots. */
@@ -156,11 +161,11 @@ function outputArity(graph: V2Graph, nodeId: string): number {
 /**
  * What one step does, fixed by the behaviour: the same in every interleaving.
  *
- * A batch node runs `1 + hash % 3` steps. Every step before the last fills the loop slot, which is
- * `runBatchStep`'s `[null, slice]` (`execution/batch-step.ts`). The last step is terminal: it fills
- * the done slot (`[acc, null]`), or, with chance `emptyTerminal` per (behaviour, batch node), fills
- * nothing (`[null, null]`, a loop that ends with nothing accumulated). A batch step never fails
- * here. Any other step fails with chance `pFail`, and otherwise fills each output slot with
+ * A batch node runs `1 + hash % maxPasses` steps (`maxPasses` 3 by default). Every step before the
+ * last fills the loop slot, which is `runBatchStep`'s `[null, slice]` (`execution/batch-step.ts`).
+ * The last step is terminal: it fills the done slot (`[acc, null]`), or, with chance
+ * `emptyTerminal` per (behaviour, batch node), fills nothing (`[null, null]`, a loop that ends with
+ * nothing accumulated). A batch step never fails here. Any other step fails with chance `pFail`, and otherwise fills each output slot with
  * chance 0.7. A step that completes suspends first with chance `pWait`: an executor returns a wait
  * or an error, never both, so a failing step does not suspend, and a batch step, which the engine
  * runs itself (`runBatchStep` returns outputs), never does.
@@ -169,9 +174,9 @@ function outputArity(graph: V2Graph, nodeId: string): number {
  * `emptyTerminal` and `pWait` 0 every outcome is the spike's.
  */
 export function outcome(graph: V2Graph, node: V2Node, iteration: number, behaviour: Behaviour): Outcome {
-  const { seed, pFail, emptyTerminal, pWait = 0 } = behaviour;
+  const { seed, pFail, emptyTerminal, pWait = 0, maxPasses = 3 } = behaviour;
   if (node.type === 'batch') {
-    const passes = 1 + (hash(seed, node.id, 'passes') % 3);
+    const passes = 1 + (hash(seed, node.id, 'passes') % maxPasses);
     if (iteration < passes - 1) return { status: 'completed', filled: [false, true] };
     const empty = emptyTerminal > 0 && rng(hash(seed, node.id, 'empty-terminal'))() < emptyTerminal;
     return { status: 'completed', filled: empty ? [false, false] : [true, false] };

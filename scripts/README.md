@@ -9,6 +9,7 @@ ignored `conformance-results/` directory.
 | `verify-patch.sh` | Reset the patch scope, apply both integration patches and optionally build it. |
 | `check-n8n-drift.sh` | Read-only: dry-run the patches against the pin, `stable`, `beta`, the newest release and master, and list what touched the seam or engine v2 since the pin. |
 | `n8n-pin.sh` | The pin (`N8N_TAG`, `N8N_COMMIT`), sourced by the three scripts above. |
+| `pg-stamp.sh` | Docker preflight and the Postgres stamp for the integration scopes, sourced by `bootstrap-n8n.sh` and `run-conformance.sh`. |
 | `run-conformance.sh` | Run selected n8n suites under the legacy or Petri scheduler and compare junit results. |
 | `testbed/` | Boot the real n8n editor with the Petri scheduler installed, seed two demo workflows, and compare both engines in a live server. See [`testbed/README.md`](testbed/README.md). |
 
@@ -43,7 +44,7 @@ Options:
 | `--skip-test` | Do not create a baseline. |
 | `--full-install` | Install the whole n8n monorepo. |
 | `--allow-dirty` | Permit tracked changes in `.n8n/`; the result is not a clean baseline. |
-| `--scope=NAME` | Select `execution-engine`, `core`, `workflow`, `cli`, `engine`, `compat` or `cli-v2`. |
+| `--scope=NAME` | Select `execution-engine`, `core`, `workflow`, `cli`, `engine`, `compat`, `cli-v2`, `engine-int` or `compat-int`. |
 
 Environment variables:
 
@@ -65,6 +66,8 @@ Scopes and baselines:
 | `engine` | `@n8n/engine`, unit config | `baseline-engine.junit.xml` |
 | `compat` | `@n8n/node-engine-compatibility`, unit config | `baseline-compat.junit.xml` |
 | `cli-v2` | `n8n`, `src/modules/engine-v2` and `src/services/__tests__/engine-v2-dispatcher` | `baseline-cli-v2.junit.xml` |
+| `engine-int` | `@n8n/engine`, integration config (`test:integration`) | `baseline-engine-int.junit.xml` |
+| `compat-int` | `@n8n/node-engine-compatibility`, integration config | `baseline-compat-int.junit.xml` |
 
 The CLI scope needs a wider install and build because its vitest setup resolves workspace
 packages from built `dist` output.
@@ -74,8 +77,34 @@ package's own `test` script, whose `vitest.config.ts` already excludes
 `**/*.integration.test.ts`. That leaves out the engine's 6 integration files (5 start Postgres
 through testcontainers, one needs none but shares the config) and compat's
 `m1-acceptance.integration.test.ts` (16 cases, Postgres). `bootstrap-n8n.sh --help` lists them.
-None of the three constructs a `WorkflowExecute`, so their `libpetri` leg is not applicable and
-their `legacy` leg is a neutrality leg.
+None of the three constructs a `WorkflowExecute`, so they have no v1 scheduler leg; their
+`legacy` leg is a neutrality leg, and their `libpetri` leg is the settlement leg (below).
+
+`engine-int` and `compat-int` run those integration files: the same packages'
+`test:integration` script and `vitest.integration.config.ts`. They need Docker, because n8n's own
+testcontainers code starts a Postgres per file; nothing in it is changed. They run with
+`--maxWorkers=1`, so one file and one Postgres at a time, which keeps a small Docker VM within its
+memory. That changes scheduling, not the case set. Every baseline and leg writes
+`<label>.pg-stamp.txt` through `pg-stamp.sh`: the Docker server, each image the tests name with
+its image id and `postgres -V`, and the containers Docker started during the run (streamed from
+`docker events`). Both scripts refuse to start when `docker info` does not answer. Like `engine`
+and `compat`, their `legacy` leg is a neutrality leg and their `libpetri` leg is the settlement leg.
+
+**The settlement leg** (`tasks/v2-seam-plan.md` step 10). On the five engine v2 scopes,
+`--engines=libpetri` registers the net-backed `SettlementPolicy` through patch 0004's
+`setSettlementPolicy()`, from a generated setup shim (`.n8n-libpetri-v2-setup.mjs` and
+`vitest.libpetri-v2.config.mts` in the package, both in `.n8n/.git/info/exclude`). The shim
+imports the registry from the instance the scope's tests build their runtime from: the engine's
+`src` for `engine` and `engine-int`, the `@n8n/engine` package (its `dist`) for `compat`,
+`compat-int` and `cli-v2`. The hook is the tsup entry `n8n-v2-vitest-setup`
+(`typescript/dist/n8n-v2-vitest-setup.js`, `SETTLEMENT_HOOK`). The leg runs the package script's
+command line with its `--config` replaced, because vitest refuses a second `--config`. Besides
+the junit and the matrix against the baseline it writes `<label>.ledger.jsonl` (per case, how
+often the policy was entered) and `<label>.entered.md`, whose headline is policy-entering cases
+passed; every case that never entered is labelled. `engine-int` and `compat-int` settle steps
+through `createEngineRuntime`, so a leg there that enters in no case is F5 and fails the run.
+`--settlement-mode=shadow|primary-shadowed` runs the shadow modes and labels the leg
+`libpetri-<scope>-<mode>`.
 
 Common reruns:
 
@@ -150,9 +179,10 @@ Options:
 |---|---|
 | `--engines=legacy,libpetri` | Comma-separated scheduler selection. |
 | `--budget=N` | Requested Petri concurrency budget. Default 1. |
-| `--scope=NAME` | `execution-engine`, `core`, `workflow`, `cli`, `engine`, `compat`, `cli-v2` or `all`. |
+| `--scope=NAME` | `execution-engine`, `core`, `workflow`, `cli`, `engine`, `compat`, `cli-v2`, `engine-int`, `compat-int` or `all`. |
 | `--skip-patch` | Use the existing patched tree. |
 | `--typecheck` | Typecheck and build the patch before running. |
+| `--settlement-mode=M` | The settlement leg's mode: `primary` (default), `shadow` or `primary-shadowed`. |
 
 `all` covers execution-engine, core and workflow. CLI is separate because its complete
 build takes materially longer.

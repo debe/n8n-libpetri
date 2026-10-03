@@ -30,6 +30,12 @@
  *      empty) equals `countSettledSteps ≥ countExpectedSettledSteps`. A row set with a failed row
  *      is F3's named race (a failure between the planning read and `hasFailedSteps`): `isFinished`
  *      is false there, and it is counted, with how n8n's count test answered, not compared.
+ *  (f) frontier (`tasks/v2-seam-plan.md` step 14): at every reported S and every reached (S, s),
+ *      the frontier decode against the global decoder (`compareFrontier`): the marking and row
+ *      counts from S's frontier alone, and the policy's `decideFromRows` / `finishedFromRows` on the
+ *      frontier (plus s's row) against the same on S with the full snapshot. `--max-passes N` lets
+ *      a batch node run up to N steps (default 3, every run from before), so the frontier is
+ *      smaller than S.
  *
  * A disagreement is a finding: it is printed with a reproduction (entry, trigger, b, o and the
  * row set), never smoothed over. Results are settlement-level evidence, not conformance numbers
@@ -37,7 +43,7 @@
  *
  *   npx tsx tasks/v2-differential.mts [--behaviours 20] [--orders 20] [--net-behaviours B]
  *                                     [--net-orders O] [--limit N] [--empty-terminal 0.25]
- *                                     [--wait 0] [--json out.json]
+ *                                     [--wait 0] [--max-passes 3] [--json out.json]
  *
  * `--net-behaviours` / `--net-orders` (default: all) bound which (b, o) pairs also run the net for
  * legs (b) and (c); leg (a) runs on every pair.
@@ -59,7 +65,7 @@ import { fileURLToPath } from 'node:url';
 import { compile } from '../typescript/src/compiler/index.ts';
 import type { CompiledWorkflow } from '../typescript/src/compiler/index.ts';
 import { v2Actions } from '../typescript/src/conformance/v2/binder.ts';
-import { compareFinished, compareLockstep, comparePoint, compareScoped, compareState, netPlanAt } from '../typescript/src/conformance/v2/differential.ts';
+import { compareFinished, compareFrontier, compareLockstep, comparePoint, compareScoped, compareState, netPlanAt } from '../typescript/src/conformance/v2/differential.ts';
 import type { PlanKeys, PlanSequence } from '../typescript/src/conformance/v2/differential.ts';
 import { graphToDescription } from '../typescript/src/conformance/v2/graph.ts';
 import type { V2Graph } from '../typescript/src/conformance/v2/graph.ts';
@@ -112,6 +118,7 @@ const NET_ORDERS = Number(arg('net-orders', String(ORDERS)));
 const LIMIT = Number(arg('limit', '100000'));
 const EMPTY_TERMINAL = Number(arg('empty-terminal', '0.25'));
 const P_WAIT = Number(arg('wait', '0'));
+const MAX_PASSES = Number(arg('max-passes', '3'));
 const JSON_OUT = arg('json', '');
 
 // --- corpus, as the spike reads it ----------------------------------------------------------------
@@ -123,7 +130,7 @@ const files = [
 const converter = new V1WorkflowConverter();
 
 interface Finding {
-  readonly leg: 'a' | 'b' | 'c' | 'a″' | 'a‴';
+  readonly leg: 'a' | 'b' | 'c' | 'a″' | 'a‴' | 'f';
   readonly entry: string;
   readonly behaviour: number;
   readonly order: number;
@@ -149,6 +156,8 @@ const count = {
   finishedLoopRunning: 0, finishedRowsOwed: 0,
   /** Failed S (the race), and those where n8n's count test says finished (the failed step was the last owed). */
   finishedRaces: 0, finishedRacesCountTrue: 0,
+  // leg (f): every reported S, and every reached (S, s)
+  frontierStates: 0, frontierPairs: 0, frontierCompressed: 0, frontierDisagreements: 0, frontierMaxRows: 0, frontierMaxFrontierRows: 0, maxIteration: 0,
 };
 /** Findings kept per leg; the rest are counted, not stored. */
 const KEEP_FINDINGS = 200;
@@ -210,7 +219,7 @@ for (const file of files) {
     for (let b = 0; b < BEHAVIOURS; b++) {
       const seed = hash(file, fired ?? '', 'behaviour', b);
       const pFail = b % 4 === 0 ? 0.05 : 0; // a quarter of the behaviours let a node fail, as in the spike
-      const behaviour = { seed, pFail, emptyTerminal: EMPTY_TERMINAL, pWait: P_WAIT };
+      const behaviour = { seed, pFail, emptyTerminal: EMPTY_TERMINAL, pWait: P_WAIT, ...(MAX_PASSES !== 3 ? { maxPasses: MAX_PASSES } : {}) };
       for (let o = 0; o < ORDERS; o++) {
         // (a) every state of the reference run
         let t0 = performance.now();
@@ -218,6 +227,21 @@ for (const file of files) {
         // The status each row had before it was cancelled, by key: `queued` or `waiting`.
         const lastStatus = new Map<string, string>();
         const cancelledFrom = new Map<string, string>();
+        const frontier = (rows: readonly ReferenceRow[], settled?: { nodeId: string; iteration: number }) => {
+          if (settled === undefined) count.frontierStates++;
+          else count.frontierPairs++;
+          const f = compareFrontier(compiled, graph, rows, settled);
+          if (f.frontierRows < f.rows) count.frontierCompressed++;
+          count.frontierMaxRows = Math.max(count.frontierMaxRows, f.rows);
+          count.frontierMaxFrontierRows = Math.max(count.frontierMaxFrontierRows, f.frontierRows);
+          for (const r of rows) count.maxIteration = Math.max(count.maxIteration, r.iteration);
+          if (f.agree) return;
+          count.frontierDisagreements++;
+          addFinding({
+            leg: 'f', entry: tag, behaviour: b, order: o, rows,
+            detail: `${settled === undefined ? 'S' : `settled ${settled.nodeId}@${settled.iteration}`}: ${f.problems.join('\n      ')}`,
+          });
+        };
         run = simulate(reference, graph, behaviour, o, {
           onState: (rows) => {
             count.states++;
@@ -255,6 +279,8 @@ for (const file of files) {
                 detail: `isFinished ${fin.error !== null ? `threw: ${fin.error}` : String(fin.net)}, countSettled ${fin.settled} >= countExpected ${String(fin.expected)} ${String(fin.reference)}${fin.failed ? ' (a failed row)' : ''}`,
               });
             }
+            // (f) the frontier at S
+            frontier(rows);
             // (a) R(S)
             const v = compareState(compiled, reference, graph, loops, rows);
             if (v.agree) return;
@@ -269,6 +295,7 @@ for (const file of files) {
           // (a″) every (S, s) the handler reaches
           onSettled: (rows, settled) => {
             count.scopedPairs++;
+            frontier(rows, settled);
             if (rows.some((r) => r.status === 'waiting')) count.scopedWaiting++;
             const v = compareScoped(compiled, reference, graph, loops, rows, settled, netPlanAt(compiled, rows));
             if (v.halted) {
@@ -344,6 +371,7 @@ console.log(`(b) cancelled on failed pairs, reference status before -> the net's
 console.log(`(c) firing:   net firings ${count.netFirings}, row-set points ${count.points}; disagreements ${count.pointDisagreements} (CodecError ${count.pointCodecErrors}, marking differs ${count.pointMarkingDiffs})`);
 console.log(`(a″) scoped:  reached (S, s) ${count.scopedPairs} (${count.scopedNonEmpty} with a non-empty decision, ${count.scopedOrdered} with two or more keys in one list, ${count.scopedWaiting} beside a waiting row, ${count.scopedHalted} on a failed S, of which ${count.scopedRaces} where unguarded decideSuccessors is non-empty: F2's named race, not compared); disagreements ${count.scopedDisagreements} (CodecError ${count.scopedCodecErrors})`);
 console.log(`(a‴) finished: states ${count.finishedStates}: compared (no failed row) ${count.finishedCompared}, finished by both ${count.finishedBoth}; disagreements ${count.finishedDisagreements} (net only ${count.finishedNetOnly}, count test only ${count.finishedReferenceOnly}; by n8n's count: ${count.finishedLoopRunning} with a loop not ended (expected undefined), ${count.finishedRowsOwed} with fewer rows settled than expected; CodecError ${count.finishedCodecErrors}); with a failed row ${count.finishedRaces}: F3's named race, isFinished false, not compared (n8n's count test true on ${count.finishedRacesCountTrue})`);
+console.log(`(f) frontier: S ${count.frontierStates}, (S, s) ${count.frontierPairs}; frontier smaller than S at ${count.frontierCompressed}; largest S ${count.frontierMaxRows} rows, largest frontier ${count.frontierMaxFrontierRows} rows; highest iteration ${count.maxIteration}${MAX_PASSES !== 3 ? ` (maxPasses ${MAX_PASSES})` : ''}; disagreements ${count.frontierDisagreements}`);
 console.log(`wall clock ${wall.toFixed(1)} s (legs (a), (a″) and (a‴) together ${s(time.a)}): net runs ${s(time.net)}, leg (c) ${s(time.c)}`);
 const totalFindings = [...kept.values()].reduce((a, n) => a + n, 0);
 console.log(`findings ${totalFindings}${totalFindings > findings.length ? ` (${findings.length} kept, at most ${KEEP_FINDINGS} per leg: ${[...kept].map(([l, n]) => `(${l}) ${n}`).join(', ')})` : ''}`);

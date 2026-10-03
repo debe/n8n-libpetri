@@ -4,14 +4,20 @@ Guidance for Claude Code when working in the n8n-libpetri repository.
 
 ## Project overview
 
-n8n-libpetri is an alternative intra-workflow scheduler for n8n, registered through the seam the
-two patches under `patches/n8n/` add. It models an execution as a Coloured Time Petri Net built
+n8n-libpetri is an alternative intra-workflow scheduler for n8n, registered through the seams the
+four patches under `patches/n8n/` add. It models an execution as a Coloured Time Petri Net built
 on [libpetri](https://github.com/debe/libpetri) `typescript/`, so the scheduling model is
 available to analysis as well as to execution. n8n keeps node execution, persistence, hooks,
 webhooks and queue mode. There is no n8n source fork: `.n8n/` is a gitignored clone at a pinned
-commit, and the patches add an extension point rather than changing behaviour — patch 0001
-extracts n8n's existing loop as `StackScheduler` behind a `WorkflowScheduler` interface, patch
-0002 adds the registry. With nothing registered, n8n runs its own loop exactly as before.
+commit, and the patches add extension points rather than changing behaviour:
+- v1 (n8n's default engine): patch 0001 extracts n8n's existing loop as `StackScheduler` behind a
+  `WorkflowScheduler` interface, and patch 0002 adds the registry. `PetriScheduler` runs the net.
+- engine v2 (`packages/@n8n/engine`, primary since ADR 0013): patch 0003 extracts the settlement
+  decision as a `SettlementPolicy` (`decideSuccessors` + `isFinished` over a read-only reader),
+  and patch 0004 adds an engine-side registry read only in `createEngineRuntime`. The net-backed
+  policy is `createSettlementPolicy` in `src/settlement/` (ADR 0014).
+
+With nothing registered, n8n runs its own loop and its own planner exactly as before.
 
 The architecture, the model (emission rule, per-node gadget, join gadget, retries, halt,
 budget, marking codec) and the design principles live in the root
@@ -31,16 +37,28 @@ budget, marking codec) and the design principles live in the root
   `profile: 'v1'` / `--profile v1` explicitly. v1 is frozen, not deleted: it stays tested, its
   net is pinned byte-identical by `tests/compiler/v1-identity.test.ts`, and it gets no new
   features.
+- **The engine v2 policy has no fallback to n8n's planner** (ADR 0014, plan decision 8). A compile
+  refusal, a `CodecError` or a malformed store answer is a `settlement policy error` and a throw,
+  and the execution stays `running` (divergence row 38). Named races (a failed row, a cancelled
+  row with no failed one) answer ∅ and not finished, each with a divergence row. Patches 0003/0004
+  keep n8n's decision core byte-identical; the golden accepts only the handler hash 0003 gives
+  (`GOLDEN_SEAM_PATCHED_DIST`). Never re-record the golden to make a change pass.
 - An agent's `ai_tool` dispatch is a round in the net, not a host loop (ADR 0008). Only `ai_tool`
   reaches the scheduler; every other `ai_*` connection is resolved by `supplyData` inside
   `runNode` and the compiler is right not to model it.
-- Reporting rule: only a minority of n8n's cases drive the scheduler loop — 44 of the
-  execution-engine suite's 1657 (`src/conformance/classify.ts`), 44 of `packages/core`'s 2124,
-  and none of `packages/workflow`'s or `packages/cli`'s. Headline numbers are loop-driving
+- Reporting rule: only a minority of n8n's cases drive the scheduler loop. At the pin `944afe5`
+  that is 45 of the execution-engine suite's 1,756 (`src/conformance/classify.ts`), 45 of
+  `packages/core`'s 2,258, and none of `packages/workflow`'s or `packages/cli`'s
+  (`docs/conformance-master.md`). Headline numbers are loop-driving
   cases passed; pure-helper cases are stated separately. A scope whose tests never construct a
   scheduler is a patch-neutrality leg, not an engine result — say which one a number is.
   The live testbed (`scripts/testbed/`, `docs/testbed.md`) is neither: it is an integration
   harness, and its wall clocks and data-equivalence results are never conformance numbers.
+  Engine v2 has four kinds, never pooled (`tasks/v2-seam-plan.md` decision 12): **neutrality
+  legs** (patched, nothing registered, against the unpatched baseline), **policy-entering cases
+  passed** (counted per case by the entered counter, `conformance/v2/entered.ts`; cases that
+  never enter are labelled, not counted), **settlement evidence** (golden, differential, handler
+  legs; not conformance numbers) and **integration results** (the `--v2` testbed).
 
 ## Build and test commands
 
@@ -61,7 +79,10 @@ libpetri requirement IDs (`IO-015`, `EXEC-003`, `MOD-010`, …).
 
 ### libpetri
 
-`libpetri@^7.0.0`, an ordinary registry dependency. The verifier's **surface** dates from 6.0.0,
+`libpetri@^7.0.0`, an ordinary registry dependency; the lock pins 7.0.0 (`registry.npmjs.org`),
+and `node_modules/libpetri` is the installed package, not a link. The engine v2 seam's stamps
+(`tasks/v2-seam-plan.md`, steps 2–14: differential, golden, handler legs, settlement legs on
+Postgres) record 7.0.0 from the registry, not linked. The neutrality legs load no libpetri. The verifier's **surface** dates from 6.0.0,
 and 7.0.0 is the floor for a soundness fix (below). The verifier calls that surface directly: `sinkPlacesWhen` conditional sinks [VER-014], the linear
 state-equation bound [VER-015], the state equation with firing counters [VER-016], bounded
 enumeration [VER-017] with `enumerationMaxClasses`, the state-equation and firing-bound phases
@@ -86,11 +107,8 @@ later in FIFO order within their priority, and `stateEquation(true)` now gives a
 by `all()` / `atLeast()` an upper bound in the HORN encoding, so its scripts change. Measured
 2026-09-17 against released 6.0.0: suite 1075/1075 across 79 files, typecheck clean, and the
 200-template survey (`--profile v1`, as all surveys were then) compiles 200/200 with no timeouts.
-Compiling is not verifying. At libpetri 7.0.0 (2026-10-02) the v1 survey decides at least one
-check on 121 of the 200; the other 79 come back all `unknown` (k = 4, `--smt-fallback off`). The
-default engineV2 survey compiles 91, decides something on 85, and refuses 109 (52 of them for
-having several triggers, which the survey does not enumerate yet). Nothing moved for the
-shapes we have — that is not a general result, and a new timed shape is not covered by it.
+Nothing moved for the shapes we have — that is not a general result, and a new timed shape is
+not covered by it.
 
 **Why 7.0.0 is the floor.** 7.0.0 fixed [VER-020] AC4: with enumeration off, the structural
 deadlock shortcut could prove a net that is dead at its initial marking. Our whole-net
@@ -108,6 +126,11 @@ us: we compile no `matchSpec` and no environment places (`assertMatchBlind`). Me
 
 Nothing moved. Terminal places ([EXEC-042]) and `terminationReason()` are not used yet.
 
+Compiling is not verifying. At libpetri 7.0.0 (2026-10-02) the v1 survey decides at least one
+check on 121 of the 200; the other 79 come back all `unknown` (k = 4, `--smt-fallback off`). The
+default engineV2 survey compiles 91, decides something on 85, and refuses 109 (52 of them for
+having several triggers, which the survey does not enumerate yet).
+
 `scripts/link-libpetri.sh` points `node_modules/libpetri` at a sibling libpetri checkout, for
 the periods when this repository is again the first consumer of an unreleased surface. It is
 **not** the current state, and a number produced against a linked tree is not comparable with
@@ -120,6 +143,13 @@ scripts/bootstrap-n8n.sh      # clone n8n @ pinned commit into .n8n/, pnpm via c
 scripts/run-conformance.sh    # run the execution-engine suite under both engines, emit the matrix
 scripts/verify-patch.sh       # re-apply patches to the pinned commit; fails on drift
 ```
+
+Engine v2 scopes (`--scope=`): `engine`, `compat`, `cli-v2` (unit, no Postgres) and `engine-int`,
+`compat-int` (Postgres through testcontainers; Docker must be up, `scripts/pg-stamp.sh` records
+the image id). `--engines=legacy` on these is the neutrality leg; `--engines=libpetri` is the
+settlement leg (policy registered, `--settlement-mode=primary|shadow|primary-shadowed`). The
+`-int` legs were measured with `--maxWorkers=1` on a 0.95 GB Docker VM. `verify-patch.sh` must
+leave `.n8n` at the detached pin with 0001–0004 applied and no commits or branches.
 
 Pinned n8n: master `944afe5` (2026-10-02; ADR 0013 puts engine v2 first, and it moves on
 master), defined once in `scripts/n8n-pin.sh`.
@@ -153,7 +183,16 @@ scripts/testbed/n8n-testbed.sh          # real n8n editor on the net at http://1
 scripts/testbed/n8n-testbed.sh --queue  # EXECUTIONS_MODE=queue: a producer and a worker on Redis
 scripts/testbed/diff-engines.sh         # both engines in a live server, compared on data and order
 scripts/testbed/browser-check.sh        # drive the editor, screenshot the canvas
+scripts/testbed/n8n-testbed.sh --v2 --settlement=primary   # engine v2 with the net-backed policy
+scripts/testbed/diff-engines-v2.sh      # off, primary, shadow, primary-shadowed, compared over SQL
 ```
+
+`--v2` needs Docker: `scripts/testbed/pg.sh` runs the engine's Postgres data plane
+(`postgres:18.4-alpine`, 384 MB cap); n8n's main database stays sqlite. The preload's v2 branch
+resolves `@n8n/engine` from `packages/cli`, refuses to boot without `setSettlementPolicy`, and
+registers on the main thread only; the launcher gates on `settlement policy registered`. State is
+`.testbed/v2/`. v2-only workflows live in `scripts/testbed/workflows-v2/`, outside `workflows/`,
+so `v1-identity` does not fingerprint them.
 
 The engine reaches a running server through an `--import` preload (`scripts/testbed/preload.mjs`),
 not the vitest shim. In queue mode the **worker** gets the same preload and the launcher gates on
@@ -199,7 +238,15 @@ proof — and never widen a check's claim past its query.
   rounds (ADR 0008). `payloads.ts` is the token vocabulary the codec shares.
 - `codec.ts`, `codec/` — the marking codec: n8n's execution state ↔ a marking (ADR 0005).
 - `n8n/` — `host.ts` mirrors patch 0001's interfaces; `adapter.ts` turns an n8n `Workflow`
-  into a compiler description.
+  into a compiler description. `v2-host.ts` mirrors patches 0003/0004's types, and
+  `v2-graph.ts` turns an engine v2 `WorkflowGraph` into a description (a configless `v1-node`
+  is an opaque step).
+- `settlement/` — the net-backed engine v2 `SettlementPolicy` (ADR 0014): `policy.ts`
+  (`createSettlementPolicy`, snapshot reuse per settlement), `rows.ts` (the scoped read),
+  `scope.ts` (`candidateKeys`, n8n's per-key order; `isFinished`), `compile-cache.ts`,
+  `shadow.ts` and `register.ts`. `codec/v2/frontier.ts` decodes the bounded frontier. Package
+  entries `n8n-v2` and `n8n-v2-vitest-setup`. Plan, falsifiers and deviations:
+  `tasks/v2-seam-plan.md`.
 - `verify/` — properties over the compiled net; counterexample → node path. `families/` has one
   module per property family, and `route.ts` decides how each query is answered.
 - `conformance/` — trace recorder, differ, harness, junit → matrix report.

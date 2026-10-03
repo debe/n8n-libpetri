@@ -20,6 +20,32 @@ All notable changes to this project are documented here. The format follows
     The v1 net is byte-identical (`tests/fixtures/v1-fingerprint.json`).
 
 ### Added
+- **The net answers engine v2's settlement decision (ADR 0014).**
+  - Patches 0003/0004 extract engine v2's settlement decision as a `SettlementPolicy` and let it
+    be registered. `createSettlementPolicy` (`src/settlement/`) answers it from the net. The
+    handler, the stores, step execution, failures and cancellation stay n8n's.
+  - Neutrality: with nothing registered, n8n's compat, cli-v2, engine-int and compat-int tests
+    are identical per case to the unpatched baselines, and engine's are identical on the
+    baseline's 376 cases plus the 25 that 0003/0004 add (Docker Postgres for the integration
+    scopes).
+  - Policy-entering cases: engine-int 10/10 and compat-int 16/16.
+  - Settlement evidence: the handler leg runs n8n's own patched handlers on our in-memory
+    stores. Sequentially, 0 disagreements in 1,086,514 decisions and 686,920 completions. Under
+    concurrency, failure and cancel stress, 0 disagreements outside the named races, which are
+    counted, not compared: there the two policies differ by design (divergences #36, #37).
+  - Live testbed (`--v2`, an integration result): 19 manual executions per leg, one at a time,
+    in-process. Every execution equals n8n's own planner, including a 1,000-pass loop, and shadow
+    agrees on 6,066 of 6,066 settlements. Webhook `runEnd`, concurrent executions and a live
+    cancel race were not exercised.
+  - Costs, measured in the testbed: at most 2 round trips per settlement there, flat latency over
+    the loop, policy p95 4.3 ms. A loop that overruns the probe makes 4 reads in one call by
+    design; that did not occur there.
+  - Three falsifiers changed the design on the way:
+    - F3: `isFinished` is false on any failed row;
+    - F7: a configless `v1-node` is an opaque step;
+    - F4: a bounded frontier read, plus one snapshot per settlement backed by a written safety
+      argument.
+
 - **Master's `waiting` step status and `cancelPendingSteps` in the v2 planner** (ADR 0013 (a)).
   `decodeStepRows` reads a `waiting` row as a run in flight, and a row cancelled after a failure
   as before. The reference loop can suspend and resume steps (`Behaviour.pWait`, differential

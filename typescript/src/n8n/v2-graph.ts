@@ -30,7 +30,13 @@
  *   flags, never its data (decision 3). Positions are synthesised in graph order: v2 reads none,
  *   and the v1 declaration order they feed is not part of an engineV2 net.
  *
- * A graph the converter could not have produced is refused with a {@link V2GraphError} rather
+ * - a `v1-node` with no `config` at all as an opaque step of type {@link V2_OPAQUE_V1_NODE_TYPE},
+ *   ports from its edges. The converter never writes one; engine v2 accepts one, and
+ *   `@n8n/engine`'s own tests build them. The settlement policy answers for any graph the engine
+ *   accepts, so it follows the engine's contract here, not the converter's
+ *   (`tasks/v2-seam-plan.md`, "F7 at step 10").
+ *
+ * Any other graph the converter could not have produced is refused with a {@link V2GraphError} rather
  * than given a meaning. The shapes n8n's own validator refuses (`validateExecutableGraph`,
  * `validateLoops`) are **not** checked here beyond what building a description needs: they are
  * step 4's `CompileError`s, so the stage-1 and stage-2 inputs meet one refusal surface.
@@ -82,6 +88,16 @@ export interface V2GraphInput {
 
 /** `MANUAL_TRIGGER_TYPE`: what `toV1TriggerNode` stands in for a trigger that carries no config. */
 export const MANUAL_TRIGGER_TYPE = 'n8n-nodes-base.manualTrigger';
+
+/**
+ * The node type of an opaque `v1-node`: one written with no `config` at all, as `@n8n/engine`'s
+ * own tests write them (`{ id, name, type: 'v1-node' }`). Engine v2 runs such a step without
+ * reading its config, so the description names no n8n node type for it. The `@n8n/engine.`
+ * prefix is the one {@link V2_STEP_NODE_TYPES} uses, so no n8n node type collides with it: in
+ * particular it is never `n8n-nodes-base.merge` or Split In Batches, so neither the Merge-mode
+ * refusal nor batch identification can apply to it.
+ */
+export const V2_OPAQUE_V1_NODE_TYPE = '@n8n/engine.v1-node';
 
 /** A graph {@link graphToDescription} cannot turn into a description: not one the converter emits. */
 export class V2GraphError extends Error {
@@ -194,7 +210,16 @@ function describe(node: V2Node, slots: SlotUse, index: number): { node: NodeDesc
       };
     }
     case 'v1-node': {
-      // `toGraphNode` always writes a `V1NodeStepConfig`; without one there is no node type.
+      // A `v1-node` with no config at all is an opaque step (`tasks/v2-seam-plan.md`, "F7 at
+      // step 10"): engine v2 accepts it, since `GraphNode.config` is optional and the engine
+      // persists it without inspecting it, and v2's settlement rule reads only edges, slots and
+      // the step type. Its ports are its edges', as every other node's are. The converter never
+      // emits one, so no converted graph reaches this branch.
+      if (node.config === undefined) {
+        return { node: { ...common, type: V2_OPAQUE_V1_NODE_TYPE, typeVersion: 1 }, shape };
+      }
+      // `toGraphNode` always writes a `V1NodeStepConfig`; a config that is present but not one
+      // names no node type, and is not a shape the converter or the engine's own tests write.
       if (!isV1NodeStepConfig(node.config)) {
         throw new V2GraphError(`graphToDescription: v1 node '${node.name}' has no v1 node config (nodeType, typeVersion, parameters, continueOnFail)`);
       }

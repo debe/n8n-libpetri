@@ -13,8 +13,8 @@ export { createShadowPolicy } from './settlement/shadow.js';
 export type { ShadowOptions, ShadowReport } from './settlement/shadow.js';
 export { canonicalJson, compileGraph, createCompileCache, graphKey, SettlementCompileRefusal } from './settlement/compile-cache.js';
 export type { CompileCache, CompileCacheOptions, CompileCacheStats, CompiledGraph } from './settlement/compile-cache.js';
-export { readSnapshot, SettlementSnapshotError } from './settlement/rows.js';
-export type { Snapshot } from './settlement/rows.js';
+export { readFullSnapshot, readSnapshot, SettlementSnapshotError } from './settlement/rows.js';
+export type { Snapshot, SnapshotScope } from './settlement/rows.js';
 export type {
   V2SettlementPolicy, V2SettlementReader, V2SettlementRegistry, V2StepKey, V2StepSummary, V2SuccessorDecisions,
 } from './n8n/v2-host.js';

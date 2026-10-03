@@ -1,0 +1,343 @@
+{
+  "name": "V2 If Switch Diamond",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "7c2e1f2a-0b02-4d7f-8b20-000000000001",
+      "name": "When clicking 'Execute workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "7c2e1f2a-0b02-4d7f-8b20-000000000002a",
+              "name": "n",
+              "value": "={{ [0, 1, 2, 3, 4, 5] }}",
+              "type": "array"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "7c2e1f2a-0b02-4d7f-8b20-000000000002",
+      "name": "Make Numbers",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        160,
+        0
+      ],
+      "notes": "Six items: three take If's false branch, and the true branch splits again at the Switch, so every Merge input receives data."
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "n",
+        "options": {}
+      },
+      "id": "7c2e1f2a-0b02-4d7f-8b20-000000000009",
+      "name": "Split Out Numbers",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        300,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7c2e1f2a-0b02-4d7f-8b20-0000000000c1",
+              "leftValue": "={{ $json.n % 2 }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7c2e1f2a-0b02-4d7f-8b20-000000000003",
+      "name": "Is Even?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "7c2e1f2a-0b02-4d7f-8b20-0000000000c2",
+                    "leftValue": "={{ $json.n }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "lt"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Small"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "7c2e1f2a-0b02-4d7f-8b20-0000000000c3",
+                    "leftValue": "={{ $json.n }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "gte"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Large"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7c2e1f2a-0b02-4d7f-8b20-000000000004",
+      "name": "Route by Size",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        660,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "7c2e1f2a-0b02-4d7f-8b20-0000000000a1",
+              "name": "route",
+              "value": "small",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "7c2e1f2a-0b02-4d7f-8b20-000000000005",
+      "name": "Small",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "7c2e1f2a-0b02-4d7f-8b20-0000000000a2",
+              "name": "route",
+              "value": "large",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "7c2e1f2a-0b02-4d7f-8b20-000000000006",
+      "name": "Large",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "7c2e1f2a-0b02-4d7f-8b20-0000000000a3",
+              "name": "route",
+              "value": "odd",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "7c2e1f2a-0b02-4d7f-8b20-000000000007",
+      "name": "Odd",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "id": "7c2e1f2a-0b02-4d7f-8b20-000000000008",
+      "name": "Merge Routes",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1100,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "Make Numbers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Even?": {
+      "main": [
+        [
+          {
+            "node": "Route by Size",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Odd",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Size": {
+      "main": [
+        [
+          {
+            "node": "Small",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Large",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Small": {
+      "main": [
+        [
+          {
+            "node": "Merge Routes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Large": {
+      "main": [
+        [
+          {
+            "node": "Merge Routes",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Odd": {
+      "main": [
+        [
+          {
+            "node": "Merge Routes",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Make Numbers": {
+      "main": [
+        [
+          {
+            "node": "Split Out Numbers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out Numbers": {
+      "main": [
+        [
+          {
+            "node": "Is Even?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

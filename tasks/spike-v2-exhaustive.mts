@@ -22,7 +22,7 @@
  * it checks that decoding the rows in reverse order gives the same plan. The reference is n8n's
  * compiled code, loaded from the pinned checkout's `dist`.
  *
- * Two legs of `tasks/v2-seam-plan.md` decision 13 run beside it:
+ * Two legs of `tasks/v2-seam-plan.md` decision 13, and step 14's frontier, run beside it:
  * - (a″) key-scoped decision: at every explored state, for each pending `step:settled` of a
  *   completed or skipped row s (the reached (S, s), deduplicated by row set and s),
  *   `scopePlan(R(S), candidateKeys(s))` against what `StepSettledHandler` decides there (∅ after a
@@ -34,6 +34,11 @@
  *   countExpectedSettledSteps` (`compareFinished`). A row set with a failed row is F3's named race:
  *   `isFinished` is false there, and it is counted (`finishedRaces`, with `finishedRacesCountTrue`
  *   where n8n's count test says finished), not compared.
+ * - (f) frontier (step 14): at every distinct row set and every reached (S, s), the frontier decode
+ *   against the global decoder (`compareFrontier`): marking and row counts from S's frontier alone,
+ *   and the policy's `decideFromRows` / `finishedFromRows` on the frontier against the full
+ *   snapshot. The frontier is smaller than S only once a batch node is past pass 2, so it needs
+ *   `maxPasses` of 4 or more.
  *
  * Graphs: the committed golden's graphs, plus every corpus entry n8n accepts with at most
  * MAX_NODES nodes and output arity at most 3.
@@ -53,7 +58,7 @@ const { graphToDescription } = await import(`${root}/typescript/src/conformance/
 const { referenceAnswer } = await import(`${root}/typescript/src/conformance/v2/reference.ts`);
 const { decodeStepRows } = await import(`${root}/typescript/src/codec/v2/step-rows.ts`);
 const { planFromMarking } = await import(`${root}/typescript/src/codec/v2/plan.ts`);
-const { planKeys, compareScoped, compareFinished, netPlanAt } = await import(`${root}/typescript/src/conformance/v2/differential.ts`);
+const { planKeys, compareScoped, compareFinished, compareFrontier, netPlanAt } = await import(`${root}/typescript/src/conformance/v2/differential.ts`);
 const { reachableOf } = await import(`${root}/typescript/src/conformance/v2/reference.ts`);
 const pkg = resolve(root, '.n8n/packages/@n8n');
 const req = createRequire(`${pkg}/node-engine-compatibility/package.json`);
@@ -101,6 +106,15 @@ function explore(tag: string, graph: any, total: any) {
     total[`${scope}Dis`]++;
     example(`(a″ ${scope}) rows ${rowKey(rows)} settled ${kid(settled)}\n   net ${v.error ?? seqStr(v.net)}\n   handler ${seqStr(v.reference)}`);
   };
+  /** (f) at one S, or one (S, s). */
+  const frontier = (rows: Row[], settled?: Row) => {
+    const f = compareFrontier(compiled, graph, rows, settled === undefined ? undefined : { nodeId: settled.nodeId, iteration: settled.iteration });
+    total[settled === undefined ? 'frontierSets' : 'frontierPairs']++;
+    if (f.frontierRows < f.rows) total.frontierCompressed++;
+    if (f.agree) return;
+    total.frontierDis++;
+    example(`(f) rows ${rowKey(rows)}${settled === undefined ? '' : ` settled ${kid(settled)}`}\n   ${f.problems.join('\n   ')}`);
+  };
   const handlerPairs = new Set<string>();
   /** R(S) from the net per distinct row set, decoded once by `check` and read by the (a″) pairs. */
   const netByRows = new Map<string, any>();
@@ -141,6 +155,7 @@ function explore(tag: string, graph: any, total: any) {
     if (checked.has(rk)) return; checked.add(rk);
     const net = netPlanAt(compiled, rows);
     netByRows.set(rk, net);
+    frontier(rows);
     const R = keyStr(planKeys(referenceAnswer(ref, graph, loops, rows)));
     let P: string;
     try { P = keyStr(planKeys(planFromMarking(compiled, decodeStepRows(compiled, rows)))); }
@@ -189,6 +204,7 @@ function explore(tag: string, graph: any, total: any) {
       if (handlerPairs.has(pair)) continue;
       handlerPairs.add(pair);
       scoped(s.rows, r, netByRows.get(rk), 'scoped');
+      frontier(s.rows, r);
     }
     const clone = (): St => ({ rows: s.rows.map((r) => ({ ...r, filledOutputSlots: [...r.filledOutputSlots] })), settle: [...s.settle], ready: [...s.ready] });
     // ready events: claim, then outcome
@@ -254,6 +270,8 @@ const total: any = {
   finishedSets: 0, finishedCompared: 0, finishedBoth: 0, finishedDis: 0, finishedNetOnly: 0, finishedReferenceOnly: 0, finishedLoopRunning: 0, finishedRowsOwed: 0, finishedCodecErrors: 0,
   finishedRaces: 0, finishedRacesCountTrue: 0,
   finishedExamples: [] as string[],
+  // (f): every distinct row set, and every reached (S, s)
+  frontierSets: 0, frontierPairs: 0, frontierCompressed: 0, frontierDis: 0,
 };
 const golden = JSON.parse(readFileSync(`${root}/typescript/tests/fixtures/v2/settlement-golden.json`, 'utf8'));
 for (const e of golden.entries) if (e.graph.nodes.length <= MAX_NODES + 3) explore(e.id, e.graph, total);

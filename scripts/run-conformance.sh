@@ -16,13 +16,23 @@
 #                                                          baseline-compat.junit.xml, legacy-compat
 #   cli-v2            n8n           src/modules/engine-v2, src/services/__tests__/engine-v2-dispatcher
 #                                                          baseline-cli-v2.junit.xml, legacy-cli-v2
+#   engine-int        @n8n/engine, integration config (test:integration)
+#                                                          baseline-engine-int.junit.xml, legacy-engine-int
+#   compat-int        @n8n/node-engine-compatibility, integration config
+#                                                          baseline-compat-int.junit.xml, legacy-compat-int
 #   all               execution-engine, then core, then workflow, in one run
+#
+# engine-int and compat-int are the same packages' integration configs. They need Docker:
+# n8n's own testcontainers code starts a Postgres per file, unmodified. They run with
+# --maxWorkers=1 (one Postgres at a time), and every leg writes <label>.pg-stamp.txt with the
+# Postgres server version and the images Docker started (scripts/pg-stamp.sh). Like engine and
+# compat, their legacy leg is a neutrality leg and their libpetri leg is the settlement leg.
 #
 # engine, compat and cli-v2 are the engine v2 scopes that need no Postgres; what their unit
 # configs leave out, and why, is listed in bootstrap-n8n.sh's header. They carry no v1
-# scheduler seam (none of them constructs a WorkflowExecute), so their libpetri leg is **not
-# applicable**; their legacy leg is a neutrality leg: the patched tree with nothing registered
-# against the unpatched baseline. compat and cli-v2 load n8n-core and @n8n/engine from dist,
+# scheduler seam (none of them constructs a WorkflowExecute), so their libpetri leg is the
+# settlement leg below, not a PetriScheduler leg; their legacy leg is a neutrality leg: the
+# patched tree with nothing registered against the unpatched baseline. compat and cli-v2 load n8n-core and @n8n/engine from dist,
 # so like `cli` they rebuild their chain first and the legs run against the patched dists.
 #
 # `cli` needs its own install and build (see bootstrap-n8n.sh --scope=cli): its vitest loads
@@ -94,20 +104,43 @@
 # patch neutrality, not of the engine, and the script says so per leg instead of leaving the
 # junit to be read as an engine result.
 #
-# Exit status: non-zero when the legacy run is not identical to the baseline, when the
-# libpetri run regresses a case its comparison leg passes, or when a run fails to produce
-# junit.
+# The settlement leg (engine v2, tasks/v2-seam-plan.md step 10). On the engine v2 scopes
+# (engine, engine-int, compat, compat-int, cli-v2) there is no v1 scheduler, and the libpetri
+# leg is the **settlement leg** instead: the net-backed SettlementPolicy registered through
+# patch 0004's setSettlementPolicy() from a second generated shim (.n8n-libpetri-v2-setup.mjs,
+# SETTLEMENT_HOOK below), on the module instance the scope's tests build their runtime from —
+# `src/execution/settlement-policy-registry.ts` for @n8n/engine's own tests, the `@n8n/engine`
+# package (its dist) for compat and cli. The leg's label is libpetri-<scope> (with
+# --settlement-mode=M other than primary: libpetri-<scope>-M). It writes, besides the junit and
+# the matrix against the unpatched baseline:
+#   <label>.ledger.jsonl  one record per case: how often the policy was entered in it, per file
+#                         whether it registered and what ran outside every case, every error
+#   <label>.entered.md    the junit joined with the ledger: the headline is policy-entering
+#                         cases passed, and every case that never entered is labelled as such
+# Registering is not entering (F5). engine-int and compat-int build runtimes through
+# createEngineRuntime and settle steps, so a leg there with no entered case exits non-zero; on
+# engine, compat and cli-v2 no case settles a step through such a runtime (cli-v2 mocks
+# @n8n/engine), the count is reported and the leg is evidence of neutrality with the policy
+# registered, not of the policy. Neither kind is a conformance number for engine v1.
 #
-# Flags: --skip-patch --typecheck --engines=legacy,libpetri --budget=N --scope=NAME -h|--help
+# Exit status: non-zero when the legacy run is not identical to the baseline, when the
+# libpetri run regresses a case its comparison leg passes, when a settlement leg that must
+# enter the policy never did, or when a run fails to produce junit.
+#
+# Flags: --skip-patch --typecheck --engines=legacy,libpetri --budget=N --scope=NAME
+#        --settlement-mode=primary|shadow|primary-shadowed -h|--help
 # Env:   N8N_DIR (default <repo>/.n8n), N8N_TEST_FILTER (overrides the scope's path filters;
 #        space-separated, each one a vitest path filter),
-#        LIBPETRI_HOOK (default <repo>/typescript/dist/n8n-vitest-setup.js)
+#        LIBPETRI_HOOK (default <repo>/typescript/dist/n8n-vitest-setup.js),
+#        SETTLEMENT_HOOK (default <repo>/typescript/dist/n8n-v2-vitest-setup.js)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 N8N_DIR="${N8N_DIR:-$ROOT/.n8n}"
 RESULTS="$ROOT/conformance-results"
 CLI="$ROOT/typescript/src/conformance/cli.ts"
+# shellcheck source=pg-stamp.sh
+. "$ROOT/scripts/pg-stamp.sh"
 
 # ---------------------------------------------------------------------------------------------
 # HOOK (milestone M2): the libpetri engine is wired in by a vitest setup shim the script
@@ -129,11 +162,15 @@ LIBPETRI_HOOK="${LIBPETRI_HOOK:-$ROOT/typescript/dist/n8n-vitest-setup.js}"
 LIBPETRI_SHIM_REL="packages/core/.n8n-libpetri-setup.mjs"
 LIBPETRI_CFG_REL="packages/core/vitest.libpetri.config.mts"
 LIBPETRI_BASE_CFG=./vite.config
+# The settlement leg's hook: the tsup entry `n8n-v2-vitest-setup`.
+SETTLEMENT_HOOK="${SETTLEMENT_HOOK:-$ROOT/typescript/dist/n8n-v2-vitest-setup.js}"
+SETTLEMENT_CLI="$ROOT/typescript/src/conformance/v2/entered-cli.ts"
 # ---------------------------------------------------------------------------------------------
 
-SKIP_PATCH=0; TYPECHECK=0; ENGINES="legacy,libpetri"; BUDGET=1; SCOPE=execution-engine
+SKIP_PATCH=0; TYPECHECK=0; ENGINES="legacy,libpetri"; BUDGET=1; SCOPE=execution-engine; SETTLEMENT_MODE=primary
 for arg in "$@"; do
   case "$arg" in
+    --settlement-mode=*) SETTLEMENT_MODE="${arg#--settlement-mode=}" ;;
     --skip-patch) SKIP_PATCH=1 ;;
     --typecheck)  TYPECHECK=1 ;;
     --engines=*)  ENGINES="${arg#--engines=}" ;;
@@ -145,10 +182,13 @@ for arg in "$@"; do
 done
 
 # scope_table <name> — sets SCOPE_PKG / SCOPE_DIR / SCOPE_FILTER / SCOPE_SUFFIX / SCOPE_SEAM /
-# SCOPE_BUILD (the turbo target to rebuild before the legs, empty for none) and FILTER_ARGS.
+# SCOPE_BUILD (the turbo target to rebuild before the legs, empty for none) and FILTER_ARGS,
+# plus SCOPE_SCRIPT (the package script, `test` unless set), SCOPE_ARGS (vitest flags after the
+# filters) and SCOPE_PG (1: the suite starts Postgres through testcontainers; see pg-stamp.sh).
 # Kept identical to the one in bootstrap-n8n.sh: a leg and the baseline it is compared to
 # must be the same package and the same filter, or the matrix compares two case sets.
 scope_table() {
+  SCOPE_SCRIPT=test; SCOPE_ARGS=; SCOPE_PG=0
   case "$1" in
     execution-engine) SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=src/execution-engine; SCOPE_SUFFIX=;           SCOPE_SEAM=alias;   SCOPE_BUILD= ;;
     core)             SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=;                     SCOPE_SUFFIX=-core;      SCOPE_SEAM=alias;   SCOPE_BUILD= ;;
@@ -158,7 +198,14 @@ scope_table() {
     compat)           SCOPE_PKG=@n8n/node-engine-compatibility; SCOPE_DIR=packages/@n8n/node-engine-compatibility; SCOPE_FILTER=; SCOPE_SUFFIX=-compat; SCOPE_SEAM=none; SCOPE_BUILD=@n8n/node-engine-compatibility ;;
     # vitest path filters are substrings of the file path; the dispatcher's test is under __tests__.
     cli-v2)           SCOPE_PKG=n8n;          SCOPE_DIR=packages/cli;      SCOPE_FILTER="src/modules/engine-v2 src/services/__tests__/engine-v2-dispatcher"; SCOPE_SUFFIX=-cli-v2; SCOPE_SEAM=none; SCOPE_BUILD=n8n ;;
-    *) echo "unknown --scope: $1 (execution-engine, core, workflow, cli, engine, compat, cli-v2, all)" >&2; exit 2 ;;
+    # The integration configs (`test:integration`, vitest.integration.config.ts). One file at a
+    # time: each Postgres file starts its own container, and --maxWorkers=1 keeps it to one
+    # Postgres at a time on a small Docker VM. It changes scheduling, not the case set.
+    engine-int)       SCOPE_PKG=@n8n/engine;  SCOPE_DIR=packages/@n8n/engine; SCOPE_FILTER=;                  SCOPE_SUFFIX=-engine-int; SCOPE_SEAM=none;  SCOPE_BUILD=@n8n/engine
+                      SCOPE_SCRIPT=test:integration; SCOPE_ARGS=--maxWorkers=1; SCOPE_PG=1 ;;
+    compat-int)       SCOPE_PKG=@n8n/node-engine-compatibility; SCOPE_DIR=packages/@n8n/node-engine-compatibility; SCOPE_FILTER=; SCOPE_SUFFIX=-compat-int; SCOPE_SEAM=none; SCOPE_BUILD=@n8n/node-engine-compatibility
+                      SCOPE_SCRIPT=test:integration; SCOPE_ARGS=--maxWorkers=1; SCOPE_PG=1 ;;
+    *) echo "unknown --scope: $1 (execution-engine, core, workflow, cli, engine, compat, cli-v2, engine-int, compat-int, all)" >&2; exit 2 ;;
   esac
   # Where the generated shim and the generated vitest config live, and which config they
   # extend: n8n-core's is `./vite.config`, packages/cli's is `./vitest.config`.
@@ -168,12 +215,34 @@ scope_table() {
   SCOPE_FILTER="${N8N_TEST_FILTER:-$SCOPE_FILTER}"
   # One vitest positional argument per filter; none at all is the package's whole suite.
   read -r -a FILTER_ARGS <<< "$SCOPE_FILTER"
+  read -r -a SCOPE_ARG_LIST <<< "$SCOPE_ARGS"
+}
+# settlement_table <name> — the settlement leg's columns, which bootstrap-n8n.sh does not need:
+#   SETTLE_SEAM      where the shim imports @n8n/engine's registry from: `src` (the package's own
+#                    tests load the engine from source), `package` (`@n8n/engine`, i.e. its dist),
+#                    or empty (no engine v2 in the scope: no settlement leg)
+#   SETTLE_ENTERS    1: the scope builds runtimes through createEngineRuntime and settles steps,
+#                    so a leg that enters the policy in no case is F5 and fails the run
+#   SETTLE_BASE_CFG  the vitest config the scope's script runs, which the leg's config extends
+settlement_table() {
+  SETTLE_SEAM=; SETTLE_ENTERS=0; SETTLE_BASE_CFG=./vitest.config
+  case "$1" in
+    engine)     SETTLE_SEAM=src ;;
+    engine-int) SETTLE_SEAM=src;     SETTLE_ENTERS=1; SETTLE_BASE_CFG=./vitest.integration.config ;;
+    compat)     SETTLE_SEAM=package ;;
+    compat-int) SETTLE_SEAM=package; SETTLE_ENTERS=1; SETTLE_BASE_CFG=./vitest.integration.config ;;
+    cli-v2)     SETTLE_SEAM=package ;;
+  esac
 }
 case "$SCOPE" in
   all) SCOPES=(execution-engine core workflow) ;;
   *)   scope_table "$SCOPE"; SCOPES=("$SCOPE") ;;
 esac
 
+case "$SETTLEMENT_MODE" in
+  primary|shadow|primary-shadowed) ;;
+  *) echo "--settlement-mode must be primary, shadow or primary-shadowed, got '$SETTLEMENT_MODE'" >&2; exit 2 ;;
+esac
 case "$BUDGET" in
   ''|*[!0-9]*) echo "--budget must be a positive integer, got '$BUDGET'" >&2; exit 2 ;;
   0)           echo "--budget must be at least 1" >&2; exit 2 ;;
@@ -209,12 +278,29 @@ run_suite() {
   # the package root). `pnpm --filter <pkg> run test <path>` passes the path filter to vitest;
   # an empty filter is passed as no argument at all, which is the package's whole suite.
   # N8N_LIBPETRI_BUDGET is read by setupN8nVitest() in the shim; the legacy leg ignores it.
-  (cd "$N8N_DIR" && CI=true N8N_EXECUTION_ENGINE="$engine" N8N_LIBPETRI_BUDGET="$BUDGET" \
-      N8N_LIBPETRI_DIAGNOSTICS="$diagnostics" \
-      pnpm --filter "$SCOPE_PKG" run test ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} "$@") \
-    > "$RESULTS/$label.test.log" 2>&1 || rc=$?
+  [ "$SCOPE_PG" -eq 0 ] || pg_watch_begin "$RESULTS/$label.pg-events.txt"
+  # SUITE_SH (the settlement leg): the package script's own command line with its --config
+  # replaced, run through `pnpm exec sh -c` — vitest refuses a second --config, and the
+  # integration scripts already carry one.
+  if [ -n "${SUITE_SH:-}" ]; then
+    (cd "$N8N_DIR" && CI=true N8N_EXECUTION_ENGINE="$engine" \
+        pnpm --filter "$SCOPE_PKG" exec sh -c "$SUITE_SH \"\$@\"" sh ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} \
+          ${SCOPE_ARG_LIST[@]+"${SCOPE_ARG_LIST[@]}"} "$@") \
+      > "$RESULTS/$label.test.log" 2>&1 || rc=$?
+  else
+    (cd "$N8N_DIR" && CI=true N8N_EXECUTION_ENGINE="$engine" N8N_LIBPETRI_BUDGET="$BUDGET" \
+        N8N_LIBPETRI_DIAGNOSTICS="$diagnostics" \
+        pnpm --filter "$SCOPE_PKG" run "$SCOPE_SCRIPT" ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} \
+          ${SCOPE_ARG_LIST[@]+"${SCOPE_ARG_LIST[@]}"} "$@") \
+      > "$RESULTS/$label.test.log" 2>&1 || rc=$?
+  fi
+  pg_watch_end
   [ -f "$junit" ] || die "$label: vitest produced no junit.xml (rc=$rc); see $RESULTS/$label.test.log"
   mv "$junit" "$RESULTS/$label.junit.xml"
+  if [ "$SCOPE_PG" -eq 1 ]; then
+    pg_stamp "$N8N_DIR/$SCOPE_DIR" "$RESULTS/$label.pg-events.txt" "$RESULTS/$label.pg-stamp.txt"
+    log "$label: Postgres stamp → $RESULTS/$label.pg-stamp.txt (server $(grep -o 'PostgreSQL) [0-9.]*' "$RESULTS/$label.pg-stamp.txt" | sed 's/PostgreSQL) //' | paste -sd, -))"
+  fi
   if [ "$diagnostics" -eq 1 ]; then
     # The shim's one-per-worker registration line is not a diagnostic; everything else with
     # the prefix is one the engine chose to emit.
@@ -309,6 +395,134 @@ CFG
   log "libpetri: shim $shim → $hook_url"
 }
 
+# write_settlement_shim — generate the settlement leg's setup shim and vitest config (see the
+# header). Both are listed in .n8n/.git/info/exclude, like the v1 shim.
+SETTLE_SHIM_NAME=.n8n-libpetri-v2-setup.mjs
+SETTLE_CFG_NAME=vitest.libpetri-v2.config.mts
+write_settlement_shim() {
+  local shim="$N8N_DIR/$SCOPE_DIR/$SETTLE_SHIM_NAME" cfg="$N8N_DIR/$SCOPE_DIR/$SETTLE_CFG_NAME" hook_url
+  local registry_from policy_from
+  hook_url=$(node -p 'require("node:url").pathToFileURL(process.argv[1]).href' "$SETTLEMENT_HOOK")
+  exclude_in_clone "$SCOPE_DIR/$SETTLE_SHIM_NAME" "$SCOPE_DIR/$SETTLE_CFG_NAME"
+  # Which instance of the registry: the one createEngineRuntime reads in this scope's tests.
+  # @n8n/engine's own tests import the runtime from src (relative imports, no alias), so the
+  # registry is the source file; the compat package and packages/cli resolve `@n8n/engine` to
+  # its `main`, dist/index.js (cli's workspaceDistExternals marks it external), so it is the
+  # package. Registering on the other one is accepted and never read — F5, which the ledger
+  # shows as a leg in which no case entered the policy.
+  case "$SETTLE_SEAM" in
+    src)     registry_from='./src/execution/settlement-policy-registry.ts'; policy_from='./src/execution/settlement-policy.ts' ;;
+    package) registry_from='@n8n/engine'; policy_from='@n8n/engine' ;;
+    *)       die "write_settlement_shim: scope $SCOPE has no settlement seam" ;;
+  esac
+  cat > "$shim" <<SHIM
+// Generated by n8n-libpetri/scripts/run-conformance.sh — do not edit, do not commit (listed in
+// .git/info/exclude). Runs as a vitest setupFile in every $SCOPE_PKG test file of the settlement
+// leg: registers the net-backed SettlementPolicy on @n8n/engine's registry ($SETTLE_SEAM:
+// $registry_from) when N8N_SETTLEMENT_POLICY=libpetri, and records per case how often it
+// was entered (N8N_SETTLEMENT_LEDGER). The engine is imported dynamically inside beforeAll, as in
+// the v1 shim, so a test file's own vi.mock of '@n8n/engine' is in place first; such a file is
+// recorded as not registered, with the reason, never silently.
+import { relative } from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, expect } from 'vitest';
+import { createSettlementVitestSession } from '${hook_url}';
+
+const session = createSettlementVitestSession();
+let file = '';
+let registry = null;
+
+// vitest 5 hands hooks a fixture context, which must be destructured: no positional suite.
+// The file is junit's classname, the test path relative to the package root (vitest's root).
+beforeAll(async () => {
+  file = relative(process.cwd(), String(expect.getState().testPath ?? ''));
+  if (session.engine !== 'libpetri') return;
+  let reason;
+  try {
+    const reg = await import('$registry_from');
+    const pol = await import('$policy_from');
+    const candidate = {
+      setSettlementPolicy: reg.setSettlementPolicy,
+      getSettlementPolicy: reg.getSettlementPolicy,
+      resetSettlementPolicy: reg.resetSettlementPolicy,
+      defaultSettlementPolicy: pol.defaultSettlementPolicy,
+    };
+    if (typeof candidate.setSettlementPolicy !== 'function' || typeof candidate.getSettlementPolicy !== 'function') {
+      reason = 'the imported module has no setSettlementPolicy/getSettlementPolicy (patch 0004 missing, or mocked)';
+    } else {
+      registry = candidate;
+    }
+  } catch (error) {
+    reason = 'import failed: ' + String(error && error.message).split('\\n')[0];
+  }
+  session.registerFile(file, registry, reason);
+});
+beforeEach(({ task }) => { session.beginCase(task); });
+afterEach(({ task }) => { session.endCase(task); });
+afterAll(() => {
+  session.endFile(file);
+  if (registry !== null && typeof registry.resetSettlementPolicy === 'function') registry.resetSettlementPolicy();
+});
+SHIM
+  cat > "$cfg" <<CFG
+import { mergeConfig } from 'vitest/config';
+import base from '$SETTLE_BASE_CFG';
+export default mergeConfig(base, { test: { setupFiles: ['./$SETTLE_SHIM_NAME'] } });
+CFG
+  log "settlement: shim $shim ($SETTLE_SEAM) → $hook_url"
+}
+
+# settlement_script — the scope's package script with its --config replaced by the settlement
+# config (appended when it names none): the command line the leg runs instead of the script.
+settlement_script() {
+  node -e '
+    const [pkgJson, name, cfg] = process.argv.slice(1);
+    const script = require(pkgJson).scripts[name];
+    if (typeof script !== "string") { console.error("no script " + name + " in " + pkgJson); process.exit(1); }
+    if (/[;&|`$]/.test(script)) { console.error("script " + name + " is not a plain command line: " + script); process.exit(1); }
+    const re = /--config[ =]\S+/;
+    process.stdout.write(re.test(script) ? script.replace(re, "--config " + cfg) : script + " --config " + cfg);
+  ' "$N8N_DIR/$SCOPE_DIR/package.json" "$SCOPE_SCRIPT" "$SETTLE_CFG_NAME"
+}
+
+# run_settlement_leg <label> — the settlement leg over the current scope (see the header).
+run_settlement_leg() {
+  # SUITE_SH is local, so run_suite sees it (dynamic scope) and no later leg does.
+  local label=$1 ledger="$RESULTS/$1.ledger.jsonl" rc=0 expect=() SUITE_SH=
+  [ -f "$SETTLEMENT_HOOK" ] || { log "settlement: skipped — hook not present: $SETTLEMENT_HOOK (run npm run build in typescript/)"; return 0; }
+  # The engine dist has to carry patch 0004 for the package seam: setSettlementPolicy is
+  # exported from it, and createEngineRuntime reads it.
+  if [ "$SETTLE_SEAM" = package ] \
+     && ! grep -q getSettlementPolicy "$N8N_DIR/packages/@n8n/engine/dist/runtime/create-engine-runtime.js" 2>/dev/null; then
+    log "settlement: skipped — packages/@n8n/engine/dist does not read the patch 0004 registry; build the patched tree first"
+    status=1; return 0
+  fi
+  write_settlement_shim
+  rm -f "$ledger"
+  SUITE_SH=$(settlement_script) || die "settlement: cannot derive the leg's command line from $SCOPE_PKG's $SCOPE_SCRIPT script"
+  log "== settlement leg $label (net-backed SettlementPolicy, mode $SETTLEMENT_MODE): $SUITE_SH"
+  export N8N_SETTLEMENT_POLICY=libpetri N8N_SETTLEMENT_MODE="$SETTLEMENT_MODE" N8N_SETTLEMENT_LEDGER="$ledger"
+  run_suite settlement "$label"
+  unset N8N_SETTLEMENT_POLICY N8N_SETTLEMENT_MODE N8N_SETTLEMENT_LEDGER
+  [ -f "$ledger" ] || : > "$ledger"
+  rc=0; matrix "$label" "$RESULTS/baseline$SCOPE_SUFFIX.junit.xml" baseline || rc=$?
+  if [ "$rc" -eq 0 ]; then log "$label: no regression against baseline"
+  elif [ "$rc" -eq 2 ]; then log "$label: the matrix could not read its input (exit 2)"; status=1
+  else log "$label: regressions against baseline; see $RESULTS/$label.matrix.md"; status=1
+  fi
+  [ "$SETTLE_ENTERS" -eq 1 ] && expect=(--expect-entering)
+  rc=0
+  (cd "$ROOT/typescript" && node_modules/.bin/tsx "$SETTLEMENT_CLI" "$RESULTS/$label.junit.xml" "$ledger" \
+      --label "$label" --out "$RESULTS/$label.entered.md" ${expect[@]+"${expect[@]}"}) || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    log "$label: F5 — REGISTERED BUT NEVER ENTERED in a scope that settles steps through createEngineRuntime"; status=1
+  elif [ "$rc" -ne 0 ]; then
+    log "$label: the entered report could not read its input (exit $rc)"; status=1
+  elif [ "$SETTLE_ENTERS" -eq 0 ]; then
+    log "$label: this scope settles no step through a runtime createEngineRuntime builds; the leg is" \
+        "neutrality with the policy registered, not a policy result (see $RESULTS/$label.entered.md)"
+  fi
+}
+
 # matrix <label> <reference-junit> <reference-label> [cli flags...]
 #   → $RESULTS/<label>.matrix.md; returns the cli's exit code
 matrix() {
@@ -322,15 +536,16 @@ IFS=',' read -r -a engines <<< "$ENGINES"
 
 # run_scope <scope> — every requested engine over one scope's suite.
 run_scope() {
-  local scope=$1 engine label reference reference_label gates
+  local scope=$1 engine label reference reference_label gates settle_label=
   scope_table "$scope"
   local baseline="$RESULTS/baseline$SCOPE_SUFFIX.junit.xml"
   local legacy_label="legacy$SCOPE_SUFFIX" k1_label="libpetri$SCOPE_SUFFIX" libpetri_label
   # k = 1 keeps the scope's plain label; every larger budget gets its own artefacts.
   if [ "$BUDGET" -eq 1 ]; then libpetri_label="$k1_label"; else libpetri_label="$k1_label-k$BUDGET"; fi
-  log "===== scope $scope ($SCOPE_PKG, filter '${SCOPE_FILTER:-<whole package>}')"
+  log "===== scope $scope ($SCOPE_PKG $SCOPE_SCRIPT, filter '${SCOPE_FILTER:-<whole package>}')"
   [ -f "$baseline" ] \
     || die "no $baseline; run scripts/bootstrap-n8n.sh --scope=$scope on the unpatched tree first"
+  [ "$SCOPE_PG" -eq 0 ] || pg_preflight
   # packages/cli, compat and engine load workspace packages from their built dist, so the
   # dist has to match the patch state the legs run under — otherwise the run silently
   # compares the wrong tree. turbo caches on content, so this is a replay (seconds) when
@@ -360,6 +575,14 @@ run_scope() {
         fi
         ;;
       libpetri)
+        # Engine v2 scopes: the settlement leg (see the header) instead of the v1 scheduler.
+        settlement_table "$scope"
+        if [ "$SCOPE_SEAM" = none ] && [ -n "$SETTLE_SEAM" ]; then
+          settle_label="$k1_label"
+          [ "$SETTLEMENT_MODE" = primary ] || settle_label="$k1_label-$SETTLEMENT_MODE"
+          run_settlement_leg "$settle_label"
+          continue
+        fi
         # No seam reachable from this package: say so, do not invent a leg.
         if [ "$SCOPE_SEAM" = none ]; then
           log "libpetri: not applicable to scope $scope — the scheduler seam is in packages/core," \
@@ -419,6 +642,12 @@ run_scope() {
   for engine in "${engines[@]}"; do
     label="$engine$SCOPE_SUFFIX"
     [ "$engine" = libpetri ] && label=$libpetri_label
+    # The settlement leg's headline is its entered report's; its matrix's loop-driving line is
+    # the v1 classification, which says nothing about engine v2.
+    if [ "$engine" = libpetri ] && [ -n "${settle_label:-}" ]; then
+      if [ -f "$RESULTS/$settle_label.entered.md" ]; then log "$settle_label: $(sed -n '3p' "$RESULTS/$settle_label.entered.md")"; fi
+      continue
+    fi
     # An `if`, not `[ … ] && …`: a leg that wrote no matrix (not applicable, skipped) would
     # otherwise end the function with status 1, and errexit turns that into the run's exit.
     if [ -f "$RESULTS/$label.matrix.md" ]; then log "$label: $(sed -n '3p' "$RESULTS/$label.matrix.md")"; fi

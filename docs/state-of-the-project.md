@@ -66,6 +66,19 @@ n8n master `944afe5` (2026-10-02), commit `944afe5c889f130ac07c1831dd88fa7c7103a
 pins were the release `n8n@2.41.3` ([`conformance-2.41.3.md`](conformance-2.41.3.md)) and
 master `441970b`. The resync is measured in [`conformance-master.md`](conformance-master.md).
 
+**The net answers engine v2's settlement decision** (ADR 0014). Patches 0003/0004 add a
+`SettlementPolicy` seam to `packages/@n8n/engine`, and `createSettlementPolicy` answers it from
+the compiled engineV2 net. The handler, the stores, step execution, failures and cancellation stay
+n8n's. Kinds of result, kept apart:
+- neutrality legs: with nothing registered, identical per case to the unpatched baselines (engine:
+  on the baseline's 376 cases, plus 0003/0004's 25 added);
+- policy-entering cases passed: engine-int 10/10, compat-int 16/16;
+- settlement evidence: differential, exhaustive and handler legs, 0 disagreements outside the
+  named races, which are counted, not compared (the handler leg's stores are ours, in memory);
+- integration: the live `--v2` testbed, 19 manual executions per leg, one at a time, in-process.
+  Every execution equals n8n's own planner and shadow agrees on 6,066 of 6,066 settlements.
+  Webhook `runEnd`, concurrent executions and a live cancel race were not exercised.
+
 The frozen v1 path, as a regression check:
 
 | Surface | Legacy | Petri | Interpretation |

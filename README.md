@@ -10,9 +10,14 @@ a Coloured Time Petri Net. The kernel runs that net to quiescence, and the net i
 what runs next.
 
 n8n keeps everything else: the editor, the workflow format, credentials, node implementations,
-persistence, webhooks, hooks and queue mode. The engine registers through the seam the two
-patches under `patches/n8n/` add, and with nothing registered n8n runs its own loop exactly as
-before.
+persistence, webhooks, hooks and queue mode. Four patches under `patches/n8n/` add two seams, one
+per n8n engine:
+- 0001/0002, in n8n's default engine (v1): `PetriScheduler` runs the net as the scheduler.
+- 0003/0004, in n8n's engine v2: the net answers the settlement decision, which steps run next and
+  whether the execution is finished, as a `SettlementPolicy` behind n8n's own handler
+  ([ADR 0014](docs/adr/0014-settlement-policy-seam.md)).
+
+With nothing registered, n8n runs its own loop and its own planner exactly as before.
 
 <img alt="The Agent Nested Agents workflow running in the n8n editor. An agent calls a second
 agent wired as its tool, that second agent calls a tool of its own, and every node turns green."
@@ -50,9 +55,10 @@ transition that calls `runNode()`.*
 6. [Verification](#verification)
 7. [Evidence](#evidence)
 8. [In a real n8n](#in-a-real-n8n)
-9. [Known limits](#known-limits)
-10. [Building and testing](#building-and-testing)
-11. [Repository map](#repository-map)
+9. [Engine v2: the net as the settlement policy](#engine-v2-the-net-as-the-settlement-policy)
+10. [Known limits](#known-limits)
+11. [Building and testing](#building-and-testing)
+12. [Repository map](#repository-map)
 
 ## The scheduler in n8n today
 
@@ -447,6 +453,41 @@ behaviour change with a user-visible shape. Treat a green table here as evidence
 not as licence to raise `k` everywhere. [`docs/testbed.md`](docs/testbed.md) covers how the engine
 gets into the process, what the columns decide, and what the harness cannot see.
 
+## Engine v2: the net as the settlement policy
+
+n8n's engine v2 (`packages/@n8n/engine`) stores every node activation as a row keyed by node and
+iteration. When a step settles, `StepSettledHandler` decides which successors to queue or skip, and
+whether the execution is finished. Patch 0003 extracts that decision as a `SettlementPolicy` with
+two methods, `decideSuccessors` and `isFinished`, over a read-only reader. Patch 0004 lets a
+process register one. The decision core and n8n's default answers are unchanged.
+
+`createSettlementPolicy()` (`n8n-libpetri/n8n-v2`) answers from the engineV2 net:
+- It compiles each graph once, decodes the step rows into a marking, and plans from enabledness.
+- It decodes a bounded frontier, at most 3 rows per loop node whatever the pass count. It reads
+  those rows by key, and the key count depends on the graph, not on the passes. In the live
+  testbed it made at most 2 round trips per settlement.
+- It reports successors per key, in n8n's order.
+- It has no fallback. A refusal throws, and the execution stays `running`
+  ([divergence #38](docs/divergences.md)).
+
+The handler, the stores, input gathering, failures and cancellation stay n8n's. Measured at n8n
+master `944afe5`, in four kinds that are never pooled
+([ADR 0014](docs/adr/0014-settlement-policy-seam.md)):
+
+| Kind | Result |
+|---|---|
+| Neutrality legs (patched, nothing registered) | `compat`, `cli-v2`, `engine-int`, `compat-int`: per-case junit identical to the unpatched baseline; `engine`: identical on the baseline's 376 cases, plus the 25 that 0003/0004 add |
+| Policy-entering cases passed | `engine-int` 10/10, `compat-int` (n8n's m1 acceptance) 16/16, on Docker Postgres; 0 policy errors |
+| Settlement evidence | Against n8n's `decideSuccessors`: 537,950 reached (S, s) sampled and 946,814 enumerated, 0 disagreements. n8n's own handler running both policies on our in-memory stores, sequentially: 1,086,514 decisions, 0 disagreements |
+| Integration (live testbed) | 19 executions per leg; `primary`, `shadow` and `primary-shadowed` equal `off` on status, rows, fates, outputs and `lastStep`; 6,066 shadow agreements and 0 disagreements in each direction |
+
+The first two rows count n8n's own cases. The last two are not conformance numbers. Four
+behaviours differ from n8n's default, each in a race or a refusal, and the register carries them
+(divergences #36–#39). The live server runs engine v2 in-process with one manual execution at a
+time. Queue mode, which the engine-v2 module refuses, webhook responses and concurrent
+executions are not exercised there. [`docs/testbed.md`](docs/testbed.md) has the four-leg
+comparison, and [`tasks/v2-seam-plan.md`](tasks/v2-seam-plan.md) has every step's measurements.
+
 ## Known limits
 
 - An `EngineRequest` action naming a node with no `ai_tool` connection to its agent cannot be
@@ -470,6 +511,9 @@ gets into the process, what the columns decide, and what the harness cannot see.
   time given" and raise `--timeout` before concluding anything about the workflow. Raising
   `--max-classes` does *not* help on this shape: the graph is still truncated at 400,000
   classes and 4 GB, so the solver is the only route that decides it.
+- Under engine v2 the net-backed policy has no fallback to n8n's planner. A graph it cannot
+  compile, or rows it cannot decode, leave the execution `running` (divergence #38). Cancellation
+  on request is not modelled. The policy answers ∅ when it sees a cancelled row (#35, #36).
 - A cyclic search is `bounded` where the fallback does not close it — the graph alone can only
   ever bound a cycle; the fallback proves the Loop Over Items fixture in 0.5 s, and that is what
   a `proven` there rests on.
@@ -480,8 +524,8 @@ gets into the process, what the columns decide, and what the harness cannot see.
 ## Building and testing
 
 The integration targets n8n master `944afe5` (commit
-`944afe5c889f130ac07c1831dd88fa7c7103a5c1`, set in `scripts/n8n-pin.sh`). The pinned checkout lives in the ignored `.n8n/` directory and receives two small, rebasable patches. This
-repository carries no n8n fork.
+`944afe5c889f130ac07c1831dd88fa7c7103a5c1`, set in `scripts/n8n-pin.sh`). The pinned checkout lives in the ignored `.n8n/` directory and receives four small, rebasable patches: two for each
+engine. This repository carries no n8n fork.
 
 The TypeScript package requires Node 24 or newer.
 
@@ -516,7 +560,14 @@ scripts/testbed/diff-engines.sh         # both engines in a live server, compare
 ```
 
 That is the leg [In a real n8n](#in-a-real-n8n) reports, and
-[`docs/testbed.md`](docs/testbed.md) records in full.
+[`docs/testbed.md`](docs/testbed.md) records in full. Engine v2 needs Docker for its Postgres data
+plane:
+
+```bash
+scripts/testbed/n8n-testbed.sh --v2 --settlement=primary    # engine v2, the net answers
+scripts/testbed/diff-engines-v2.sh                          # off, primary and both shadow legs
+scripts/run-conformance.sh --engines=libpetri --scope=engine-int   # policy-entering cases
+```
 
 ## Repository map
 
@@ -527,11 +578,13 @@ That is the leg [In a real n8n](#in-a-real-n8n) reports, and
 | `typescript/src/verify/` | Verification API, state graph, SMT fallback and CLI |
 | `typescript/src/conformance/` | Reference scheduler and differential harness |
 | `typescript/src/codec.ts` | Marking to and from n8n execution state |
-| `patches/n8n/` | Two rebasable n8n integration patches |
+| `typescript/src/settlement/` | The net-backed engine v2 `SettlementPolicy`, its snapshot read and shadow mode |
+| `typescript/src/codec/v2/` | Engine v2 step rows to a marking (the frontier decode), and the plan from it |
+| `patches/n8n/` | Four rebasable n8n integration patches: 0001/0002 for v1, 0003/0004 for engine v2 |
 | `spec/` | Executable requirements and traceability |
 | `docs/adr/` | Architectural decisions and amendments |
 | `docs/conformance-*.md` | Recorded n8n suite evidence |
-| `scripts/testbed/` | A live n8n editor running on the net, and the two-engine comparison in it |
+| `scripts/testbed/` | A live n8n editor running on the net, the two-engine comparison in it, and the engine v2 settlement legs |
 
 Start with the [project state](docs/state-of-the-project.md), then use
 [verification](docs/verification.md), [differential testing](docs/differential.md),

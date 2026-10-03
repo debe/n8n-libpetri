@@ -12,7 +12,13 @@
  * - The properties step 6 lists: cold equals warm; 20 reader permutations give one answer;
  *   interleaved executions do not see each other; ∅ and not finished on a failed row and on a
  *   cancelled row without one; at most 3 reader calls per call, `countSettledSteps` counted.
- * - Diagnostics (`entered`, `race`, `error`, `registered`) and registration on a registry.
+ * - Diagnostics (`entered`, `race`, `error`, `registered`, `snapshot`) and registration on a registry.
+ * - Step 12's rerun: the scoped read (one statement for the rows, the probe and its overrun path),
+ *   and the snapshot `decideSuccessors` keeps for the same settlement's `isFinished`.
+ *
+ * Calls that do not follow the handler's order — `isFinished` without the settlement's own
+ * `decideSuccessors` and `createSteps` before it — use `reuseSnapshot: false`: there the kept
+ * snapshot would answer for rows the test never wrote.
  *
  * These are settlement evidence, not conformance numbers (decision 12). Per-(S, s) equality with
  * n8n's own `decideSuccessors` is the differential's leg (a″) and, through this policy, step 7's
@@ -97,7 +103,7 @@ describe('the policy on the golden (n8n\'s recorded R(S) and run ends)', () => {
 
   it('is decideFromRows and finishedFromRows over the snapshot: a pure function of the rows read', async () => {
     const cache = createCompileCache();
-    const policy = createSettlementPolicy({ cache });
+    const policy = createSettlementPolicy({ cache, reuseSnapshot: false });
     for (const { entry, rows } of goldenStates.filter((_, n) => n % 7 === 0)) {
       const compiled = cache.get(entry.graph);
       for (const s of deciders(rows)) {
@@ -110,34 +116,75 @@ describe('the policy on the golden (n8n\'s recorded R(S) and run ends)', () => {
 
 // ---- against the reference loop, loop-free shapes ----
 
+/**
+ * The reference loop over `graph`: at every reached (S, s) the policy answers `planSuccessors` in
+ * order, and on every failure-free S `isFinished` is the count test. Returns the (S, s) compared.
+ */
+async function inReferenceLoop(graph: V2Graph): Promise<number> {
+  const policy = createSettlementPolicy({ reuseSnapshot: false });
+  const loops = stub.deriveLoops(graph);
+  const reachable = reachableOf(stub, graph);
+  const settledAt: { rows: readonly ReferenceRow[]; settled: StepKey }[] = [];
+  const states: (readonly ReferenceRow[])[] = [];
+  for (let b = 0; b < 6; b++) {
+    for (let o = 0; o < 6; o++) {
+      simulate(stub, graph, { seed: 1000 + b, pFail: b % 2 === 0 ? 0.2 : 0, emptyTerminal: 0 }, o, {
+        onSettled: (rows, settled) => settledAt.push({ rows, settled }),
+        onState: (rows) => states.push(rows),
+      });
+    }
+  }
+  let compared = 0;
+  for (const { rows, settled } of settledAt) {
+    const ours = text(await policy.decideSuccessors(graph, settled, memoryReader(rows)));
+    // The handler checks hasFailedSteps before it plans: on a failed S it decides nothing.
+    const theirs = hasStatus(rows, 'failed') ? { toQueue: [], toSkip: [] } : text(handlerPlan(stub, graph, loops, rows, settled));
+    expect(ours, JSON.stringify(rows)).toEqual(theirs);
+    compared++;
+  }
+  for (const rows of states) {
+    if (hasStatus(rows, 'failed')) continue;
+    expect(await policy.isFinished(graph, memoryReader(rows)), JSON.stringify(rows)).toBe(referenceFinished(stub, loops, reachable, rows));
+  }
+  expect(compared).toBeGreaterThan(0);
+  return compared;
+}
+
 describe.each(Object.entries(SETTLEMENT_SHAPES))('the policy in the reference loop on %s', (_name, graph) => {
   it('answers planSuccessors at every reached (S, s), in order, and the count test on every failure-free S', async () => {
-    const policy = createSettlementPolicy();
-    const loops = stub.deriveLoops(graph);
-    const reachable = reachableOf(stub, graph);
-    const settledAt: { rows: readonly ReferenceRow[]; settled: StepKey }[] = [];
-    const states: (readonly ReferenceRow[])[] = [];
-    for (let b = 0; b < 6; b++) {
-      for (let o = 0; o < 6; o++) {
-        simulate(stub, graph, { seed: 1000 + b, pFail: b % 2 === 0 ? 0.2 : 0, emptyTerminal: 0 }, o, {
-          onSettled: (rows, settled) => settledAt.push({ rows, settled }),
-          onState: (rows) => states.push(rows),
-        });
-      }
+    expect(await inReferenceLoop(graph)).toBeGreaterThan(0);
+  });
+});
+
+// ---- configless v1 nodes: opaque steps (`tasks/v2-seam-plan.md`, "F7 at step 10") ----
+
+/** `graph` with the config of every `v1-node` removed, as `@n8n/engine`'s own tests write them. */
+const configless = (graph: V2Graph): V2Graph => ({
+  nodes: graph.nodes.map((n) => (n.type === 'v1-node' ? { id: n.id, name: n.name, type: n.type } : n)),
+  edges: graph.edges,
+});
+
+describe('a v1 node with no config is an opaque step', () => {
+  it('the golden\'s graphs, all converter-produced, carry config on every v1 node: none is opaque', () => {
+    for (const entry of golden.entries) {
+      const v1Nodes = entry.graph.nodes.filter((n) => n.type === 'v1-node');
+      expect(v1Nodes.filter((n) => n.config === undefined), entry.id).toEqual([]);
     }
+  });
+
+  it('gives, on every golden state, the same answers with every v1 node\'s config removed', async () => {
+    const policy = createSettlementPolicy();
     let compared = 0;
-    for (const { rows, settled } of settledAt) {
-      const ours = text(await policy.decideSuccessors(graph, settled, memoryReader(rows)));
-      // The handler checks hasFailedSteps before it plans: on a failed S it decides nothing.
-      const theirs = hasStatus(rows, 'failed') ? { toQueue: [], toSkip: [] } : text(handlerPlan(stub, graph, loops, rows, settled));
-      expect(ours, JSON.stringify(rows)).toEqual(theirs);
+    for (const { entry, i, rows } of goldenStates) {
+      expect(await answers(policy, configless(entry.graph), rows), `${entry.id} state ${i}`)
+        .toEqual(await answers(policy, entry.graph, rows));
       compared++;
     }
-    for (const rows of states) {
-      if (hasStatus(rows, 'failed')) continue;
-      expect(await policy.isFinished(graph, memoryReader(rows)), JSON.stringify(rows)).toBe(referenceFinished(stub, loops, reachable, rows));
-    }
-    expect(compared).toBeGreaterThan(0);
+    expect(compared).toBe(goldenStates.length);
+  });
+
+  it.each(Object.entries(SETTLEMENT_SHAPES))('%s, configless: answers planSuccessors in the reference loop', async (_name, graph) => {
+    expect(await inReferenceLoop(configless(graph))).toBeGreaterThan(0);
   });
 });
 
@@ -184,7 +231,7 @@ describe('20 reader permutations give one answer', () => {
 
 describe('interleaved executions', () => {
   it('answer each execution from its own rows, whatever the calls interleave with', async () => {
-    const policy = createSettlementPolicy();
+    const policy = createSettlementPolicy({ reuseSnapshot: false });
     const sample = goldenStates.filter((_, n) => n % 5 === 0);
     // Alone first, one call at a time.
     const alone = [];
@@ -267,11 +314,12 @@ describe('the named races of decision 8', () => {
 });
 
 describe('the reader call budget', () => {
-  it('is at most 3 calls per policy call, countSettledSteps counted, on every golden state', async () => {
-    const policy = createSettlementPolicy();
+  it('is at most 2 calls per policy call, never countSettledSteps, on every golden state', async () => {
+    const policy = createSettlementPolicy({ reuseSnapshot: false });
     let most = 0;
     let twoReads = 0;
     for (const { entry, rows } of goldenStates) {
+      const hasLoop = entry.graph.edges.some((e) => e.isBackEdge === true);
       const readers = [];
       for (const s of deciders(rows)) {
         const reader = memoryReader(rows);
@@ -282,26 +330,27 @@ describe('the reader call budget', () => {
       await policy.isFinished(entry.graph, reader);
       readers.push(reader);
       for (const r of readers) {
-        expect(r.total()).toBeLessThanOrEqual(3);
+        expect(r.total()).toBeLessThanOrEqual(2);
         expect(r.calls.countSettledSteps).toBe(0);
-        expect(r.calls.loadLatestStepSummaries).toBe(1);
+        // The latest-row read asks for batch nodes only, so a graph without a loop skips it.
+        expect(r.calls.loadLatestStepSummaries).toBe(hasLoop ? 1 : 0);
+        expect(r.calls.loadStepSummariesByKeys).toBe(1);
         most = Math.max(most, r.total());
         if (r.total() === 2) twoReads++;
       }
     }
-    // The second read happens only once a loop is past its first pass.
     expect(most).toBe(2);
     expect(twoReads).toBeGreaterThan(0);
   });
 
-  it('reads once on a graph without a loop, and once before a loop\'s second pass', async () => {
-    const policy = createSettlementPolicy();
+  it('reads once on a graph without a loop, and twice on one with a loop, whatever the pass', async () => {
+    const policy = createSettlementPolicy({ reuseSnapshot: false });
     const flat = memoryReader([done('T'), done('A')]);
     await policy.decideSuccessors(chain, done('A'), flat);
-    expect(flat.total()).toBe(1);
+    expect(flat.calls).toEqual({ loadLatestStepSummaries: 0, loadStepSummariesByKeys: 1, countSettledSteps: 0 });
     const firstPass = memoryReader([done('T'), done('B', 0, [false, true])]);
     await policy.isFinished(loop, firstPass);
-    expect(firstPass.total()).toBe(1);
+    expect(firstPass.calls).toEqual({ loadLatestStepSummaries: 1, loadStepSummariesByKeys: 1, countSettledSteps: 0 });
     const secondPass = memoryReader([done('T'), done('B', 0, [false, true]), done('Body', 0), done('B', 1, [false, true])]);
     await policy.isFinished(loop, secondPass);
     expect(secondPass.calls).toEqual({ loadLatestStepSummaries: 1, loadStepSummariesByKeys: 1, countSettledSteps: 0 });
@@ -315,7 +364,9 @@ describe('diagnostics and errors', () => {
     const seen: string[] = [];
     const reader = memoryReader([done('T')], { executionId: 'x-1' });
     const policy = createSettlementPolicy({
-      onDiagnostic: (d) => seen.push(`${d.message}${d.kind === 'entered' ? ` ${d.method} ${d.executionId} reads ${reader.total()}` : ''}`),
+      onDiagnostic: (d) => {
+        if (d.kind !== 'snapshot') seen.push(`${d.message}${d.kind === 'entered' ? ` ${d.method} ${d.executionId} reads ${reader.total()}` : ''}`);
+      },
     });
     await policy.decideSuccessors(chain, done('T'), reader);
     await policy.isFinished(chain, reader);
@@ -325,9 +376,12 @@ describe('diagnostics and errors', () => {
   it('throws a CodecError with an error diagnostic, and does not fall back', async () => {
     const seen: SettlementDiagnostic[] = [];
     const policy = createSettlementPolicy({ onDiagnostic: (d) => seen.push(d) });
-    // Two rows of a node outside every loop: rows the net cannot have produced.
+    // Two rows of a node outside every loop: rows the net cannot have produced. The scoped read asks
+    // for A@0 and for the settled row A@1, and the decoder refuses the second row outside a loop; the
+    // full snapshot reads both rows and refuses the same.
     const bad = [done('T'), done('A', 0), done('A', 1)];
     await expect(policy.decideSuccessors(chain, done('A', 1), memoryReader(bad))).rejects.toThrow(/outside every loop/);
+    await expect(createSettlementPolicy({ snapshot: 'full' }).decideSuccessors(chain, done('A', 1), memoryReader(bad))).rejects.toThrow(/outside every loop/);
     await expect(policy.isFinished(chain, memoryReader([done('T'), row('A', 0, 'paused')]))).rejects.toThrow(/not an engine v2 step status/);
     expect(seen.filter((d) => d.kind === 'error').map((d) => d.kind === 'error' && d.name)).toEqual(['CodecError', 'CodecError']);
   });
@@ -350,7 +404,7 @@ describe('diagnostics and errors', () => {
     const reader = memoryReader([done('T'), done('B', 0, [false, true]), done('Body'), done('B', 1, [false, true])]);
     const lying = { ...reader, loadLatestStepSummaries: async () => ({ B: { id: '1', nodeId: 'Body', iteration: 0, status: 'completed', filledOutputSlots: [true] } }) };
     await expect(policy.isFinished(loop, lying)).rejects.toThrow(/under node 'B'/);
-    const extra = { ...reader, loadStepSummariesByKeys: async () => ({ 'After@0': { id: '9', nodeId: 'After', iteration: 0, status: 'completed', filledOutputSlots: [true] } }) };
+    const extra = { ...reader, loadStepSummariesByKeys: async () => ({ 'After@1': { id: '9', nodeId: 'After', iteration: 1, status: 'completed', filledOutputSlots: [true] } }) };
     await expect(policy.isFinished(loop, extra)).rejects.toThrow(/not asked for/);
   });
 
@@ -385,7 +439,7 @@ describe('registerSettlementPolicy', () => {
     expect(seen).toEqual([{ kind: 'registered', message: 'settlement policy registered', mode: 'primary' }]);
     // The registered policy is ours: it plans A after T, where the stand-in default plans nothing.
     expect(text(await engine.getSettlementPolicy().decideSuccessors(chain, done('T'), memoryReader([done('T')])))).toEqual({ toQueue: ['A@0'], toSkip: [] });
-    expect(seen.map((d) => d.message)).toEqual(['settlement policy registered', 'settlement policy entered']);
+    expect(seen.map((d) => d.message)).toEqual(['settlement policy registered', 'settlement policy entered', 'settlement policy snapshot']);
   });
 
   it('wires both shadow directions, the answering side first', async () => {

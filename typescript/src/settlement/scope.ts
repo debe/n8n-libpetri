@@ -132,19 +132,26 @@ const idOf = (k: StepKey): string => `${k.nodeId}\u0000${k.iteration}`;
  *
  * As in n8n, the batch filter applies only when `settled` is a batch node **and** S holds its row;
  * a batch node whose row is absent walks every edge.
+ *
+ * `rows` is S or any subset of S holding each node's latest row and the settled row (the frontier
+ * snapshot, `rows.ts`): iterations are contiguous per node, so a key has a row in S exactly when its
+ * iteration is at most its node's latest. On S itself that is the same test as looking the key up.
  */
 export function candidateKeys(graph: V2Graph, settled: StepKey, rows: readonly StepRow[]): StepKey[] {
   const scope = scopeOf(graph);
-  const existing = new Map<string, StepRow>();
-  for (const r of rows) existing.set(idOf(r), r);
-  const batchRow = scope.batchNodes.has(settled.nodeId) ? existing.get(idOf(settled)) : undefined;
+  const latest = new Map<string, number>();
+  for (const r of rows) latest.set(r.nodeId, Math.max(latest.get(r.nodeId) ?? -1, r.iteration));
+  const exists = (k: StepKey): boolean => k.iteration <= (latest.get(k.nodeId) ?? -1);
+  const batchRow = scope.batchNodes.has(settled.nodeId)
+    ? rows.find((r) => r.nodeId === settled.nodeId && r.iteration === settled.iteration)
+    : undefined;
   const decided = new Set<string>();
   const out: StepKey[] = [];
   for (const { edge, edgeClass } of scope.outgoing.get(settled.nodeId) ?? []) {
     if (batchRow !== undefined && !batchStepDecides(edgeClass, batchRow)) continue;
     const target = targetKey(edge, edgeClass, settled);
     const id = idOf(target);
-    if (existing.has(id) || decided.has(id)) continue;
+    if (exists(target) || decided.has(id)) continue;
     decided.add(id);
     out.push(target);
   }
@@ -173,6 +180,9 @@ export function scopePlan(plan: StepPlan, candidates: readonly StepKey[]): StepP
  * Decision 7, amended after F3 fired at step 2 (`tasks/v2-seam-plan.md`): the execution is finished
  * when no row has failed, every row has settled and the net plans nothing more, `plan` being R(S)
  * at `rows`.
+ *
+ * `rows` may be the frontier of S rather than S (`codec/v2/frontier.ts`): every row of S that is not
+ * its node's latest is completed or skipped, so the failed and unsettled tests read the same there.
  *
  * A row set with a failed row is never finished here. In n8n such a row set does not reach
  * `finishExecutionIfDone`: the failed step's own settlement goes to `failExecution`, and every

@@ -52,6 +52,10 @@
     "./n8n-vitest-setup": {
       "import": "./dist/n8n-vitest-setup.js",
       "types": "./dist/n8n-vitest-setup.d.ts"
+    },
+    "./n8n-v2-vitest-setup": {
+      "import": "./dist/n8n-v2-vitest-setup.js",
+      "types": "./dist/n8n-v2-vitest-setup.d.ts"
     }
   },
   "scripts": {

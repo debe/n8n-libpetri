@@ -12,6 +12,7 @@ to press.
 ```bash
 scripts/testbed/n8n-testbed.sh                 # libpetri, k = 4, http://127.0.0.1:5678
 scripts/testbed/diff-engines.sh                # both engines, headless, compared
+scripts/testbed/diff-engines-v2.sh             # engine v2 under four settlement modes, compared
 scripts/testbed/browser-check.sh               # drive the editor, screenshot the canvas
 ```
 
@@ -774,6 +775,269 @@ it is available here because the scheduling state is data rather than control fl
 tool in `modules/agents`, and our classic `Execute Workflow` node under the net. The question
 they answer is the same ("an agent's sub-workflow waits, now what") but the mechanisms are not,
 and no number in one table belongs in the other.
+
+## Engine v2: the settlement policy in the live server
+
+```bash
+scripts/testbed/n8n-testbed.sh --v2 --settlement=primary   # the net-backed policy answers
+scripts/testbed/n8n-testbed.sh --v2 --settlement=shadow    # n8n answers; ours runs beside it
+scripts/testbed/n8n-testbed.sh --v2 --settlement=off       # patched, nothing registered
+scripts/testbed/n8n-testbed.sh --stop                      # stops either testbed and the Postgres
+```
+
+Everything above is engine v1. `--v2` boots n8n's engine v2 (`N8N_ENABLED_MODULES=engine-v2`,
+`N8N_ENGINE_MODE=in-process`) with the net-backed `SettlementPolicy` of patches 0003/0004
+(`tasks/v2-seam-plan.md`, step 11). The engine's data plane needs Postgres
+(`N8N_ENGINE_DATABASE_URL`); `scripts/testbed/pg.sh` starts one in Docker, on
+`postgres:18.4-alpine` (the image the engine's own integration tests use), on 127.0.0.1:55432,
+capped at 384 MB. `LIBPETRI_PG_URL` replaces it with a server you run. n8n's **main** database
+stays the testbed's sqlite file: nothing in the engine-v2 module needs Postgres there. The state is
+`.testbed/v2/`, apart from the v1 testbed's, because a seeded `engineType: "v2"` would route the v1
+testbed's runs to a module that is not loaded.
+
+**How the policy gets in.** The same preload, a second branch, with the same three rules. It
+resolves `@n8n/engine` through `createRequire(packages/cli/package.json)`, so it reaches the CJS
+instance whose registry `createEngineRuntime` reads (patch 0004). It refuses to boot when that
+module has no `setSettlementPolicy`, in every mode, `off` included. It runs on the main thread only:
+`--import` also runs in worker threads, which n8n starts after boot, and there the registration
+would land on a second engine instance and print a second, false `registered`. The launcher
+rebuilds `packages/@n8n/engine/dist` when a source file is newer than the last build, and checks
+the built engine carries the seam.
+
+**The gate.** The launcher refuses to continue unless the log has the preload's
+`settlement policy registered: mode=…`, or `settlement policy off` for `off`, and
+`Engine v2 listening on …`. Entry is a separate line, written by the policy the first time a
+settlement in an execution calls it: `settlement policy entered: method=…, execution=…`. Every
+diagnostic and every shadow report is also appended to `.testbed/v2/settlement.jsonl`, and the
+Postgres provenance is in `.testbed/v2/pg-stamp.txt`.
+
+**What is seeded.** Every testbed workflow engine v2 can start, with `settings.engineType: "v2"`,
+plus three v2-only workflows. "Can start" is checked with n8n's own code: `V1WorkflowConverter`
+(what `EngineV2Dispatcher` calls) and `validateExecutableGraph` (what `StartExecutionService`
+calls). A workflow either refuses is skipped, and the reason goes into `ids.json`. Each workflow
+is read back after the write, so a REST path that dropped `engineType` would fail the seed.
+
+| workflow | engine v2 |
+|---|---|
+| Agent · Tool-Call Budget, Agent · Escalation Ladder, Resilient Fan-Out | skipped: the converter refuses `onError: continueErrorOutput` |
+| OR Round Overflow | skipped: `validateExecutableGraph` refuses two edges into one input slot |
+| Concurrency Showcase | seeded; fails at its first Code node ("Task runners (Code node) is not supported on Engine v2 yet") |
+| Agent · Two Tools, Agent · Nested Agents, Agent · Tool Deadline | seeded; fail at the agent ("A Chat Model sub-node must be connected and enabled") |
+| Parent Waits On Child | seeded; fails at Execute Workflow ("Sub-workflows (executeWorkflow) is not supported on Engine v2 yet") |
+| Waiting Child | seeded; started only by its parent |
+| Failure Policy Showcase | seeded; fails at the first 503, because engine v2 does not read `executionPolicy` |
+| **V2 Loop Over Items** | Loop Over Items over 1,000 items at batch size 1: 1,001 batch passes |
+| **V2 If Switch Diamond** | If, then a Switch on its true branch, into a three-input Merge |
+| **V2 Stop And Error Sibling** | Stop and Error beside a sibling chain held 1.5 s by the stub's `/slow` |
+
+The v2-only workflows (`scripts/testbed/workflows-v2/`, apart from `workflows/` so that
+`v1-identity` does not fingerprint them) have no Code node, because engine v2 refuses task
+runners. Their items come from a Set expression and Split Out instead.
+
+These runs are integration results, like everything else in the testbed. They are not
+conformance numbers, not policy-entering case counts, and not settlement evidence. The comparison
+of `off`, `primary` and both shadow directions follows.
+
+### The four settlement modes compared
+
+```bash
+scripts/testbed/diff-engines-v2.sh --repeat=2 --loop-repeat=3   # report: .testbed/v2-diff/report.md
+```
+
+Each leg is its own server, booted `--fresh`, so each starts with an empty sqlite file and an empty
+Postgres. The legs are:
+- `off`: patched, nothing registered, so n8n's default answers;
+- `primary`: the net-backed policy answers;
+- `shadow`: n8n answers and ours is compared;
+- `primary-shadowed`: ours answers and n8n's is compared.
+
+Every seeded workflow runs except Waiting Child, which only its parent starts. Each workflow runs
+twice and the Loop Over Items three times. The workflows engine v2 refuses at a node (Code, AI
+sub-nodes, Execute Workflow) are kept, because they are failure paths through the settlement
+handler. `dump-v2.mjs` reads every execution and its step rows **over SQL from the engine's data
+plane**, not through n8n's REST rendering. `tests/testbed/compare-v2.ts` compares each execution
+with the `off` leg's first run of the same workflow on:
+- the execution status and the row count;
+- the fate multiset (node, iteration, status) and the filled output slots (computed with the
+  store's own SQL expression);
+- the outputs, with an error reduced to its name and message;
+- the `ended` response's `lastStep`.
+
+The `off` leg's own repeats are compared too, so run-to-run variation in n8n's default is not
+reported as a policy effect.
+
+**The timing instrument (`--timing`).** The preload wraps four things on the engine instance the
+runtime is built from:
+- `StepSettledHandler.handle`, with an `AsyncLocalStorage` context per `step:settled` event;
+- `announceEnd`;
+- every method of the two TypeORM stores;
+- the two methods of the policy the runtime holds.
+
+It is installed the same way in every leg. In `off` it wraps n8n's `defaultSettlementPolicy` object
+in place and registers nothing. Per settlement it records:
+- the handler's wall time and its store calls;
+- the step and execution status the handler loaded, and what its first `hasFailedSteps` returned;
+- each policy call's time, reader calls and round trips. `loadLatestStepSummaries([])` and
+  `loadStepSummariesByKeys([])` return in the store without a query, so they count as reader
+  calls, not round trips;
+- the `ended` status and `lastStep`. Manual runs expect no response (`responseExpectation.kind`
+  `none`), so `lastStep` is captured where `announceEnd` computes it, not received.
+
+The ledger is buffered and flushed every 200 ms and at exit, so no synchronous file write sits
+inside a measured policy call.
+
+**First run, before the F4 fix (2026-10-03).** n8n `944afe5` with 0001–0004, Node 26.8.1, macOS. Docker 25.0.2 with a
+953,692,160-byte VM. `postgres:18.4-alpine`, image id `db676a0ed906` in all four legs, capped at
+384 MB. No memory failure. 19 executions per leg. These are integration results, like everything
+in this file.
+
+| | `off` | `primary` | `shadow` | `primary-shadowed` |
+|---|---|---|---|---|
+| outcomes against `off` run 1 (status, rows, fates, slots, outputs, `lastStep`) | equal, own repeats too | equal | equal | equal |
+| executions ending `running` | 0 | 0 | 0 | 0 |
+| settled non-failed rows / their settlements / `decideSuccessors` calls | 6,055 / 6,055 / 6,055 | 6,055 / 6,055 / 6,055 | same | same |
+| `isFinished` calls | 11 | 11 | 11 | 11 |
+| settlements without a call (ended first, failure first, unexplained) | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| `settlement policy error`, `race` | – | 0, 0 | 0, 0 | 0, 0 |
+| shadow agree / disagree / race / candidate threw / skew | – | – | 6,066 / 0 / 0 / 0 / 0 | 6,066 / 0 / 0 / 0 / 0 |
+
+Every failing workflow ended `failed` with the same `lastStep` (the failing node) in every leg, and
+V2 Stop And Error Sibling cancelled Sibling 1 before it ran in all eight runs. No named race
+occurred. The two shadow directions saw identical rows on both sides of every call (no skew).
+
+**Latency per settlement, V2 Loop Over Items, 3 runs per leg (6,015 settlements per leg).** Values
+are p50 / p95 / p99 / max. In the shadow legs, "policy" is both policies together.
+
+| leg | handler ms | policy ms | policy round trips |
+|---|---|---|---|
+| `off` (n8n's default) | 7.64 / 14.2 / 24.3 / 123 | 1.66 / 3.04 / 4.91 / 74.9 | 1 / 2 / 2 / 3 |
+| `primary` (ours) | 10.4 / 24.8 / 32.4 / 144 | 4.15 / 6.43 / 16.9 / 26.6 | 2 / 2 / 2 / 4 |
+| `shadow` | 11.8 / 28.0 / 35.7 / 177 | 5.58 / 8.86 / 23.0 / 164 | 3 / 4 / 4 / 7 |
+| `primary-shadowed` | 11.7 / 27.5 / 35.6 / 173 | 5.62 / 9.74 / 23.4 / 166 | 3 / 4 / 4 / 7 |
+
+**F4 fired in the first run, on its round-trip clause.** The plan's F4 has two clauses, and either one fires it:
+- **Round trips: fires.** In each of the three `primary` loop runs, exactly one settlement made 4
+  round trips: Done@0's. Its `decideSuccessors` read twice (the latest rows, then the frontier
+  keys, because the loop is past its third pass). It queued nothing, so the handler also called
+  `isFinished`, which read twice as well. On the same settlement n8n's default made 3 (decide 1,
+  isFinished 2). Of the other `primary` loop settlements, 5,997 made 2 and 15 made 1. Under
+  `off`, 3,003 made 2 and 3,009 made 1. No single policy call made more than 2. The frontier decode
+  (step 14) bounds reads per call, and it is already in this build. This clause counts per
+  settlement, so the frontier does not address it.
+- **Latency: holds.** The policy's p95 per settlement under `primary` (6.43 ms) is 0.45× n8n's
+  handler p95 under `off` (14.2 ms); the limit is 2×. Two stricter readings are reported but do
+  not decide F4. Policy p95 against n8n's default policy p95 is 6.43 / 3.04 = **2.11**, which
+  would fire under that reading. Handler p95 `primary` against `off` is 1.75.
+
+**Our policy's time grows with the passes; n8n's does not.** The policy's p50 per settlement under
+`primary`, by quarter of the loop (passes 0–249 to 750–999), is 2.75, 3.54, 4.51 and 5.41 ms. n8n's
+default under `off` stays at 1.63–1.68 ms. The cause is the snapshot's first query,
+`loadLatestStepSummaries` over every node of the graph. Its `DISTINCT ON` reads and sorts every row
+of those nodes: in `EXPLAIN ANALYZE` on synthetic rows shaped like this loop, 2,004 rows in 4.4 ms
+at pass 1,000. For the batch node alone, n8n's call, it is one index step of 0.05 ms. So the
+frontier decode keeps what the policy decodes constant, but this read still grows with the
+execution's rows. Within 1,000 passes the latency clause holds; a linear extension of the four
+quarters, not a measurement, puts the 2× line near 8,000 passes.
+
+The wall clocks of the loop runs were 44.5–45.6 s under `off`, 50.4–51.1 s under `primary` and
+52.7–54.6 s in the two shadow legs. They come from one run each on one machine, and they are not
+results.
+
+### After the F4 fix
+
+The fix (`tasks/v2-seam-plan.md`, "Step 12, rerun") changed how the policy reads rows. F4 itself was
+not changed. There are two changes:
+- **One snapshot per settlement.** `isFinished` answers from the snapshot its settlement's
+  `decideSuccessors` read, plus the rows that call decided, and reads nothing itself. The plan
+  states and proves the safety argument: a stale snapshot can make the answer false too often, never
+  true too early. The policy keys the snapshot on the graph object the handler passes to both calls.
+  The timing instrument records which handler stored each snapshot and which one reused it.
+- **The scoped read.** The latest-row query asks for batch nodes only, as n8n's default does. That
+  is a backward index scan returning one row, about 0.05 ms at 250 or 1,000 passes, against about
+  4 ms for the old all-nodes query at 1,000 passes. Every row of the snapshot comes from one keyed
+  statement.
+
+```bash
+scripts/testbed/diff-engines-v2.sh --repeat=2 --loop-repeat=3
+```
+
+**Results, 2026-10-03, after the fix.** Same machine and versions as the first run: Docker 25.0.2
+with a 953,692,160-byte VM, and `postgres:18.4-alpine` with image id `db676a0ed906` in all four
+legs, capped at 384 MB. No memory failure. 19 executions per leg. `typescript/dist` was rebuilt from
+the fixed source. The launcher now rebuilds it whenever `src` is newer. These are integration
+results: not conformance numbers, not policy-entering case counts, not neutrality legs and not
+settlement evidence.
+
+| | `off` | `primary` | `shadow` | `primary-shadowed` |
+|---|---|---|---|---|
+| outcomes against `off` run 1 (status, rows, fates, slots, outputs, `lastStep`) | equal, own repeats too | equal | equal | equal |
+| executions ending `running` | 0 | 0 | 0 | 0 |
+| settled non-failed rows / their settlements / `decideSuccessors` calls | 6,055 / 6,055 / 6,055 | same | same | same |
+| `isFinished` calls: with a round trip / without | 11 / 0 | 0 / 11 | 11 / 0 (n8n's side reads; ours reuses) | 11 / 0 (likewise) |
+| snapshots stored / reused / crossed to another handler | – | 6,055 / 11 / 0 | 6,055 / 11 / 0 | 6,055 / 11 / 0 |
+| scoped-read overruns | – | 0 | 0 | 0 |
+| `settlement policy error`, `race` | – | 0, 0 | 0, 0 | 0, 0 |
+| shadow agree / disagree / stale / race / candidate threw / skew | – | – | 6,066 / 0 / 0 / 0 / 0 / 0 | 6,066 / 0 / 0 / 0 / 0 / 0 |
+
+Every `reused` snapshot was stored in the same handler (binding holds, 0 crossed). No `stale`
+verdict occurred: in these manual runs no row settled between a settlement's read and its
+`isFinished`.
+
+**Round trips per settlement.** These are counted over every workflow, from the settlements that
+called the policy:
+- `primary`: 6,015 settlements made 2 round trips and 40 made 1. None made 3 or more.
+- `off`: 3,041 made 1, 3,011 made 2 and 3 made 3.
+
+On the loop's ending settlement, Done@0, `primary` made 2 (`decideSuccessors` 2, `isFinished` 0)
+where n8n's default made 3 (1 + 2). In the first run, ours made 4 there.
+
+**Latency per settlement, V2 Loop Over Items, 3 runs per leg (6,015 settlements per leg).** Values
+are p50 / p95 / p99 / max. In the shadow legs, "policy" is both policies together.
+
+| leg | handler ms | policy ms | policy round trips |
+|---|---|---|---|
+| `off` (n8n's default) | 7.54 / 13.9 / 23.2 / 174 | 1.64 / 3.07 / 4.98 / 162 | 1 / 2 / 2 / 3 |
+| `primary` (ours) | 8.78 / 19.1 / 28.3 / 133 | 2.68 / 4.27 / 7.11 / 119 | 2 / 2 / 2 / 2 |
+| `shadow` | 10.1 / 23.6 / 32.7 / 157 | 4.07 / 6.87 / 16.1 / 130 | 3 / 4 / 4 / 5 |
+| `primary-shadowed` | 10.2 / 23.2 / 32.1 / 104 | 4.16 / 6.95 / 17.4 / 69.0 | 3 / 4 / 4 / 5 |
+
+**Latency by quarter of the passes** (V2 Loop Over Items, by the settled row's iteration; p50 / p95
+in ms):
+
+| leg | passes 0–250 | 251–500 | 501–750 | 751–1000 |
+|---|---|---|---|---|
+| `off`, policy | 1.65 / 3.16 | 1.75 / 3.15 | 1.63 / 3.00 | 1.61 / 2.83 |
+| `primary`, policy | 2.43 / 4.34 | 2.68 / 4.24 | 2.86 / 4.32 | 2.76 / 4.15 |
+| `off`, handler | 7.40 / 14.5 | 7.50 / 17.2 | 7.76 / 13.2 | 7.55 / 11.0 |
+| `primary`, handler | 8.58 / 16.3 | 8.78 / 22.2 | 8.99 / 22.4 | 8.76 / 14.9 |
+
+Before the fix, the `primary` policy p50 went from 2.75 to 5.41 ms over the same quarters. It now
+stays between 2.43 and 2.86 ms, and its p95 between 4.15 and 4.34 ms. The highest quarter is no
+higher than the first.
+
+**F4 does not fire.**
+- Round trips: at most **2** in one settlement under `primary` (limit 3).
+- Latency: the policy's p95 per settlement under `primary` is 4.27 ms, and n8n's handler p95 under
+  `off` is 13.9 ms. The ratio is **0.31** (limit 2).
+- Two stricter readings are reported but do not decide F4. Policy p95 against n8n's default policy
+  p95 is 4.27 / 3.07 = 1.39; in the first run it was 2.11. Handler p95 under `primary` against
+  under `off` is 1.38; in the first run it was 1.75.
+
+The wall clocks of the loop runs were 44.6–46.3 s under `off`, 46.8–48.2 s under `primary` and
+49.7–51.8 s in the two shadow legs. They come from one run each on one machine, and they are not
+results.
+
+**What this does not cover.** These are manual runs, one execution at a time, on an in-process
+engine. Webhook responses (`runEnd`), concurrent executions and the cancel race are not
+exercised. The races counted as 0 here are counted, not excluded by construction. The same holds
+for the snapshot reuse's safe direction (`stale`) and for the scoped read's overrun path: neither
+occurred, and with one manual execution at a time a loop's settlements run one after another, so 0
+here says little about them. `stale` is exercised by the concurrent handler leg
+(`tasks/v2-handler-leg.mts --stale`, settlement evidence, plan step 12 rerun) and occurred live in
+`engine-int`'s conditional diamond on Postgres (plan, "Review after step 13"). The overrun path
+occurred in no leg; only `tests/settlement/reuse.test.ts` exercises it. The timing
+instrument adds a wrapper call per store method and per policy call in every leg alike. Its cost
+was not measured separately.
 
 ## Caveats
 

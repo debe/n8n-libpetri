@@ -968,11 +968,22 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
 - [ ] **The engineV2 survey names no trigger**: 52 of its 109 refusals are workflows with
       several triggers (`AmbiguousTriggerError`). Enumerating triggers per workflow, as
       `tasks/v2-acceptance.mts` does (310 entries), would make the survey cover them
-- [ ] **(c)** Seam patches 0003/0004 against master: extract a `SettlementPolicy`, then make it
-      injectable through `createEngineRuntime`. The gate is n8n's engine and compatibility tests
-- [ ] **(d)** A net-backed `SettlementPolicy` (`decodeStepRows` + `planFromMarking`)
-- [ ] **(e)** A live v2 testbed: n8n with `N8N_ENABLED_MODULES=engine-v2` and the policy
-      registered. It needs a Postgres for the data plane (`N8N_ENGINE_DATABASE_URL`)
+- [x] **(c)** Seam patches 0003/0004 (ADR 0014). Neutral when nothing is registered: compat,
+      cli-v2, engine-int and compat-int are identical per case to the unpatched baselines, and
+      engine on the baseline's 376 cases plus the 25 that 0003/0004 add
+- [x] **(d)** The net-backed `SettlementPolicy` (`src/settlement/`). It reads a bounded frontier
+      (at most 2 round trips per settlement in the testbed; the overrun path makes 4 reads by
+      design and occurred in no leg) and reuses its snapshot for `isFinished`. The safety
+      argument is in `tasks/v2-seam-plan.md`. Policy-entering cases: engine-int 10/10, compat-int 16/16
+- [x] **(e)** Live v2 testbed (`n8n-testbed.sh --v2`, `diff-engines-v2.sh`, Docker Postgres).
+      All 4 legs give outcomes equal to n8n's own planner, and shadow agrees on 6,066 of 6,066
+      settlements. These are integration results (`docs/testbed.md`)
+- [ ] **Engine v2 follow-ups (ADR 0014, Open):** webhook `runEnd` responses, concurrent
+      executions and the live cancel race are not exercised by the testbed's manual runs; the
+      Postgres legs ran without file parallelism (Docker VM about 0.95 GB); rerun
+      `tasks/v2-policy-cost.mts` after the scoped read; decide the upstream shape of 0004
+      (process-global registry or a cli DI registry); then the upstream offer in ADR 0012 §4's
+      order
 
 ### 8. Engine v2 (ADR 0012)
 

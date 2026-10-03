@@ -213,6 +213,28 @@ named race, not compared. Leg (d) adds a check: every run whose behaviour fails 
 execution status `failed` under both policies.
 
 
+### F7 at step 10: configless v1-nodes are opaque steps (2026-10-03, orchestrator)
+
+Step 10 blocked on F7. engine-int's `step-execution.integration.test.ts` builds graphs whose
+`v1-node` steps carry no config (`{id, name, type: 'v1-node'}`). Engine v2 accepts them, because
+`config` is optional and the engine never inspects it. `graphToDescription` mirrors the
+converter's `isV1NodeStepConfig` and refused them, so the policy threw and 9 cases timed out
+with the execution `running`.
+
+Decision: **a `v1-node` without config is an opaque step.** It gets a synthetic node type, and its
+input and output counts are read from its edges. This follows the engine's contract, not the
+converter's:
+- v2's settlement rule reads only edges, slots and the step type (`batch` versus the rest), never
+  a v1 node's config;
+- a workflow converted by `V1WorkflowConverter` always carries config, so nothing it produces
+  changes;
+- an opaque step is never `n8n-nodes-base.merge`, so the chooseBranch refusal
+  (`analysis/engine-v2/nodes.ts`) cannot apply to it, and the engine itself refuses no Merge mode.
+
+The reverted experiment measured `step-execution` at 10/10 passing and 9/9 policy-entering, with
+30 of 30 shadow answers agreeing. The step-10 rerun measures every scope again.
+
+
 ## Deviations during implementation
 
 ### Step 2: the legs ran, and F3 fired on failed row sets
@@ -1052,3 +1074,1234 @@ Results, all 209 accepted graphs, 20 × 20. These are settlement evidence on our
 **Gate.** `npm run check` is clean, and `npm test` passes, including the two new regression tests.
 The task script was typechecked separately. Wall clocks were 587 s, 557 s and 391 s, run as three
 processes side by side.
+
+### Step 14: the local frontier decode, built before F4 was measured
+
+Nothing in `.n8n` changed. Every result below is settlement evidence (decision 12): not a
+conformance number, not a policy-entering case count, not a neutrality leg and not an
+integration result. The cost figures are offline CPU on an in-memory reader.
+
+**Deviation: step 14 was built without F4 firing.** The plan made step 14 conditional on F4, which
+is measured live in steps 11 and 12. The review of steps 2–8 found a defect that F4 would not
+catch first. `readSnapshot` asked `loadStepSummariesByKeys` for every key `0 .. latest − 1` of
+every node. `TypeOrmStepStore.loadStepSummariesByKeys` binds 2 parameters per key plus the
+execution id (`stepKeyFilter`, `database/typeorm-step-store.ts`). So a Loop Over Items at batch
+size 1 with a 4-node body asks 5 keys per pass and passes Postgres' 65,535 bind parameters at
+about 6,550 passes. The orchestrator ordered step 14 now. This is a reading of n8n's source, not
+something reproduced against Postgres.
+
+**What the folded marking needs (the frontier).** S's frontier is every node's latest row plus,
+for each loop whose batch node's latest row is at pass L ≥ 3, the rows of the loop's nodes (batch
+node and members) at passes 0 and L − 1. With L ≤ 2 the frontier is every row. A node outside a
+loop has one row. The frontier holds at most 3 rows per loop node, whatever L is.
+`decodeFrontier` drops the other passes and replays passes 0, L − 1 and L as 0, 1 and 2 through
+the unchanged `decodeStepRows`. The row counts are each node's latest iteration + 1.
+
+Why the marking is a function of the frontier (the module doc of `codec/v2/frontier.ts` has the
+full argument). `validateLoops` and the compiler leave one entry, one return edge K, no exit but
+the batch node's done slot, and no nested loops. Every member is therefore an ancestor of K's
+source within its pass. A start or skip takes one `arrived` per incoming edge, and only a
+completed run or a skip writes its out-edges. So in any row set the global decoder accepts:
+- every row below its node's latest is `completed` or `skipped`;
+- the body's places are empty whenever the batch node's next pass starts;
+- a pass 1 ≤ p ≤ L − 2 starts by `B_start_back` and puts back the `K/arrived` and `B/live` it
+  took, so its firings change no place.
+
+Pass 0 stays because it fires the entry pair. Pass L − 1 stays because whether K arrived live
+decides how pass L starts. Removing either one is caught (see the mutations below).
+
+The same facts give what the policy reads besides the marking:
+- the named race and "every row settled" come from the latest rows;
+- a key exists exactly when its iteration is at most its node's latest. `candidateKeys` now
+  tests existence that way instead of looking the key up, which gives the same answer on any
+  contiguous S;
+- the batch filter reads the settled row, which the snapshot adds by key when it is not the
+  node's latest row (a late or redelivered settlement).
+
+n8n's `decisionKeys` also names each candidate's source rows and the batch row at the candidate's
+pass. The net does not read those rows: the marking stands in for them.
+
+**What was built.**
+- `src/codec/v2/frontier.ts`: `frontierKeys(compiled, latest)` (the keys beyond the latest rows,
+  at most 2 per loop node, none outside a loop), `frontierOf`, `decodeFrontier` and
+  `latestIterations`. A refusal is the global decoder's refusal on the compressed rows, with the
+  renumbering named.
+- `src/settlement/rows.ts`: `readSnapshot(entry, reader, settled?)` makes the latest-row read,
+  then one keyed read over `frontierKeys` plus the settled key when it is not latest. That is at
+  most 2 reader calls and at most 2 × loop nodes + 1 keys per call. `readFullSnapshot` is the old
+  read, kept for verification. `Snapshot` gains `keys`.
+- `src/settlement/policy.ts`: `createSettlementPolicy({ snapshot: 'frontier' | 'full' })`, with
+  `frontier` as the default. `decideFromRows` and `finishedFromRows` take the same switch and now
+  type their first argument as `DecisionNet` (graph and net). `full` is the global decoder.
+- `src/settlement/scope.ts`: `candidateKeys` tests existence by latest iteration.
+  `src/n8n-v2.ts` also exports `readFullSnapshot` and `SnapshotScope`.
+- `src/conformance/v2/differential.ts`: leg (f), `compareFrontier(compiled, graph, S, s?)`. At S
+  it compares the marking and row counts from `frontierOf(S)` with `decodeStepRows(S)` (two
+  refusals agree; one refusal does not). It also compares `finishedFromRows` on the frontier with
+  the full snapshot, and `decideFromRows` on the frontier plus s's row with the full snapshot.
+- `src/conformance/v2/reference.ts`: `Behaviour.maxPasses` is optional. When it is absent the
+  value is 3, so every existing draw and every golden run is unchanged.
+- Task scripts:
+  - `v2-differential.mts`: leg (f) and `--max-passes`;
+  - `spike-v2-exhaustive.mts`: leg (f);
+  - `v2-handler-leg.mts`: (d4), where at every policy call ours with the frontier and ours with
+    the full snapshot are asked on the frozen S and must agree, and the most keys and reads per
+    call are measured. Also `--max-items N` (default 3, every run from before);
+  - `v2-policy-cost.mts`: the long loop goes to k = 10,000, with keys and the full snapshot
+    alongside.
+- Tests: `tests/codec/v2-frontier.test.ts` (6 cases):
+  - local equals global on every golden state and every settlement's S and S′;
+  - random walks of the net's planner on 7 loop shapes up to 14 passes (more than 5,000 distinct
+    row sets, more than 1,000 compressed, deepest iteration at least 12), checking the marking,
+    row counts, R(S), the named race, "every row settled" and every completed or skipped row's
+    candidates;
+  - a missing pass L − 1 is refused by both decoders;
+  - the key counts.
+
+  The 10,000-pass case is a Loop Over Items at batch size 1 with a 4-node body (50,001 rows). Five
+  situations are covered: the return, the terminal pass, mid-pass, a late settlement of pass 17,
+  and finished. In each one the frontier policy makes at most 2 reads and asks at most 11 keys
+  (the test bound is 15 = 2 × 7 + 1). The full snapshot gives the same answers from more than
+  40,000 keys. The frontier's key count is 10 at 10, 100, 1,000 and 10,000 passes.
+- Two existing assertions changed their expected message, not their verdict:
+  - `policy.test.ts` "throws a CodecError …" and `shadow.test.ts` "a candidate CodecError …" use
+    two rows of a node outside every loop. The frontier reads only that node's latest row (A@1),
+    so the refusal is the gap below it ("none at iteration 0"), not "outside every loop";
+  - the policy test also pins that the full snapshot still refuses with "outside every loop".
+
+  Both still assert a `CodecError` and no fallback.
+
+**What the frontier does not check (stated, not hidden).** Rows outside the frontier are not read.
+A row set that the global decoder refuses only for a fault deep in a loop's history (a gap, or an
+unsettled or cancelled row at a removed pass) can decode under the frontier. By the argument
+above, engine v2 does not produce such a row set. The store contract is iterations contiguous per
+node and statuses that only progress. `snapshot: 'full'` keeps the old, stricter check available.
+
+**Mutation checks** (on `frontier.ts`, restored):
+
+| mutation | `v2-frontier.test.ts` cases that fail |
+|---|---:|
+| drop pass L − 1, replay pass L as 1 | 2 (deep loops; the gap case) |
+| `frontierKeys` omits pass L − 1 | 4 (deep loops, key counts, 10,000-pass answers, flat keys) |
+
+**Results: 0 disagreements everywhere. No falsifier fires.**
+
+| leg | configuration | compared | frontier smaller than S | disagreements |
+|---|---|---:|---:|---:|
+| (f) differential | 20 × 20 (83,600 runs) | 972,945 S + 537,950 (S, s) | 0 | 0 |
+| (f) differential | 20 × 20 `--wait 0.2` | 1,096,310 S + 538,532 (S, s) | 0 | 0 |
+| (f) differential | 20 × 20 `--max-passes 20` (legs a, a″, a‴, f) | 997,400 S + 548,061 (S, s) | 12,633 | 0 |
+| (f) exhaustive | 4 passes, 1M cap, ≤ 14 nodes (196 graphs) | 123,142 S + 316,165 (S, s) | 15,016 | 0 |
+| (f) exhaustive | 3 passes, 2M cap, ≤ 9 nodes, `--wait` (161 graphs) | 36,835 S + 59,644 (S, s) | 0 | 0 |
+| (f) exhaustive | 7 passes, 1M cap, ≤ 9 nodes (161 graphs) | 35,578 S + 134,753 (S, s) | 118,234 | 0 |
+| (d4) handler leg | sequential | 1,086,514 decide + 686,920 finished | – | 0 |
+| (d4) handler leg | sequential `--wait 0.2` | 1,087,386 + 687,800 | – | 0 |
+| (d4) handler leg | `--concurrency 8 --wait 0.2` | 1,100,712 + 701,154 | – | 0 |
+| (d4) handler leg | `--concurrency 8 --p-fail 0.3 --wait 0.2` | 998,336 + 627,174 | – | 0 |
+| (d4) handler leg | the same, `--p-cancel 0.3` | 931,817 + 579,431 | – | 0 |
+| (d4) handler leg | sequential `--wait 0.2 --p-cancel 0.3` | 1,019,716 + 639,332 | – | 0 |
+| (d4) handler leg | sequential `--wait 0.2 --max-items 40` | 1,097,246 + 690,818 | – | 0 |
+| (d4) handler leg | `--concurrency 8 --p-fail 0.3 --wait 0.2 --p-cancel 0.3 --max-items 40` | 938,327 + 581,643 | – | 0 |
+
+- **The key-scoped legs reran with 0 disagreements, and every count is the same as before.**
+  - (a″) is 537,950 / 538,532 reached pairs in the differential, and 316,165 reached and 946,814
+    overall in the exhaustive spike (59,644 and 161,061 with `--wait`).
+  - (a‴) is 970,157 / 1,093,464 compared in the differential, and 46,204 (16,483) in the
+    exhaustive spike.
+  - The differential's legs (a), (b) and (c) are 0, and the exhaustive spike's `dis` is 0.
+  - In the deep differential, (a), (a″) and (a‴) are also 0, at iterations up to 13.
+- **Leg (d) reran under the frontier policy with 0 findings in every configuration.** The counts of
+  step 8 and of the review fixes are reproduced exactly:
+  - (d1): 1,086,514 / 0 and 686,920 / 0 sequentially, and 998,336 / 0, 626,841 / 0 and 333 (14)
+    under stress;
+  - the cancel race: 42 (26) and 107 (18);
+  - n8n's policy ended 7 and 5 runs `failed` through `isFinished`, and ours 0;
+  - (d2) and (d3) have 0 differences.
+- The deep handler legs reach iteration 13. There the frontier asked at most 17 keys per call and
+  the full snapshot 37. In the default legs (iterations up to 3) the numbers were 10 and 11. Every
+  call made at most 2 reads.
+- **Golden.** `v2-frontier.test.ts` checks local = global on every recorded state and every
+  settlement's S and S′. `v2-planner-golden.test.ts` replays all 515 settlements through the
+  frontier policy with 0 findings. `tests/fixtures/` is untouched and nothing was re-recorded.
+  Golden loops end by pass 2, so on the golden the frontier is S itself: the compression is
+  exercised by the deep runs above.
+
+**Cost (offline CPU, in-memory reader).** `npx tsx tasks/v2-policy-cost.mts`, run with the machine
+otherwise idle. Settlement of B@k, decide + isFinished, warm:
+
+| k | rows | reads | keys: frontier / full | frontier p50 / p95 | full snapshot p50 / p95 | n8n default p50 / p95 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 4 | 2 | 1 / 1 | 0.05 / 0.06 ms | 0.05 / 0.07 ms | 0.01 / 0.02 ms |
+| 100 | 202 | 2 | 3 / 199 | 0.11 / 0.19 ms | 1.34 / 3.69 ms | 0.05 / 0.14 ms |
+| 1,000 | 2,002 | 2 | 3 / 1,999 | 0.51 / 0.76 ms | 12.54 / 13.36 ms | 0.64 / 0.86 ms |
+| 10,000 | 20,002 | 2 | 3 / 19,999 | 5.38 / 6.54 ms | 129.58 / 134.78 ms | 5.00 / 5.52 ms |
+
+- What still grows in the frontier column is the in-memory reader, which scans every row on each
+  call. n8n's default grows the same way on the same reader.
+- The decision on the frontier rows alone (`decideFromRows` + `finishedFromRows`, 200 reps) is
+  flat: p50 54 µs at k = 1, 42 µs at k = 100 and 36 µs at k = 10,000.
+- Over a run, the decode is now O(passes), not O(passes²).
+- At k = 10,000 the frontier asks 3 keys (7 bind parameters) where the full snapshot asks 19,999
+  (39,999 parameters).
+- The corpus figures are unchanged within noise: warm decide + isFinished p50 108 µs, p95 323 µs.
+  Agreement with n8n's default is 15,992 / 15,992 for both methods.
+- None of this is F4, which is still measured live in steps 11 and 12.
+
+**Stamp.** n8n 2.42.0 dist at `944afe5` with 0001–0004: `settlement.js 8b7fe1d317aa`,
+`completion.js 3d3c53f9902c`, `loop-ledger.js affbe650919e`, `iteration-mapping.js b020437a1dc2`,
+`loops.js 942db20c8af8`, `step-settled-handler.js 28762f9eafae`, `settlement-policy.js
+d01a00e31a71`, `typeorm-step-store.js dd904794ec05`. libpetri 7.0.0 from the registry, not linked.
+Node v26.8.1. Wall clocks, with up to 8 processes running side by side:
+- differential: 310 s, 323 s and 217 s;
+- exhaustive: 160 s, 126 s and 130 s;
+- handler legs: 641 s to 1,254 s.
+
+**Gate.**
+- `npm run check` is clean.
+- `npm test` passes 2,054 tests in 105 files. That includes the 6 new frontier cases,
+  `v1-identity` with `v1-fingerprint.json` untouched, and the golden replays with
+  `tests/fixtures/` untouched.
+- The three changed task scripts typecheck. `v2-policy-cost.mts` has four `TS2352` casts at lines
+  190–203 from before this step; they are not touched here.
+- `.n8n` is at the detached pin with 0001–0004 applied and no branches, and no file under it
+  changed.
+
+### Step 9: Postgres neutrality legs N2; F1 does not fire
+
+These are unpatched baselines with a flake check, and neutrality legs for 0001–0004 with nothing
+registered. They are not conformance numbers, not policy-entering cases and not settlement
+evidence. No scheduler and no settlement policy is registered in any of these runs. The vitest
+durations below are wall clocks of an integration suite, not results.
+
+**Provider.** The user chose Docker (blocker 1). n8n's testcontainers code runs unmodified: each
+integration file starts its own Postgres through `new PostgreSqlContainer(...)`, and ryuk reaps it.
+Docker Desktop server 25.0.2, with 953,692,160 bytes (~0.95 GB) of VM memory and 10 CPUs.
+
+**What was built.**
+- `scripts/bootstrap-n8n.sh --scope=` and `scripts/run-conformance.sh --scope=` gained
+  `engine-int` and `compat-int`. Both scripts carry the same table. Each scope runs the package's
+  own `test:integration` script (`vitest.integration.config.ts`), and its build target is the same
+  as the unit scope's. Three new columns: `SCOPE_SCRIPT` (default `test`), `SCOPE_ARGS` (vitest
+  flags after the filters) and `SCOPE_PG`.
+- New `scripts/pg-stamp.sh`, sourced by both scripts:
+  - `pg_preflight` refuses to start when `docker info` does not answer, so a container failure
+    is never reported as a test result;
+  - `pg_images` reads the images the scope's `*.integration.test.ts` files pass to
+    `PostgreSqlContainer`. A string literal is taken as written. `postgresVersions.<key>` is
+    resolved through the package's own `n8n-containers/postgres-versions.json`. Any other
+    argument fails the stamp;
+  - `pg_watch_begin`/`pg_watch_end` stream Docker's container `start` events while the suite runs;
+  - `pg_stamp` writes `<label>.pg-stamp.txt`. It holds the Docker server and its memory, the
+    testcontainers version, and each image with its image id, repo digest and `postgres -V`. It
+    also lists the containers Docker started during the run.
+- `scripts/README.md` lists the scopes and `pg-stamp.sh`.
+
+**Procedure.**
+1. `verify-patch.sh --restore` reset the patch scope to the pin.
+2. `bootstrap-n8n.sh --scope=X --skip-install` gave run 1, and `--skip-install --skip-build` gave
+   run 2. Turbo restored every dist from cache: 10 / 10 for the engine and 30 / 30 for compat,
+   with 0 misses. The unpatched engine dist's `step-settled-handler.js` has 0 occurrences of
+   `settlementPolicy`.
+3. `verify-patch.sh` re-applied 0001–0004.
+4. `run-conformance.sh --skip-patch --engines=legacy --scope=X` ran. Its turbo builds were all
+   cache hits, and the patched dist has 5 occurrences of `settlementPolicy`.
+5. Each comparison was checked twice: per case with `conformance/cli.ts --require-identical`, and
+   with an independent multiset of (file, classname, name, status).
+
+**Results at 944afe5.**
+
+| scope | files | cases | pass | todo (skipped) | fail | run 1 = run 2 | patched, nothing registered = baseline |
+|---|---:|---:|---:|---:|---:|---|---|
+| `engine-int` | 6 | 149 | 149 | 0 | 0 | identical | identical (exit 0) |
+| `compat-int` | 1 | 18 | 16 | 2 | 0 | identical | identical (exit 0) |
+
+- `engine-int` per file: `workflow-execution` 22, `workflow-step-execution` 56,
+  `execution-start` 2, `step-execution` 10, `workflow-executions` (server) 58, and
+  `start-engine-server` 1. `engine-int` has 146 distinct case keys among its 149 cases. The
+  repeats are numbered by position, and every one passes in all three runs.
+- Patched code is under test in both scopes. `engine-int` loads the engine from `src`.
+  `execution-start`, `step-execution` and the server file (through `createEngineRuntime`)
+  construct the handler with the patched default policy. `start-engine-server` takes its deps
+  injected and does not reach the policy. The two database files test the stores. `compat-int`
+  loads the engine from the patched dist through `acceptance-fixtures.ts`.
+- **F1 does not fire.** No patch touches an integration test file. The only test files the
+  patches touch are `settlement-policy.test.ts` (new) and `create-engine-runtime.test.ts`, which
+  gets 4 added cases and no removed lines, as step 5 planned. Both are unit tests, and neither is in these scopes.
+- No memory failure occurred with `--maxWorkers=1` at ~0.95 GB. The vitest durations were 11 s
+  for `engine-int` and 5 s for `compat-int`. Peak memory was not measured.
+
+**Postgres stamp.** The server version comes from `postgres -V` on the local image the run used.
+The streamed events confirm which images started. The baselines and the legs match.
+
+| scope | image as the test names it | server | image id | repo digest | containers started per run |
+|---|---|---|---|---|---|
+| `engine-int` | `postgres:18.4-alpine` (`postgresVersions.primary`) | PostgreSQL 18.4 | `db676a0ed906` | `sha256:9a8afca54e78…` | 5 Postgres + 1 ryuk |
+| `compat-int` | `postgres:18-alpine` (literal) | PostgreSQL 18.6 | `d7a8005067f5` | `sha256:77f585114c32…` | 1 Postgres + 1 ryuk |
+
+**Pulled images.** These were pulled ahead with `docker pull` on 2026-10-03:
+- `postgres:18.4-alpine` (`sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15`);
+- `postgres:18-alpine` (`sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873`);
+- `testcontainers/ryuk:0.14.0` (`sha256:7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0`),
+  the reaper image named in testcontainers 11.13.0's `reaper.js`.
+
+**Deviations.**
+- **No `scripts/testbed/pg.sh` and no generated testcontainers shim config in this step.** The plan
+  listed both for a provider other than Docker: embedded-postgres, brew or `LIBPETRI_PG_URL`.
+  Under Docker, testcontainers runs unmodified, so N2 needs neither. Step 11 still needs a
+  database URL for `N8N_ENGINE_DATABASE_URL`, so `pg.sh` moves there.
+- **`--maxWorkers=1`.** The integration scopes run one file at a time, so at most one Postgres
+  runs at once on the 0.95 GB VM. n8n's own CI runs them with its default pool (`maxWorkers: '50%'`
+  under `CI=true`). The flag applies to the baseline and the leg alike, so the comparison is like
+  for like. It changes scheduling but not the case set. A file that only passes in parallel, or
+  only fails in parallel, would not show up here.
+- **compat-int is 18 cases, not 16.** 16 pass, and two are `it.todo` (`routes items through an If
+  node and consolidates with Merge`, `stops cleanly on a cancel request mid-flight`), which junit
+  reports as skipped. The plan's 16 counts the cases that run.
+- **Two Postgres versions.** The engine's files pin `postgres:18.4-alpine` through
+  `postgres-versions.json`. compat's file names the floating `postgres:18-alpine`, which resolved
+  to 18.6 when it was pulled. A later pull can move compat's server, which is why the stamp records
+  the image id. Baseline and leg used the same id.
+- **The container count is streamed, not queried.** At first the stamp ran `docker events --since`
+  after the suite. It reported 2 Postgres starts for a run that started 5. The daemon replays a
+  bounded event buffer, and testcontainers' exec probes overflow it. The watcher now streams
+  `start` events for the duration of the run. Stopping the watcher needs `pkill -P` on the
+  `com.docker.cli` child: Docker Desktop's `docker` shim does not pass SIGTERM on, and a background
+  job of a non-interactive shell ignores SIGINT. The first attempt hung on that. It was killed and
+  rerun, and the numbers above come from the clean reruns.
+
+**Stamp.** n8n `944afe5`, with `@n8n/engine` 0.22.0 and `@n8n/node-engine-compatibility` 0.10.0.
+vitest 5.0.1, node v26.8.1, pnpm 12.4.2 through corepack 0.36.0, and testcontainers 11.13.0.
+Artefacts are in `conformance-results/`:
+- `baseline-{engine,compat}-int.{junit.xml,summary.txt,pg-stamp.txt,pg-events.txt}` (run 2);
+- `.run1.*` and `.flake.matrix.md`;
+- `legacy-{engine,compat}-int.{junit.xml,matrix.md,test.log,pg-stamp.txt,pg-events.txt}`;
+- `run-{engine,compat}-int.log`.
+
+**Gate.**
+- `npm run check` is clean.
+- `npm test` passes 2,054 tests in 105 files. That includes `v1-identity` with
+  `v1-fingerprint.json` untouched, and the golden replays with `tests/fixtures/` untouched and
+  nothing re-recorded.
+- `.n8n` is at the detached pin `944afe5` with 0001–0004 applied (13 paths) and no local branches.
+
+### Step 10: the settlement leg; F5 does not fire, F7 fires on the engine's own test graphs
+
+These results are of three kinds, and they are kept apart (decision 12):
+- **Policy-entering cases passed:** the `primary` legs of `engine-int` and `compat-int`. In these
+  cases the net-backed policy answered at least once.
+- **Neutrality with the policy registered:** the `primary` legs of `engine`, `compat` and `cli-v2`.
+  No case there settles a step through a runtime that `createEngineRuntime` builds. Their pass
+  counts are n8n's code and are not a policy result.
+- **Settlement evidence:** the shadow verdicts and the experiment below. These are not conformance
+  numbers.
+
+None of them is an engine v1 conformance number or a testbed result. Vitest durations are not
+results either.
+
+**What was built.**
+- `typescript/src/n8n-v2-vitest-setup.ts` is a tsup entry and package export,
+  `n8n-v2-vitest-setup`. `createSettlementVitestSession()`:
+  - registers through `register.ts` only when `N8N_SETTLEMENT_POLICY=libpetri`;
+  - takes the mode from `N8N_SETTLEMENT_MODE`;
+  - counts the policy's `entered`, `race` and `error` diagnostics, and the shadow verdicts, for
+    each case window and for each file outside its cases;
+  - appends JSONL records to `N8N_SETTLEMENT_LEDGER`: one per case, one per file (registered or
+    not, and why), one per error, and one per shadow report that is not an agreement.
+- `typescript/src/conformance/v2/entered.ts` and `entered-cli.ts` join the leg's junit with the
+  ledger. The pairing is `caseKeys`', with repeats numbered by position. The output is
+  `<label>.entered.md`:
+  - the headline is policy-entering cases passed;
+  - a case that never entered is labelled and listed, not counted;
+  - unrecorded cases (skipped or todo) and orphan records are listed;
+  - with `--expect-entering`, a leg with 0 policy calls exits 1. That is F5.
+  - In `shadow` mode the headline says that n8n's default answered.
+- `scripts/run-conformance.sh`:
+  - On the five v2 scopes, `--engines=libpetri` is the settlement leg. It was "not applicable"
+    before.
+  - A `settlement_table` holds the shim's import seam (`src` or `package`), whether the scope must
+    enter (`engine-int`, `compat-int`), and the base config. `bootstrap-n8n.sh`'s scope table is
+    unchanged.
+  - The generated shim is `<pkg>/.n8n-libpetri-v2-setup.mjs` with
+    `<pkg>/vitest.libpetri-v2.config.mts`. Both are listed in `.n8n/.git/info/exclude`.
+  - New flag `--settlement-mode=`.
+  - Labels are `libpetri-<scope>`, or `libpetri-<scope>-<mode>` for a mode other than `primary`.
+- Tests: `tests/settlement/vitest-session.test.ts`, 15 cases.
+
+**Deviations.**
+- **The leg does not run the package script as is.** Vitest 5 refuses a second `--config`
+  (`cac` throws), and the `test:integration` scripts already pass one. The leg therefore runs the
+  script's own command line with its `--config` replaced, or appended when the script has none,
+  through `pnpm --filter <pkg> exec sh -c`. The env prefixes of the cli script are kept. The case
+  sets equal the baselines' (0 missing, 0 new beyond 0003/0004's 25 in `engine`).
+- **The shim hooks take no positional suite.** Vitest 5 passes hooks a fixture context, which must
+  be destructured (`FixtureParseError` on `(suite) =>`). The file name is
+  `expect.getState().testPath` relative to the package root. Cases use `({ task })`.
+- **The shadow modes were run too, which the plan did not ask for here.** `primary-shadowed` ran
+  on `compat-int` and `shadow` on `engine-int`. They give live F2 evidence on Postgres one step
+  before the testbed. Each leg ran once; there is no flake rerun.
+
+**Results at 944afe5, Docker Postgres, `--maxWorkers=1`.** The Postgres image ids equal step 9's
+baselines: `db676a0ed906` (18.4) for `engine-int` and `d7a8005067f5` (18.6) for `compat-int`.
+
+| scope | seam | files registered | cases | policy-entering (passed / total) | not entering | policy calls | errors | against baseline |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `engine` | `src` | 28 / 28 | 401 | 0 / 0 | 401 (all pass) | 0 | 0 | 0 regressions |
+| `engine-int` | `src` | 6 / 6 | 149 | **1 / 10** | 139 (all pass) | 11 | 9 | **9 regressions** |
+| `compat` | `dist` | 8 / 8 | 169 | 0 / 0 | 169 (all pass) | 0 | 0 | 0 regressions |
+| `compat-int` | `dist` | 1 / 1 | 18 | **16 / 16** | 0 (2 `it.todo` unrecorded) | 92 | 0 | 0 regressions |
+| `cli-v2` | `dist` | 21 / 22 | 365 | 0 / 0 | 365 (all pass) | 0 | 0 | 0 regressions |
+
+- **F5 does not fire.** Both seams enter.
+  - `src`: in `engine-int`, `step-execution` entered in 9 cases and `workflow-executions` in 1
+    (the trigger-only `includeSteps` case).
+  - `dist`: in `compat-int`, all 16 running cases entered, with 92 calls.
+- **Why the three other scopes do not enter.**
+  - `engine`: the only unit test that builds a runtime is `create-engine-runtime.test.ts`, and it
+    settles no step.
+  - `compat`: the unit tests build no runtime.
+  - `cli-v2`: `engine-v2.runtime.test.ts` replaces `@n8n/engine` with `vi.mock`. The shim
+    records it as not registered, with vitest's reason ("No `setSettlementPolicy` export is
+    defined on the mock"). That is the 22nd file.
+- **0004's own cases still pass with a policy registered.**
+  `create-engine-runtime.test.ts`'s "default policy while none is registered" builds a fresh
+  module graph (`vi.resetModules`), so it does not see the shim's registration.
+
+**Shadow verdicts (settlement evidence, live on Postgres).**
+- `compat-int`, `primary-shadowed` (ours answers, n8n's default is compared): agree 92,
+  disagree 0, race 0, candidate threw 0. 16 / 16 policy-entering cases pass.
+- `engine-int`, `shadow` (n8n answers): agree 2, disagree 0, race 0, candidate threw 32. All 32
+  throws are the compile refusal below. 149 / 149 cases pass, but that count is n8n's.
+
+**F7 fires.** All 9 `engine-int` regressions are in
+`execution/__tests__/step-execution.integration.test.ts`. Each has a `settlement policy error`:
+`SettlementCompileRefusal: … graphToDescription: v1 node 'A' has no v1 node config (nodeType,
+typeVersion, parameters, continueOnFail)`. There are 5 distinct graphs, among them
+`b749d8149fa2`, `7ef5e3d79aac`, `af98923ad5e4`, `1a061ad289ce` and `800dc8a5475d` (the If/Merge
+diamond).
+- The engine's own test graphs build nodes as `{ id, name, type: 'v1-node' }` with no `config`.
+  The engine accepts them: `GraphNode.config` is optional, and "the engine persists it with the
+  graph without inspecting it" (`graph/workflow-graph.ts`). The same cases pass under n8n's
+  default.
+- `graphToDescription` (`src/n8n/v2-graph.ts`) refuses them on purpose: it mirrors
+  `isV1NodeStepConfig` because the converter always writes that config.
+- So the policy throws at the trigger's settlement, as decision 8 says it must. The execution stays
+  `running`, and each case times out at 5 s.
+- This is a compile refusal at run time on a graph n8n accepted. Step 10 stops here under the stop
+  rule. Nothing was fixed and no divergence row was added.
+
+**Experiment, not landed: configless v1 nodes as opaque steps.** `graphToDescription` was patched
+temporarily, behind an env flag, to describe a `v1-node` without config as an opaque node of a
+synthetic type (`experiment.opaqueV1`, typeVersion 1, port counts from edges). It was rebuilt and
+`step-execution` was run in `primary-shadowed`:
+- 10 / 10 cases pass, and 9 / 9 policy-entering cases pass;
+- 30 policy calls, agree 30, disagree 0, errors 0.
+
+The patch was then reverted: `src/n8n/v2-graph.ts` has no diff from HEAD, and `dist` was rebuilt.
+Artefacts are `conformance-results/experiment-opaque-v1-step-execution.*`.
+
+**Open question for the orchestrator or the user: fix, or divergence row?**
+- (a) **Fix.** Accept a `v1-node` without config as an opaque step, which is the engine's
+  contract rather than the converter's.
+  - Measured above on the one file that has such graphs.
+  - Open point: the engineV2 analysis gives `n8n-nodes-base.merge` its own handling
+    (`analysis/engine-v2/nodes.ts:50`). A configless node is never a Merge to the engine either,
+    but whether a configless fan-in node matches the engine everywhere is shown only for the
+    graphs in that file.
+- (b) **Divergence row.** Keep the refusal and record it: the net-backed policy refuses a
+  `v1-node` the converter cannot have produced, and the execution stays `running`. In
+  production every graph reaches the engine through `V1WorkflowConverter`, which always writes
+  the config.
+
+Either choice changes F7's reading: "209 of 209 compile" then stands for converter-produced graphs.
+
+**Stamp.** n8n `944afe5` with 0001–0004, `@n8n/engine` 0.22.0, `@n8n/node-engine-compatibility`
+0.10.0, vitest 5.0.1 (n8n) and 4.1.11 (ours), node v26.8.1, pnpm 12.4.2, testcontainers 11.13.0,
+and libpetri 7.0.0 from the registry, not linked. Artefacts are in `conformance-results/`:
+`libpetri-{engine,engine-int,compat,compat-int,cli-v2}.{junit.xml,matrix.md,ledger.jsonl,entered.md,test.log}`,
+the `pg-stamp` and `pg-events` files for the `-int` legs, `libpetri-compat-int-primary-shadowed.*`,
+`libpetri-engine-int-shadow.*` and `experiment-opaque-v1-step-execution.*`.
+
+**Gate.**
+- `npm run check` is clean.
+- `npm test` passes 2,069 tests in 106 files: step 9's 2,054 plus 15. That includes `v1-identity`
+  with `v1-fingerprint.json` untouched, and the golden replays with `tests/fixtures/` untouched
+  and nothing re-recorded.
+- `verify-patch.sh` applies 0001–0004 (13 paths). `.n8n` is at the detached pin with no local
+  branches. The generated shims are excluded files.
+- Nothing was committed or pushed.
+
+### Step 10, rerun under "F7 at step 10": every regression fixed; F5 and F7 do not fire
+
+These results are of three kinds, kept apart as in the blocked run above (decision 12):
+- **Policy-entering cases passed:** the `primary` legs of `engine-int` and `compat-int`.
+- **Neutrality with the policy registered:** the `primary` legs of `engine`, `compat` and `cli-v2`.
+  No case there settles a step through a runtime that `createEngineRuntime` builds, so their pass
+  counts are n8n's code and not a policy result.
+- **Settlement evidence:** the shadow verdicts, the golden replay and the differential.
+
+None of them is an engine v1 conformance number, a neutrality leg in step 9's sense or a testbed
+result. Vitest durations and the differential's wall clock are not results.
+
+**The fix (the orchestrator's decision above).** `graphToDescription` (`src/n8n/v2-graph.ts`)
+describes a `v1-node` whose `config` is absent (`undefined`) as an opaque step:
+- its type is `V2_OPAQUE_V1_NODE_TYPE = '@n8n/engine.v1-node'` at typeVersion 1. The
+  `@n8n/engine.` prefix is the one `V2_STEP_NODE_TYPES` uses for `wait` and `subworkflow`, so no
+  n8n node type collides. In particular it is never the Merge type or Split In Batches;
+- its port counts come from its edges, as every other node's do;
+- it gets no `onError`. `continueOnFail` is read by the v1 executor from the config, not by the
+  engine, and the engine records a step that throws as `failed`.
+
+The experiment's synthetic type was `experiment.opaqueV1`. Only the name changed.
+
+**Deviation: narrower than "without config" might be read.** Only an absent config is opaque. A
+config that is present but is not a `V1NodeStepConfig` (`{}`, `null`, a config without
+`continueOnFail`) is still refused with a `V2GraphError`. Neither the converter nor the engine's
+own tests write such a config, and a partial one may name a node type that the description would
+then silently drop. Tests pin both.
+
+**Tests (18 new, 1 refusal case replaced).**
+- `tests/conformance/v2/graph.test.ts`:
+  - The engine's own graphs from `step-execution.integration.test.ts` (single node, fan-in,
+    conditional diamond), with configless trigger and v1 nodes: their type, ports, no
+    `onError`/`batch`, and that each analyses under `engineV2`.
+  - A configless fan-in node is not refused as a chooseBranch Merge.
+  - A configless node sits beside configured nodes and a batch loop.
+  - No converter-shaped graph gets the opaque type.
+  - The "a v1 node with no config" refusal became "an empty config" and "a null config".
+- `tests/settlement/policy.test.ts`:
+  - Every golden graph (n8n's converter output) carries config on every v1 node.
+  - On every golden state, the policy gives the same answers (`decideSuccessors` per decider and
+    `isFinished`) with every v1 node's config removed. That covers the golden's loops and its
+    failed and cancelled states.
+  - The reference-loop check runs again on configless copies of the six loop-free settlement
+    shapes. The check was extracted into `inReferenceLoop` with its body unchanged.
+
+**Converter-produced graphs are unchanged.** The round-trip tests are unedited and green. The
+golden replays are green with `tests/fixtures/` untouched. The differential 20 × 20 reran with
+every count equal to step 14's: corpus 209 / 209 compiled; (a) 972,945 states; (a″) 537,950
+reached (S, s); (a‴) 970,157 compared; (f) 972,945 S and 537,950 (S, s); 0 disagreements and 0
+findings in every leg. The m1 acceptance (`compat-int`, below) is 16 / 16 as before. The
+exhaustive spike was not rerun: its graphs are converter output, which this branch never reaches.
+
+**Results at 944afe5, Docker Postgres, `--maxWorkers=1`.** The Postgres image ids equal step 9's
+baselines: `db676a0ed906` (18.4) for `engine-int` and `d7a8005067f5` (18.6) for `compat-int`.
+
+| scope | seam | files registered | cases | policy-entering (passed / total) | not entering | policy calls | errors | against baseline |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `engine` | `src` | 28 / 28 | 401 | 0 / 0 | 401 (all pass) | 0 | 0 | 0 regressions |
+| `engine-int` | `src` | 6 / 6 | 149 | **10 / 10** | 139 (all pass) | 34 | 0 | 0 regressions |
+| `compat` | `dist` | 8 / 8 | 169 | 0 / 0 | 169 (all pass) | 0 | 0 | 0 regressions |
+| `compat-int` | `dist` | 1 / 1 | 18 | **16 / 16** | 0 (2 `it.todo` unrecorded) | 92 | 0 | 0 regressions |
+| `cli-v2` | `dist` | 21 / 22 | 365 | 0 / 0 | 365 (all pass) | 0 | 0 | 0 regressions |
+
+- **Per-case junit.** `engine-int`, `compat-int`, `compat` and `cli-v2` are identical to their
+  unpatched baselines. `engine` is identical to the patched `legacy-engine` leg; against the
+  baseline it has 0003/0004's 25 own cases beyond it.
+- **Flake check.** The two `-int` primary legs ran twice. Junit is identical per case and the
+  ledgers are identical apart from timestamps. `engine`, `compat` and `cli-v2` ran once. Their
+  junit equals the blocked run's per case, and no case there reaches `graphToDescription`.
+- **F5 does not fire.** `src`: in `engine-int`, the 9 `step-execution` cases plus the 1
+  `workflow-executions` case enter (24 `decideSuccessors` and 10 `isFinished` calls). `dist`: all
+  16 running `compat-int` cases enter. The three other scopes do not enter, for the reasons the
+  blocked run lists (`cli-v2`'s 22nd file mocks `@n8n/engine` and is recorded as not registered).
+- **F7 does not fire.** There are 0 policy errors in every leg, and so no compile refusal at run
+  time. "209 of 209 compile" is about converter-produced graphs. The engine's own configless test
+  graphs (5 distinct) now compile as well.
+- **Triage.** The blocked run's 9 `engine-int` regressions are fixed by the change above. Nothing
+  regressed, so no divergence row was added.
+
+**Shadow verdicts (settlement evidence, live on Postgres).**
+
+| leg | who answers | compared | agree | disagree | race | candidate threw | cases |
+|---|---|---:|---:|---:|---:|---:|---|
+| `engine-int` `primary-shadowed` | ours | 32 | 32 | 0 | 0 | 0 | 10 / 10 policy-entering pass |
+| `engine-int` `shadow` | n8n's default | 32 | 32 | 0 | 0 | 0 | 149 / 149 pass (n8n's count) |
+| `compat-int` `primary-shadowed` | ours | 92 | 92 | 0 | 0 | 0 | 16 / 16 policy-entering pass |
+
+Each shadow leg ran once. In the blocked run, `engine-int` `shadow` had 32 candidate throws;
+here it has 0. These figures predate the snapshot reuse (step 12's rerun). The as-built policy's
+shadow legs are in "Review after step 13".
+
+**Why `engine-int` has 34 calls under `primary` and 32 in both shadowed modes.** The difference
+is entirely in "settles a conditional diamond": 6 `decideSuccessors` + 3 `isFinished` under
+`primary` (both runs), and 5 + 2 shadowed. `StepSettledHandler.handle` returns before the policy
+when the execution is no longer live (`step-settled-handler.ts:65`). C's skip settlement races M's
+execution, since M's inputs are all decided once C's skipped row exists. When M's settlement
+completes the execution first, C's settlement asks nothing. The shadow wrapper does more work per
+call and moves that interleaving. Both orders end `completed` with the same rows, and the case
+asserts them. This reading comes from the handler's source and the ledgers. It was not
+instrumented further. The count of calls is not a policy result.
+
+**Deviation: the stamp's container capture missed one run.** In `engine-int` `primary` run 1 (and
+in the blocked run's `engine-int` `primary`), `pg-events` captured no container start, although
+the suite passed its Postgres cases. Run 2 captured 5 × `postgres:18.4-alpine` plus ryuk. An
+independent `docker events` watcher started 2 s earlier saw the same 5 starts plus ryuk (and the
+stamp's own `postgres -V` container afterwards). The likely cause is that `pg_watch_begin`'s
+1-second subscription wait was not enough right after the turbo build. It was not fixed. The
+stamp's image id is read separately and is unaffected. The top-level `libpetri-engine-int.*`
+artefacts are run 2.
+
+**Artefacts** (`conformance-results/`, gitignored):
+- `libpetri-{engine,engine-int,compat,compat-int,cli-v2}.*` (the `-int` ones are run 2);
+- `libpetri-engine-int-{primary-shadowed,shadow}.*` and `libpetri-compat-int-primary-shadowed.*`;
+- `step10-run1/` (run 1 of every primary leg);
+- `step10-f7-blocked/` (the blocked run's artefacts, copied before they were overwritten).
+
+**Stamp.** As in the blocked run: n8n `944afe5` with 0001–0004, `@n8n/engine` 0.22.0,
+`@n8n/node-engine-compatibility` 0.10.0, vitest 5.0.1 (n8n) and 4.1.11 (ours), testcontainers
+11.13.0, and libpetri 7.0.0 from the registry, not linked.
+
+**Gate.**
+- `npm run check` is clean.
+- `npm test` passes 2,087 tests in 106 files: the blocked run's 2,069 plus 18. That includes
+  `v1-identity` with `v1-fingerprint.json` untouched, and the golden replays with
+  `tests/fixtures/` untouched and nothing re-recorded.
+- `verify-patch.sh` applies 0001–0004. `.n8n` is at the detached pin with no local branches, and
+  the generated shims are excluded files.
+- Nothing was committed or pushed.
+
+### Step 11: the testbed boots engine v2 with the policy; registered, then entered
+
+These are integration results from the live testbed. They are not conformance numbers, not
+policy-entering case counts, not neutrality legs and not settlement evidence (decision 12). The
+wall clocks below are what `run.mjs` printed for one run each; they are not results, and step 12
+owns the comparison of legs and the latency record.
+
+**What was built.**
+- `scripts/testbed/pg.sh` (`start`, `stop`, `url`, `status`, `stamp`). It runs a Docker container
+  `n8n-libpetri-testbed-pg` from `postgres:18.4-alpine` (`postgresVersions.primary`, the image
+  `engine-int` uses) on 127.0.0.1:55432, capped at 384 MB, with an anonymous volume that `stop`
+  removes. `LIBPETRI_PG_URL` replaces it, and then no container is managed. `start` waits for a
+  query over TCP, not just `pg_isready`, because the image's init-time server answers on the
+  socket only.
+- `n8n-testbed.sh --v2 --settlement=off|shadow|primary|primary-shadowed --pg-port=N`:
+  - It sets `N8N_ENABLED_MODULES=engine-v2`, `N8N_ENGINE_MODE=in-process` and
+    `N8N_ENGINE_DATABASE_URL` from `pg.sh`. The engine's servers bind 127.0.0.1 on `--port + 3`
+    and `--port + 4` (5681, 5682) instead of 3000/3001, and both ports are preflighted.
+  - It rebuilds `packages/@n8n/engine/dist` with the package's own
+    `tsc -p tsconfig.build.json` when a non-test source is newer than the last build's marker
+    (`dist/.n8n-libpetri-built`, in the gitignored dist), and then requires `setSettlementPolicy`
+    in the built index.
+  - The gate: after the REST API is up, the log must hold `settlement policy registered: mode=…`
+    (or `settlement policy off` for `off`) and `Engine v2 listening on …`, or the launcher stops.
+  - The state is `.testbed/v2/`, which has its own sqlite home, logs, `ids.json`, `settlement.jsonl`
+    (every policy diagnostic and shadow report) and `pg-stamp.txt`. `--stop` stops both testbeds
+    and removes the managed Postgres.
+  - `--v2 --queue` and `--settlement` without `--v2` are refused (exit 2).
+- `preload.mjs` has a second, independent branch, gated on `N8N_LIBPETRI_SETTLEMENT`:
+  - It resolves `@n8n/engine` through `createRequire(packages/cli/package.json)`.
+  - It throws, so n8n does not start, when the module lacks `setSettlementPolicy`,
+    `getSettlementPolicy`, `resetSettlementPolicy` or `defaultSettlementPolicy`, in every mode,
+    `off` included. It also throws when `N8N_ENABLED_MODULES` does not name `engine-v2`, and on an
+    unknown mode.
+  - Otherwise it calls `registerSettlementPolicy` (`register.ts`). stderr gets `registered`, the
+    first `entered` per execution, every `race` and `error`, and every shadow report that is not an
+    agreement. An agreeing shadow report is written to the ledger without its rows.
+- `seed.mjs`, under `TESTBED_ENGINE_V2=1`, sets `settings.engineType: "v2"` on every workflow it
+  seeds and seeds only those engine v2 can start. Each is put through n8n's
+  `V1WorkflowConverter` and the engine's `validateExecutableGraph`, both from `packages/cli`'s
+  resolution root, and a refusal is skipped with its reason in `ids.json`. Each workflow is read
+  back after the write.
+- `scripts/testbed/workflows-v2/`: `v2-loop-over-items.json` (Loop Over Items, 1,000 items, batch
+  size 1), `v2-if-switch-diamond.json` (If, a Switch on the true branch, a three-input Merge in
+  append mode) and `v2-stop-and-error-sibling.json` (Stop and Error beside a four-node sibling
+  chain that the stub's `/slow?ms=1500` holds).
+- Docs: `docs/testbed.md` gains "Engine v2: the settlement policy in the live server", and
+  `scripts/testbed/README.md` lists `pg.sh`, `--v2` and the state.
+
+**The REST path accepts `engineType`.** `workflowSettingsSchema` (`base-workflow.dto.ts`) is
+`z.object({customTelemetryTags}).passthrough()`, and `POST /rest/workflows` stored
+`settings.engineType: "v2"` for all 10 seeded workflows. The read-back after each write confirmed
+it. `EngineV2Dispatcher.handlesWorkflow` routes on that field for `manual`, `webhook` and
+`trigger`, and every run below went to the data plane: each execution id is a UUID v7.
+
+**The main database.** sqlite, the testbed's default, is enough. Nothing in `modules/engine-v2`,
+the dispatcher or the v2 execution reader checks the main database's type. The module refuses
+queue mode only (`engine-v2.module.ts:31`). Only the data plane needs Postgres
+(`EngineV2Runtime.initDb`).
+
+**Done when: met.** `--settlement=primary` booted and the gate passed on
+`settlement policy registered: mode=primary`. The first run, `V2 If Switch Diamond`, logged
+`settlement policy entered: method=decideSuccessors, execution=01a0ff7e-7810-…`. So F5 does not
+fire in the testbed. The gate passed the same way under `shadow` and under `off`
+(`settlement policy off: patch 0004 is in @n8n/engine, nothing registered`). After the
+workflows moved (below), a fresh `primary` boot and the diamond were rerun, with the same result.
+
+**One run per workflow, an integration smoke, not a comparison.** Docker 25.0.2, VM 953,692,160
+bytes. Postgres 18.4, image id `db676a0ed906` (the same as `engine-int`'s), from
+`.testbed/v2/pg-stamp.txt`. Policy calls are from the ledger.
+
+| workflow | mode | status | `decideSuccessors` | `isFinished` | what ended it |
+|---|---|---|---:|---:|---|
+| V2 If Switch Diamond | primary | success | 9 | 3 | Merge got 6 items: Small 2, Large 1, Odd 3 |
+| V2 Loop Over Items | primary | success | 2,005 | 1 | 1,001 batch passes, 1,000 Process Item, Done got 1,000 items |
+| V2 Stop And Error Sibling | primary | error | 1 | 0 | Stop and Error |
+| Concurrency Showcase | primary | error | 5 | 1 | "Task runners (Code node) is not supported on Engine v2 yet" |
+| Agent · Two Tools, · Nested Agents, · Tool Deadline | primary | error | 1 each | 0 | "A Chat Model sub-node must be connected and enabled" |
+| Failure Policy Showcase | primary | error | 1 | 0 | 503 at Flaky Service (engine v2 does not read `executionPolicy`) |
+| Parent Waits On Child | primary | error | 1 | 0 | "Sub-workflows (executeWorkflow) is not supported on Engine v2 yet" |
+| V2 If Switch Diamond, V2 Stop And Error Sibling, Concurrency Showcase | shadow | as under primary | 15 | 4 | shadow: 19 agree, 0 disagree, 0 race, 0 candidate threw |
+| V2 If Switch Diamond | off | success | 0 | 0 | as under primary |
+
+- 0 `settlement policy error` and 0 `race` in every leg. So F7 does not fire on the seeded
+  workflows, and no execution stayed `running`.
+- F3's second half (an execution that stays `running` under `primary` where `off` completes)
+  needs the `off` leg of every workflow, which is step 12. Here `off` ran only the diamond.
+- F4 is not measured here. The loop ran once under `primary`, with no reader-call counts and no
+  latency. Step 12 owns both.
+
+**Deviations.**
+- **"Converter-accepted" became "engine v2 can start it".** OR Round Overflow passes
+  `V1WorkflowConverter` but is refused at `StartExecutionService.start` by
+  `validateExecutableGraph` ("more than one edge into input slot 0"). `createEngineRuntime` builds
+  the service without a 4th argument, so that default applies. Our `compileGraph` refuses the same
+  graph. Seeding it would add a workflow every run refuses before its first settlement, so the seed
+  applies both checks. This is not F7: n8n does not accept the graph either.
+- **Workflows that engine v2 cannot run are still seeded.** Concurrency Showcase, the three
+  agents, Parent Waits On Child and Failure Policy Showcase pass both checks and then fail at a
+  node, because engine v2 refuses that node (Code, AI sub-nodes, Execute Workflow) or does not read
+  `executionPolicy`. These are failure paths through the settlement handler, and that is worth
+  keeping for step 12's `off`/`primary` comparison. Nothing was skipped on the basis of a node
+  type.
+- **No Code nodes in the new workflows.** The first versions generated items in a Code node, and
+  the first diamond run failed at it with the task-runner refusal. The items now come from a Set
+  expression (`Array.from(...)`) and Split Out, and the sibling's delay is an HTTP Request to the
+  stub's `/slow`.
+- **The new workflows live in `scripts/testbed/workflows-v2/`, not `workflows/`.**
+  `tests/compiler/v1-identity.test.ts` fingerprints every file in `workflows/` under the v1
+  profile. With the three files there, the suite failed 4 cases ("has no recorded fingerprint").
+  Moving them keeps `v1-fingerprint.json` untouched.
+- **The v2 preload branch runs on the main thread only.** The first boot logged
+  `settlement policy registered` twice in one pid, 4 s apart: the second came after "Editor is
+  now accessible". `--import` also runs in worker threads, which inherit `execArgv`, and each
+  thread has its own module graph. There, the registration landed on a second `@n8n/engine`
+  instance that no runtime reads. With an `isMainThread` guard it is logged once. That the second
+  line came from a worker thread is inferred from the same pid and the fix's effect; the thread
+  was not identified. The v1 branch was left as it is.
+- **`--engine` defaults to `legacy` under `--v2`.** `V1StepExecutor` calls `nodeType.execute`
+  directly and never builds a `WorkflowExecute`, so a v1 scheduler reaches only executions that
+  still run on v1 (a sub-workflow). `--engine=libpetri` gives both.
+- **The Postgres outlives a foreground run.** The cleanup trap stops n8n and the stub only.
+  `--stop` or the next `--fresh` removes the container.
+
+**Not done here.** No test under `typescript/` covers the scripts. They are `.mjs`/`.sh`, outside
+`npm run check`. The preload's refusals were checked by hand: with a stand-in `@n8n/engine`
+without `setSettlementPolicy`, with `N8N_ENABLED_MODULES=foo`, and with mode `bogus`, it throws,
+and with no variables set it is inert. The launcher's flag refusals were checked the same way.
+
+**`.n8n` state.** The engine dist was rebuilt twice by the launcher. All 90 `engine/dist/**/*.js`
+files have the same sha256 before and after, including `step-settled-handler.js` at
+`28762f9e…` (`GOLDEN_SEAM_PATCHED_DIST`). `verify-patch.sh` applies 0001–0004 (13 paths). `.n8n` is
+at the detached pin with no local branches. The only file the testbed adds there is the dist
+marker.
+
+**Gate.**
+- `npm run check` is clean.
+- `npm test` passes 2,087 tests in 106 files, the same count as step 10's rerun. That includes
+  `v1-identity` with `v1-fingerprint.json` untouched, and the golden replays with
+  `tests/fixtures/` untouched and nothing re-recorded.
+- Nothing was committed or pushed.
+
+### Step 12: `diff-engines-v2.sh`; F4 fires on its round-trip clause
+
+These are integration results from the live testbed (decision 12). They are not conformance
+numbers, not policy-entering case counts, not neutrality legs and not settlement evidence. No wall
+clock here is a result. The write-up for readers is `docs/testbed.md`, "The four settlement modes
+compared". The full report is `.testbed/v2-diff/report.md` (gitignored).
+
+**What was built.**
+- `scripts/testbed/diff-engines-v2.sh`: the legs `off`, `primary`, `shadow` and
+  `primary-shadowed`. Each leg is its own server with a fresh sqlite file and a fresh Postgres. It
+  runs every seeded workflow except Waiting Child (`--repeat`, default 1) and the Loop Over Items
+  (`--loop-repeat`, default 3). It dumps the rows over SQL, stops the server, keeps the ledger and
+  log, then runs the comparator.
+- `scripts/testbed/dump-v2.mjs`: executions and step rows from the data plane, using the engine's
+  own `pg`. Filled slots use the store's `FILLED_OUTPUT_SLOTS` expression.
+- `typescript/tests/testbed/compare-v2.ts`: the comparator. `compare-v2.test.ts` pins it with 12
+  cases on synthetic legs.
+- `preload.mjs`: the timing instrument under `N8N_LIBPETRI_SETTLEMENT_TIMING=1`, and a buffered
+  ledger. `n8n-testbed.sh`: `--timing` (refused without `--v2`, and the boot gates on
+  `settlement timing installed`). Both READMEs and `docs/testbed.md` were updated.
+
+**Deviations.**
+- **An instrument the plan did not name.** "Per-leg latency" needs the handler's time and the
+  policy's reads per settlement, and the plan named no way to get them. The preload therefore wraps,
+  on the engine instance the runtime uses:
+  - `StepSettledHandler.prototype.handle` and `announceEnd`, with an `AsyncLocalStorage` context
+    per event;
+  - every method of `TypeOrmStepStore` and `TypeOrmExecutionStore`;
+  - the two methods of the policy the runtime holds.
+
+  It is the same in every leg. In `off` it wraps `defaultSettlementPolicy` in place, so the registry
+  stays empty, but n8n's object is wrapped in that leg. The instrument changes no answer and no call
+  order, and its own cost was not measured.
+- **The ledger is buffered** (flushed every 200 ms and at exit). In step 11 it appended
+  synchronously per record, and `entered` is emitted inside every policy call. That write would
+  have been timed in every leg except `off`.
+- **`lastStep` is captured, not received.** Manual runs carry `responseExpectation.kind` `none`, so
+  no `ended` response is sent. The instrument records the `step` that `announceEnd` would report.
+- **"Policy calls ≥ settled non-failed rows" was made exact.** Every settlement of a completed or
+  skipped row without a `decideSuccessors` call must have a named reason: the execution had already
+  ended, or the handler's first `hasFailedSteps` returned true. Anything else is a finding. In every
+  leg, calls equalled rows (6,055 = 6,055) and no reason was needed. The step-10 race (a settlement
+  arriving after the execution completed) did not occur here.
+- **F4's terms, fixed before reading the numbers.** A round trip is a reader call that reaches SQL.
+  The empty-argument calls return in the store without a query, so they are not counted. Round
+  trips are summed over all policy calls in one settlement, which is the reading step 6 left to the
+  live measurement. "n8n's handler p95" is the p95 of `StepSettledHandler.handle` under `off`. Two
+  stricter readings are reported and do not decide F4: policy against policy, and handler against
+  handler.
+- The shadow legs ran without a flake rerun, and every leg ran once (with repeats inside it).
+
+**Results** (`postgres:18.4-alpine`, image id `db676a0ed906` in all four legs, 384 MB cap, Docker
+VM 953,692,160 bytes, no memory failure; 19 executions per leg):
+- All 19 executions in each of the three other legs equal the `off` leg's first run of their
+  workflow on status, row count, fate multiset, filled slots, normalised outputs and `lastStep`.
+  The `off` repeats are equal to each other.
+- **F3 does not fire.** No execution ended `running` in any leg. Every workflow that completes
+  under `off` completes under `primary`, and every one that fails, fails with the same `lastStep`.
+- **F2: 0 shadow disagreements.** `shadow` had 6,066 agree; `primary-shadowed` had 6,066 agree.
+  Both had 0 disagree, 0 race, 0 candidate threw and 0 skew. No named race occurred, so 0 were
+  excluded.
+- **F5, F6 and F7 do not fire.** `entered` is 6,066 in each registered leg, with 0
+  `settlement policy error` and so 0 `CodecError` and 0 compile refusals.
+
+**F4 fires.** The numbers are over the Loop Over Items, 3 runs and 6,015 settlements per leg:
+- **Round trips: 4 in one settlement (limit 3).** It happened once per `primary` run, at Done@0's
+  settlement. `decideSuccessors` made 2 round trips: the latest rows, then the frontier keys, which
+  are non-empty because the loop is past pass 3. It queued nothing, so the handler called
+  `isFinished`, which made 2 more. n8n's default made 3 on the same settlement: `decideSuccessors` 1,
+  then `isFinished` 2 (`loadLatestStepSummaries` of the batch node, then `countSettledSteps`).
+  Every other `primary` settlement made 2 (5,997) or 1 (15), and no single call made more than 2.
+- **Latency: holds.** The policy's p95 per settlement under `primary` is 6.43 ms. n8n's handler p95
+  under `off` is 14.2 ms. The ratio is 0.45, against a limit of 2.
+- **Stricter readings, which do not decide F4:**
+  - Policy p95 against n8n's default policy p95 is 6.43 / 3.04 = **2.11**. It would fire under
+    that reading.
+  - Handler p95 under `primary` against under `off` is 24.8 / 14.2 = 1.75.
+
+**Why step 14 does not address it.** The plan names step 14 as F4's remedy, and step 14 is already
+in this build (`snapshot: 'frontier'` is the default). The frontier bounds reads *per call* at 2
+and keeps the decoded rows independent of the passes. The fourth round trip comes from two calls
+in one settlement, each reading the snapshot again, because the reader port is a pass-through with
+no cache (decision 2).
+
+**A second finding: our policy's time grows with the passes, and n8n's does not.** The policy's p50
+per settlement under `primary`, by quarter of the loop (passes 0–249, 250–499, 500–749, 750–999),
+is 2.75, 3.54, 4.51 and 5.41 ms. Under `off`, n8n's default is 1.65, 1.68, 1.68 and 1.63 ms. The
+handler p50 follows: 9.0 → 11.9 ms under `primary`, flat at about 7.6 ms under `off`. The cause is
+SQL, not the decode:
+- The snapshot's first read is `loadLatestStepSummaries(every node id of the graph)`. Its
+  `DISTINCT ON (node_id) … ORDER BY node_id, iteration DESC` reads and sorts every row of those
+  nodes, computing the filled-slots subquery per row.
+- `EXPLAIN ANALYZE` on synthetic rows shaped like this loop, in the same image: 504 rows sorted,
+  1.4 ms at pass 250; 2,004 rows sorted, 4.4 ms at pass 1,000.
+- With the batch node alone, which is the only node n8n's default ever asks this method for, it
+  is one backward index step: 0.05 ms.
+
+So step 14 makes the decode constant, but this query is still O(rows of the execution) per
+settlement, O(passes²) over a run. Within 1,000 passes the latency clause holds (0.45). Extending
+the four quarters linearly, which is an extrapolation and not a measurement, the policy's p95 would
+reach 2× n8n's handler p95 (28.4 ms) at roughly 8,000 passes. A fix needs either a per-node
+latest-row query (one round trip per node, which worsens the round-trip clause) or a `StepStore`
+query that seeks each node's latest row through the unique index (for example a `LATERAL` join).
+That is an n8n change and was not made.
+
+**Options for the orchestrator or the user. None was implemented (stop rule).** These cover the
+round-trip clause; the growth above needs its own decision.
+- (a) **Decide ∅ without reading when the settled node has no out-edges.** The candidate list is
+  structurally empty, so nothing depends on the rows. On this workflow Done@0 would drop to 0 + 2.
+  It is not a general bound: a settlement that queues nothing because every candidate already has a
+  row still reads twice in each call. Such a settlement would be a fan-in reached past a loop's
+  third pass.
+- (b) **Share one snapshot between `decideSuccessors` and `isFinished` in the same settlement.** The
+  policy cannot see that the two calls belong together. Doing this needs either per-settlement
+  state in the policy, which breaks "a pure function of the rows read" and decision 2's no-cache
+  rule, or a seam change, for example one call that answers both.
+- (c) **Amend F4 to count per call** (at most 3 reader calls per call, as step 6's test reads it).
+  Measured live, the most was 2 per call. By source reading, n8n's default can itself reach 4 per
+  settlement: `decideSuccessors` with a loop exit among the candidates, plus `isFinished` with a
+  loop. That was not measured; the most measured here was 3.
+
+**Gate.**
+- `npm run check` is clean.
+- `npm test` passes 2,099 tests in 107 files: step 11's 2,087 plus 12. That includes `v1-identity`
+  with `v1-fingerprint.json` untouched, and the golden replays with `tests/fixtures/` untouched and
+  nothing re-recorded.
+- `verify-patch.sh` applies 0001–0004 (13 paths), and `.n8n` is at the detached pin `944afe5` with
+  no local branches.
+- No container is left running.
+- Nothing was committed or pushed.
+
+### Step 12, rerun: the F4 fix (orchestrator, 2026-10-03)
+
+The orchestrator chose two fixes and kept F4 as written: (1) `isFinished` reuses the snapshot
+`decideSuccessors` read in the same settlement, extended with the rows the policy itself just
+decided; (2) the latest-row read is scoped so it no longer sorts every row of the execution. The
+safety argument for (1) was written down before any code, as the brief requires.
+
+#### The safety argument for (1), written before the code
+
+**Claim.** A stale but internally consistent snapshot can make `isFinished` false too often, never
+true too early. Precisely: if the reused answer is true, then a fresh read at the same moment would
+see exactly the reused row set, so it would also say true.
+
+**What the argument rests on** (engine invariants at the pin, and the `engineV2` net's arcs):
+
+- (I1) Keys are unique per execution (`createSteps` deduplicates on `(execution, node, iteration)`).
+  Rows are never deleted. A settled row (`completed`, `skipped`, `failed` or `cancelled`) never
+  changes again, its filled slots included. `waiting → queued` stays among the unsettled statuses.
+- (I2) Rows are created in two places only: `ExecutionStartHandler` creates the trigger before any
+  settlement; `StepSettledHandler.planSuccessors` creates `decideSuccessors(c)` for the settlement
+  of a completed or skipped row c, as computed by the answering policy from a snapshot S_c read in
+  that handler after c settled. These are the only two `createSteps` callers in
+  `packages/@n8n/engine/src` at the pin.
+- (I3) Under the net-backed policy, `decideSuccessors(c)` is R(S_c) narrowed to c's candidates, so
+  every key it decides is in R(S_c), with R's fate.
+- (I4) The policy's snapshot T is a subset of the row set U(t) at one instant t that holds U(t)'s
+  frontier. So `decodeFrontier(T) = decodeStepRows(U(t))` (step 14), and R, "a row failed" and "a
+  row is unsettled" read the same on T as on U(t). Fix (2) below is built to keep this property: the
+  only read that returns rows is a single statement.
+- (N1) The places a key's start or skip consumes are each incoming edge's `arrived` and the node's
+  `live`. No other transition consumes them (`gadget/settlement/node.ts`, `batch.ts`).
+- (N2) A start is inhibited only by `_halt`. A skip is inhibited by `_halt` and by the node's `live`.
+- (N3) An `arrived` place never holds two tokens in a marking the decoder produces. An edge's source
+  row at a given pass settles once (I1), and the next pass's token for a loop edge comes only after
+  the consumer fired at this pass (`codec/v2/frontier.ts`, argument 1). A `live` token is written
+  only together with an `arrived` token for an edge into the same node (`routing.ts`, the batch
+  node's `loop` and `doneData` branches).
+
+**Lemma P (persistence).** Let S ⊑ S′ be row sets of one run, where S′ has the rows of S, more rows,
+or later statuses. Let S′ hold no failed row, and let M(S′) be reachable from M(S). If key k is in
+R(S) with fate f, and k has no row in S′, then k is in R(S′) with the same fate f.
+
+*Proof.* The path from M(S) to M(S′) fires neither of k's transitions, because k has no row. The
+key's iteration is unchanged: k = (n, rowCount_S(n)), and S′ has no row of n at that iteration or
+later. By N1, every token k's transitions consumed at M(S) is still in place. `_halt` is unmarked,
+because only a failing run writes it and S′ has no failed row.
+- If f is queue, the start still has its `arrived` tokens and at least one `live` token.
+- If f is skip, n's `live` was empty at M(S). A `live` token at M(S′) would have arrived together
+  with a second token on some `arrived` place into n (N3's pairing). That place already held a
+  token, which contradicts N3. So the skip is still enabled, and the start is still disabled.
+∎
+
+**Corollary D (one fate per key).** Take two snapshots of one run under the net-backed policy that
+both put k in R. Then both give k the same fate.
+
+*Proof.* Instantaneous snapshots of one run are ordered by ⊑. Apply P with S′ the later snapshot:
+k has no row in S′, since it is in R(S′), and S′ has no failed row, since R(S′) is not ∅. ∎
+
+**Theorem.** Take the handler h of a settlement s:
+- h reads T, the snapshot of U(t1);
+- it gets D = `decideSuccessors(s)` at T, and `createSteps(D)` has returned by time t_c;
+- at t3 > t_c it calls `isFinished`, and the policy answers F = `isFinished(T ∪ D̂)`. Here D̂ adds
+  each queue key of D as a `queued` row and each skip key as a `skipped` row.
+
+If F is true, then at t3 the rows are exactly U(t1) ∪ D̂, with the same statuses. That row set has
+no failed row, every row in it is settled, and R of it is ∅.
+
+*Proof.* Let V = U(t1) ∪ D̂. F true gives three facts:
+- (a) no failed or cancelled row in T ∪ D̂ (decision 8 answers false on a cancelled row);
+- (b) every row is settled, so D has no queue key and D̂ is all skips;
+- (c) R(T ∪ D̂) = ∅. By I4 applied to V, R(V) = ∅. (T ∪ D̂ ⊆ V and holds V's frontier: the D̂ rows
+  are their nodes' new latest rows, and a batch node advanced by D̂ from pass L to L+1 needs passes
+  L and 0, which T holds.)
+
+1. Each key of D̂ has a `skipped` row at t3. If h did not create it, `createSteps` found the row
+   present, so another planner decided the key from its own snapshot. By D, that planner also
+   skipped it. A skipped row never changes (I1).
+2. The rows of U(t1) are all settled, by (b) and the frontier fact that rows outside T are
+   completed or skipped. By I1 they are unchanged at t3. So U(t3) contains V with the same statuses.
+3. Let X = U(t3) \ V, and suppose X is not empty. Let r be the first row of X created (one
+   `createSteps` is one atomic insert; take any row of the earliest batch). r is not the trigger,
+   which exists before any settlement and so is in U(t1). By I2, a handler h_c of a settled row c
+   created r, with r in R(S_c), where S_c is a snapshot of U(t′) for some t′ before r was created.
+   - Every row of U(t′) was created before r. By the choice of r it is not in X, so it is in V.
+   - M(V) is reachable from M(U(t′)). If t′ ≤ t1, follow the run's own firings to U(t1), then fire
+     D's skips, which are enabled at T and so at U(t1) (I4). If t′ > t1, then U(t′) is U(t1) plus
+     the D̂ rows created by t′, because U(t1)'s rows were already settled. The remaining skips of D
+     are still enabled by P.
+   - V has no failed row (a), and r has no row in V. So P gives r ∈ R(V), which contradicts (c).
+
+So X is empty and U(t3) = V. ∎
+
+**Liveness: reuse never loses the ending.** Suppose an execution reaches a final row set U*: every
+row settled, none failed or cancelled, and R(U*) = ∅. Let x be the row that settled last (a skipped
+row settles when it is created).
+- x's handler starts after x settled. By then every row is settled, and no later row is created: a
+  queued row would settle after x, and a skipped row would settle when created, after x.
+- So both reads of x's snapshot see U*. `hasFailedSteps` is false, D = ∅, and the reused
+  `isFinished(U*)` is true.
+
+So the execution ends, at the latest, in the handler of the last row to settle. By the theorem it
+never ends earlier than a fresh read would let it. Reuse can move the ending to a later settlement
+than a fresh read would. Under concurrency that can change `lastStep`, which the legs compare.
+
+**Binding (B), which the theorem assumes.** The snapshot reused by h's `isFinished` must be the one
+h's own `decideSuccessors` stored. The policy keys the stored snapshot on the graph object it is
+passed, checks the execution id, and consumes it once. The handler passes the same
+`execution.graph` object to both calls. Different handlers get different objects, because
+`TypeOrmExecutionStore.loadExecution` builds the record with `getRawOne()`, which parses the jsonb
+column on every call. The leg's `MemoryExecutionStore.loadExecution` copies it on every call too. If
+B failed, another handler's D̂ might not exist yet at t3, and step 1 would not hold. B is therefore
+checked live: the testbed instrument records which handler context stored each snapshot and which
+consumed it.
+
+**The safe direction, observed.** When a row settles between t1 and t3, the reused answer can be
+false where n8n's fresh count says true. In the shadow legs that is reported as the verdict `stale`
+(the side that read nothing said false, the other side said true), counted and not excused as an
+agreement. The opposite direction stays `disagree`.
+
+**Falsifier for this argument.** In the handler leg (`--concurrency 8 --p-fail 0.3 --wait 0.2
+--p-cancel 0.3`) with an injected stale snapshot: if our `isFinished` says true while the live rows
+at that moment are not final, the argument fails, and the step stops and reports blocked with the
+counterexample.
+
+#### What was built
+
+- **(1) One snapshot per settlement** (`src/settlement/policy.ts`). `decideSuccessors` stores its rows
+  and its decision in a `WeakMap` keyed by the graph object it was passed. `isFinished` on the same
+  object, with the same execution id and compile-memo entry, takes the stored snapshot (once) and
+  answers `finishedAfterDecision(rows, decided)` = `finishedFromRows(rows ∪ D̂)`. It answers false
+  without decoding when D has a queue key. Any other `isFinished` reads afresh. A `decideSuccessors`
+  first drops whatever the object had stored, so a throw leaves nothing behind. There is a new option
+  `reuseSnapshot` (default `true`) and a new diagnostic kind `snapshot`
+  (`stored` / `reused` / `overrun`, with a token pairing `stored` and `reused`).
+- **(2) The scoped read** (`src/settlement/rows.ts`, `readSnapshot`):
+  1. `loadLatestStepSummaries(batch node ids)`, skipped without a loop. It only picks keys.
+  2. One `loadStepSummariesByKeys` for every row of the snapshot: `(node, 0)` outside a loop; for a
+     loop whose batch node was at pass L, the members' passes `0, L−1, L, L+1` (all up to L+1 while
+     L ≤ 2); the batch node's passes plus the probe `L+2`; and the settled row.
+
+  If the probe row exists, the loop ran two passes between the reads. The snapshot is then re-read
+  by `readLatestSnapshot`, the previous default, which is consistent whatever the timing, and the
+  call reports `overrun` (4 reads). The previous read is kept as `readLatestSnapshot`, and
+  `readFullSnapshot` is unchanged.
+- **Shadow** (`src/settlement/shadow.ts`). A side that read nothing in `isFinished` is reported with
+  the rows of its `decideSuccessors` (`reused`). Its false against a fresh true is the verdict
+  `stale`. Its true against a fresh false stays `disagree`. The named-race check now sees the reused
+  side's rows.
+- **Testbed.** `preload.mjs` puts the `snapshot` events into the settlement record of the handler
+  they were emitted in. `compare-v2.ts` checks binding B (a `reused` token whose `stored` is in
+  another handler's record is a finding), counts `stale` verdicts and overruns, and reports the loop's
+  latency by quarter of the passes. `n8n-testbed.sh` now rebuilds `typescript/dist` when `src` is
+  newer. Before, it built only when the dist was missing, so a stale dist would have run an older
+  policy under the current name.
+- **Handler leg (d5)** (`tasks/v2-handler-leg.mts`):
+  - The answering instance of ours reuses snapshots, as registered. The other side of (d1), every
+    re-ask and both (d4) instances read afresh.
+  - On every `true` from our answering `isFinished`, the rows at that moment must be final, by our
+    fresh full-snapshot answer and by n8n's count.
+  - A reused false where n8n's fresh answer is true is counted as `stale`.
+  - `--stale` serves our answering `decideSuccessors` the rows as they were when the settled step
+    settled. They are taken in a microtask after the store call that settled it, so a `createSteps`
+    batch is whole. This is the stalest snapshot a handler can legally read.
+  - The mutation `--mutate cross-bind` hands our policy one graph object per execution, which breaks
+    binding B on purpose.
+
+#### Deviations
+
+- **(2) is scoped to batch nodes, not to "loop members and batch nodes".** The brief asked for the
+  latest-row read to cover the nodes whose latest iteration can exceed 0. That still sorts every row
+  of the loop. `EXPLAIN ANALYZE` in `postgres:18.4-alpine` (Docker, the same image as the legs), on
+  synthetic rows shaped like the Loop Over Items (T, Make, Split, then B and Body per pass, plus 20
+  other 1,000-pass executions in the table), 3 repetitions:
+
+  | query | 250 passes | 1,000 passes |
+  |---|---:|---:|
+  | latest of every node (the old first read; sorts 503 / 2,003 rows) | 1.23–1.33 ms | 4.16–4.23 ms |
+  | latest of B and Body (the brief's scoping; sorts 500 / 2,000 rows) | 1.27–1.29 ms | 3.95–4.07 ms |
+  | latest of B alone (the scoped read's first read, and n8n's own; `Limit` over a backward index scan, 1 row) | 0.03–0.05 ms | 0.05–0.06 ms |
+  | the scoped read's keyed read (13 keys; `BitmapOr` of 13 index probes) | 0.16–0.21 ms | 0.19–0.20 ms |
+
+  Members' rows are found by key instead. Their latest pass is L−1 or L whenever the batch node is
+  at L (`frontier.ts`, argument 1), so the keys are known after the batch read.
+- **Every row comes from the second read, and none from the first.** The brief's shape (latest rows
+  of the loop nodes in read 1, `(node, 0)` in read 2) mixes two instants for mutable rows: a batch
+  row read at t1 and a `Done@0` created at t2 make a row set the decoder refuses, which is F6. Here
+  the first read only chooses the keys. The second read is one statement and returns every row,
+  including the batch node's latest again. The probe detects the one case where the keys could
+  have missed rows.
+- **The overrun path makes 4 reads in one call.** That breaks "at most 2 reads per call" in that
+  case only. It needs the loop to finish two passes between two consecutive queries of one handler,
+  so it cannot happen on a loop alone (each settlement creates the next row). Measured: 0 overruns
+  in both full handler legs and in every testbed leg (below). It is counted on every call.
+- **A row of a node outside every loop at iteration ≥ 1 is no longer read** unless it is the settled
+  row. Engine v2 does not produce such rows (`targetKey`), and the latest-row read used to show one
+  to the decoder, which refused it. `tests/settlement/reuse.test.ts` pins the new behaviour.
+- **Tests changed with the design**, none of them n8n's:
+  - Calls that do not follow the handler's order now pass `reuseSnapshot: false`. These are
+    `isFinished` without the settlement's own `decideSuccessors` and `createSteps` before it: the
+    pure-function test, the reference-loop tests, the interleaving test and the frontier long loop.
+  - The read budget now expects 1 call without a loop and 2 with one, where it expected 1 or 2. The
+    long-loop key bound is now 24, where it was 15.
+  - Two error tests now name the scoped read's view: a stray `A@1` is now asked as the settled row;
+    a key not asked is now `After@1`.
+  - The diagnostics tests filter or expect the new `snapshot` kind.
+  - In the shadow tests, the CodecError case now uses a gap the scoped read sees, and the skew case
+    moves the keyed read.
+  - The golden replays (`replaySettlement` calls `isFinished` at S′ after `decideSuccessors` at S,
+    with the same graph object) pass unchanged with reuse on, and nothing was re-recorded.
+
+#### Results: the argument against the handler leg (settlement evidence)
+
+`npx tsx tasks/v2-handler-leg.mts --concurrency 8 --p-fail 0.3 --wait 0.2 --p-cancel 0.3` (20 × 20
+over 209 accepted entries, 167,200 runs, 83,600 pairs per configuration). n8n 2.42.0 dist at
+`944afe5` with 0001–0004 (`settlement-policy.js d01a00e31a71`, `step-settled-handler.js
+28762f9eafae`), libpetri 7.0.0 from the registry, Node 26.8.1. Settlement evidence, not a
+conformance number:
+
+| configuration | our `isFinished` reused / fresh | reused `true` checked | safety violations | `stale` (reused false, fresh true) | (d1) disagreements | (d2) | (d3) findings | (d4) | overruns |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `--stale` (decide from the rows at settlement; 469,171 such decides, 54,501 behind the store) | 292,968 / 0 | 65,613 | **0** | 6,979 | 0 + 0 | 0 | 0 | 0 | 0 |
+| natural interleaving | 290,738 / 0 | 70,429 | **0** | 788 | 0 + 0 | 0 | 0 | 0 | 0 |
+| `--stale --mutate cross-bind` (mutation check, not a result) | 278,049 / 14,266 | 64,493 | 7 | 5,543 | 0 + 7 | 0 | 0 | 0 | 0 |
+
+- **The argument holds.** With binding B in place, our `isFinished` said true 136,042 times on a
+  reused snapshot across the two configurations, and the live rows were final every time.
+- **The leg can see what the argument rules out.** With B broken it found 7 trues at rows that were
+  not final. Every one has the predicted shape: every live row settled, but another handler's skips
+  not yet written, so R is not ∅.
+- In every configuration, our runs ended `failed` through `isFinished` 0 times, and every
+  failure-free run of ours completed (no stuck `running`).
+
+#### Results: `diff-engines-v2.sh` after the fix (integration results)
+
+`scripts/testbed/diff-engines-v2.sh --repeat=2 --loop-repeat=3`, the same invocation as the first
+run. These are integration results from the live testbed. They are not conformance numbers, not
+policy-entering case counts, not neutrality legs and not settlement evidence. The write-up is
+`docs/testbed.md`, "After the F4 fix".
+
+Setup: `postgres:18.4-alpine` with image id `db676a0ed906` in all four legs, a 384 MB cap, Docker VM
+953,692,160 bytes. No memory failure. 19 executions per leg. `typescript/dist` was rebuilt from the
+fixed source.
+- **All checks from the first run hold.** Every execution in every leg equals `off` run 1 on status,
+  rows, fates, slots, outputs and `lastStep`. F3 does not fire (0 ending `running`). Policy calls
+  equal settled non-failed rows (6,055 = 6,055). F2 holds: 6,066 shadow agreements and 0
+  disagreements in each direction. F5, F6 and F7 do not fire: `entered` is 6,066 per registered
+  leg, with 0 `settlement policy error`.
+- **Binding B holds live.** Each registered leg stored 6,055 snapshots and reused 11, and 0 crossed
+  to another handler. There were 0 `stale` verdicts and 0 overruns.
+- **F4 does not fire.**
+  - Round trips: at most 2 in one settlement under `primary` (limit 3). On Done@0, `decideSuccessors`
+    made 2 and `isFinished` 0, where n8n's default made 1 + 2 = 3. Over every workflow: 6,015
+    settlements made 2 round trips and 40 made 1.
+  - Latency: the policy's p95 is 4.27 ms against n8n's handler p95 of 13.9 ms under `off`, a ratio of
+    0.31 (limit 2).
+  - Stricter readings, which do not decide F4: policy against policy 1.39 (2.11 before); handler
+    against handler 1.38 (1.75 before).
+- **The growth is gone.** The `primary` policy p50 by quarter of the 1,000 passes is 2.43, 2.68, 2.86
+  and 2.76 ms (2.75 → 5.41 before), and the p95 is 4.15–4.34 ms. Under `off` the p50 is 1.61–1.75
+  ms.
+
+#### Open after this step
+
+- The `stale` direction and the overrun path are exercised only by the concurrent handler leg. The
+  testbed's manual runs give them no occasion, so their 0 there is weak evidence. (Corrected in
+  "Review after step 13": `stale` also occurs live in `engine-int` on Postgres, and the overrun
+  path occurred in no leg, the handler legs included.)
+- Binding B rests on `TypeOrmExecutionStore.loadExecution` building a fresh record per call
+  (`getRawOne`). A future n8n change that caches execution records would break it silently. The
+  testbed's `crossed` count and the handler leg would show it; nothing in the policy can.
+- `tasks/v2-policy-cost.mts` still measures the policy as before (its reads now follow the scoped
+  read). It was not rerun.
+
+### Review after step 13: the shadow tally drops `stale`; the Postgres legs rerun (orchestrator, 2026-10-03)
+
+A review of steps 9–14 in the working tree reproduced six findings. One is a defect in the
+settlement leg's accounting. The other five are documents that claim more than the measurements,
+or measurements that were never recorded.
+
+**Defect: the `-int` legs' shadow tally had no `stale` case.** `n8n-v2-vitest-setup.ts`'s
+`onShadowReport` counted `agree`, `disagree`, `race` and `candidate-threw`. A `stale` report (step
+12's rerun added the verdict) reached the ledger as a record but no counter, so `entered.ts`'s
+headline summed to one call fewer than the policy calls and never showed `stale`. The switch had no
+exhaustiveness guard, so `tsc` did not catch the new union member. `tests/testbed/compare-v2.ts`
+counted it; the `-int` legs did not.
+- Fix: `SettlementCounts.stale`, counted in the shim, with `assertNever` on the verdict. `entered.ts`
+  reports `stale` in the headline and the report, and `shadowUnaccounted`: in the shadow modes,
+  policy calls minus verdicts, minus the errors of a `primary-shadowed` primary (ours threw, no
+  report). Nonzero prints `UNACCOUNTED n`. A ledger written before the fix has no `stale` field.
+  It reads as 0, and the call then shows as unaccounted instead of vanishing.
+- Regression tests (`tests/settlement/vitest-session.test.ts`): a `primary-shadowed` session over
+  T → A → B, with B running at the decide read and completed at `isFinished`, writes a case
+  record with `stale: 1`, and the report balances 2 calls against 2 verdicts. A hand-built ledger
+  balances with an error, and the same ledger without `stale` reports 1 unaccounted. With the
+  shim's `stale` arm removed, the first test fails.
+- This is not a falsifier. The verdicts and the ledger records were right; only the tally that
+  feeds the headline was short.
+
+**The Postgres shadow legs on the as-built policy** (after the F4 fix and this fix; settlement
+evidence and policy-entering cases, not conformance numbers). `scripts/run-conformance.sh
+--skip-patch --engines=libpetri --scope=S --settlement-mode=M`, one leg at a time, `typescript/dist`
+rebuilt. n8n `944afe5` with 0001–0004, libpetri 7.0.0 from the registry; Postgres 18.4
+(`postgres:18.4-alpine`, `db676a0ed906`) for `engine-int` and 18.6 (`postgres:18-alpine`,
+`d7a8005067f5`) for `compat-int`, Docker 25.0.2, VM 953,692,160 bytes.
+
+| leg | who answers | calls | agree | stale | disagree | race | candidate threw | cases |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `engine-int` `primary-shadowed` | ours | 34 | 33 | 1 | 0 | 0 | 0 | 10 / 10 policy-entering pass |
+| `engine-int` `shadow` | n8n's default | 32 | 31 | 1 | 0 | 0 | 0 | 10 / 10 entering, n8n's answers |
+| `compat-int` `primary-shadowed` | ours | 92 | 92 | 0 | 0 | 0 | 0 | 16 / 16 policy-entering pass |
+| `compat-int` `shadow` | n8n's default | 92 | 92 | 0 | 0 | 0 | 0 | 16 / 16 entering, n8n's answers |
+
+- **Both `stale` verdicts are in "settles a conditional diamond: dead chain skipped, merge runs on
+  the live side"**, at `isFinished`, with no skew. In `primary-shadowed` ours reused and said
+  false where n8n's fresh count said true. In `shadow` the same, with ours as the candidate. The
+  case passed under ours, `completed` with its asserted rows, so the ending moved to a later
+  settlement: divergence row 39, in a run of n8n's own suite. The theorem allows exactly this
+  direction.
+- **It varies from run to run.** Before this fix, a run on the same policy code gave `engine-int`
+  `primary-shadowed` 34 calls with 1 `stale` in the ledger (headline: agree 33), and `engine-int`
+  `shadow` 34 of 34 agree. The reruns in the table above overwrote those artefacts in
+  `conformance-results/`, so the table is the surviving record. The reviewer's own
+  `primary-shadowed` run gave 32 calls with 1 `stale` (scratch, `/private/tmp/rev14`). The call count moves with the diamond's interleaving (step 10
+  explains why), and so does the occasion for `stale`.
+- **0 named races, 0 errors** in every leg. No cancel was sent, so that 0 says nothing about row 36.
+- The `primary` legs (`engine-int` 10 / 10 with 34 calls, `compat-int` 16 / 16 with 92) were not
+  rerun. The fix changes no shadow-free count, and their artefacts were written on the as-built
+  policy and were not overwritten (only the shadow-mode legs were rerun).
+- Step 10's shadow table predates the reuse. Its `compat-int` row is `primary-shadowed` only, so
+  step 10 never ran `compat-int` `shadow`. The rerun row above, 92 of 92 agree, is its record.
+
+**The handler legs on the as-built policy, rerun** (settlement evidence, our in-memory stores).
+`npx tsx tasks/v2-handler-leg.mts`, 20 × 20 over 209 accepted entries, 167,200 runs, the same stamp
+as step 12's rerun:
+- Sequential (580 s): (d1) 1,086,514 `decideSuccessors` and 686,920 `isFinished`, 0
+  disagreements, 0 races; (d2) 83,600 lockstep pairs, 0 differences; (d5) 343,460 reused, 0
+  `stale`, 0 safety violations, 0 overruns. 0 findings. Equal to step 8's counts.
+- `--concurrency 8 --p-fail 0.3 --wait 0.2 --p-cancel 0.3 --stale` (689 s): 0 disagreements, and
+  the named races counted, not compared: `decideSuccessors` cancel race 21 (the default planned on
+  13, ours on none); `isFinished` failure race 211 (default true on 6) and cancel race 73 (default
+  true on 19). (d5) 292,968 reused, 6,979 `stale`, 65,613 reused trues checked, 0 safety
+  violations, 0 overruns. 0 findings. Equal to step 12's rerun.
+- So under stress the two policies agree on every compared decision, and differ by design on the
+  named races (rows 36 and 37). "Agrees on every decision" was an overclaim.
+
+**Corrected in the documents.**
+- ADR 0014: §5 now states CLAUDE.md's rule (testbed wall clocks and data-equivalence results are
+  integration results, never conformance numbers); the Postgres shadow figures are the table
+  above, not step 10's 32 / 32; "Open" says where `stale` occurs and that the overrun path
+  occurred in no leg.
+- Open after step 12 said the overrun path is exercised by the concurrent handler leg. Every handler
+  leg and every testbed leg counted 0 overruns. Only `tests/settlement/reuse.test.ts` exercises it.
+- Divergences: row 39 records the `engine-int` occurrence; row 36 names which shadow legs ran.
+- CHANGELOG, state of the project, todo (c)/(d) and the README: the net answers the settlement
+  decision only, the testbed is 19 manual in-process executions per leg one at a time, the handler
+  leg's stores are ours, the races are counted, not compared, "2 round trips" is a testbed
+  measurement with the 4-read overrun path named, and `engine`'s neutrality is per case on the
+  baseline's 376 plus 0003/0004's 25.
+
+**Gate.** No gate was recorded after step 12's rerun or step 13. Before this fix `npm test` passed
+2,119 tests in 108 files (the reviewer's run). After it:
+- `npm run check` is clean.
+- `npm test` passes 2,121 tests in 108 files: 2,119 plus the 2 regression tests.
+- `.n8n` and Docker were left as found: the generated shims were already present and are excluded
+  files; only testcontainers' reaper ran, and it exited.
+- Nothing was committed or pushed.
+
+- **Provenance gap, known:** in the rerun `engine-int` `primary-shadowed` leg, `pg-stamp.txt` says
+  no container started and `pg-events.txt` is empty, while `test.log` shows the Postgres-backed
+  suite ran (149 passed). This is `pg_watch_begin` subscribing to `docker events` late (seen
+  before, in 2 runs at step 10). The image id, and with it the server version, is read separately
+  and is correct. The container count in that stamp is not.

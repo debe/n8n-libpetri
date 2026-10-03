@@ -15,12 +15,13 @@
 | [0011](0011-composition-theorem.md) | The composition theorem: per-gadget contracts to a whole-workflow claim | **proposed** — proof sketch, not mechanised; measured to cover 40.5% of the template corpus |
 | [0012](0012-engine-v2-target.md) | Engine v2 as a second target: model first, seam second | **proposed**: nothing built; plan for n8n's `packages/@n8n/engine` |
 | [0013](0013-engine-v2-primary.md) | Engine v2 is the primary target; v1 is frozen | accepted (2026-10-02) |
+| [0014](0014-settlement-policy-seam.md) | The engine v2 settlement seam, and the net behind it | accepted as built (2026-10-03); the upstream shape of 0004 is open |
 
 Each ADR has Context / Decision / Consequences / Evidence; Evidence names the spike under
 `typescript/tests/spikes/` that pins the behaviour it rests on.
 
 ADRs are records of the moment they were decided. Line numbers they cite in n8n files refer
-to the commit they name (0001-0011: master `441970b`), not to the current pin
+to the commit they name (0001-0011: master `441970b`; 0013 and 0014: master `944afe5`), not to the current pin
 (`scripts/n8n-pin.sh`). Moving to `n8n@2.41.3` shifted `workflow-execute.ts` by four lines
 from its prelude onwards. The extracted loop, `stack-scheduler.ts`, did not change.
 
@@ -40,6 +41,12 @@ stand as written. 0007's M5 amendment inverts the routes (§9-§12):
 libpetri's state-class graph (VER-010) decides proper completion and the other reachability
 families, the `SmtVerifier` is the fallback for a truncated graph, and a fourth verdict,
 `bounded`, reports what a cyclic workflow's explored prefix does establish.
+
+0012–0014 are the engine v2 line. 0012 proposed the model and the seam, 0013 made engine v2 the
+primary target and froze v1, and 0014 records the seam as built: patches 0003/0004, the
+net-backed `SettlementPolicy` behind them, and what each falsifier changed. 0012 keeps its
+**proposed** status as the record of the plan at the time. 0013 is the decision to move, and 0014
+records what the move built.
 
 For what the decisions add up to — what exists, what it is measured to do and what it
 deliberately does not — see

@@ -49,8 +49,20 @@
 #            src/workflows/triggers and test/integration/engine-v2-*) are not in this scope;
 #            the whole-package `cli` scope runs the unit ones.
 #
-# The integration scopes (engine-int, compat-int) are plan step 9 and need a Postgres
-# provider; they are not here.
+# The integration scopes are the same packages' integration configs (`test:integration`,
+# vitest.integration.config.ts), plan step 9:
+#
+#   engine-int  @n8n/engine, integration config                baseline-engine-int.junit.xml
+#               the 6 files above; 5 start Postgres
+#   compat-int  @n8n/node-engine-compatibility, integration     baseline-compat-int.junit.xml
+#               config: m1-acceptance (16 cases), Postgres
+#
+# They need Docker: n8n's own testcontainers code starts a Postgres per file, unmodified. The
+# run uses --maxWorkers=1, one file and so one Postgres at a time, because each container
+# competes for the Docker VM's memory; that changes scheduling, not the case set. The images
+# the tests name are pulled by testcontainers on first use, or ahead with `docker pull`. The
+# baseline writes baseline<suffix>.pg-stamp.txt: the Postgres server version, image ids and
+# the containers Docker started during the run (scripts/pg-stamp.sh).
 #
 # `cli` needs its own install and its own build: the default install is the workspace closure
 # of n8n-nodes-base, which does not contain packages/cli (`pnpm install --frozen-lockfile
@@ -77,6 +89,8 @@ N8N_REPO="https://github.com/n8n-io/n8n.git"
 # The pin (N8N_TAG, N8N_COMMIT) lives in n8n-pin.sh, shared with verify-patch.sh.
 # shellcheck source=n8n-pin.sh
 . "$(dirname "${BASH_SOURCE[0]}")/n8n-pin.sh"
+# shellcheck source=pg-stamp.sh
+. "$(dirname "${BASH_SOURCE[0]}")/pg-stamp.sh"
 COREPACK_VERSION="${COREPACK_VERSION:-0.36.0}"
 # The package whose turbo `build` (with `^build`) yields everything packages/core's tests load.
 BUILD_TARGET="n8n-nodes-base"
@@ -102,6 +116,9 @@ done
 
 # The scope table (see the header). SCOPE_DIR is where vitest drops junit.xml (its cwd is the
 # package root); SCOPE_SUFFIX names the artefacts so scopes never overwrite each other.
+# SCOPE_SCRIPT is the package script, SCOPE_ARGS vitest flags after the filters, SCOPE_PG 1
+# for a suite that starts Postgres through testcontainers.
+SCOPE_SCRIPT=test; SCOPE_ARGS=; SCOPE_PG=0
 case "$SCOPE" in
   execution-engine) SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=src/execution-engine; SCOPE_SUFFIX= ;;
   core)             SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=;                     SCOPE_SUFFIX=-core ;;
@@ -120,8 +137,14 @@ case "$SCOPE" in
   # vitest path filters are substrings of the file path, and the dispatcher's test lives in
   # src/services/__tests__/, so `src/services/engine-v2-dispatcher` would match nothing.
   cli-v2)           SCOPE_PKG=n8n;          SCOPE_DIR=packages/cli;      SCOPE_FILTER="src/modules/engine-v2 src/services/__tests__/engine-v2-dispatcher"; SCOPE_SUFFIX=-cli-v2; BUILD_TARGET=n8n ;;
-  *) echo "unknown --scope: $SCOPE (execution-engine, core, workflow, cli, engine, compat, cli-v2)" >&2; exit 2 ;;
+  # The integration configs (see the header): one file, so one Postgres, at a time.
+  engine-int)       SCOPE_PKG=@n8n/engine;  SCOPE_DIR=packages/@n8n/engine; SCOPE_FILTER=;                SCOPE_SUFFIX=-engine-int; BUILD_TARGET=@n8n/engine
+                    SCOPE_SCRIPT=test:integration; SCOPE_ARGS=--maxWorkers=1; SCOPE_PG=1 ;;
+  compat-int)       SCOPE_PKG=@n8n/node-engine-compatibility; SCOPE_DIR=packages/@n8n/node-engine-compatibility; SCOPE_FILTER=; SCOPE_SUFFIX=-compat-int; BUILD_TARGET=@n8n/node-engine-compatibility
+                    SCOPE_SCRIPT=test:integration; SCOPE_ARGS=--maxWorkers=1; SCOPE_PG=1 ;;
+  *) echo "unknown --scope: $SCOPE (execution-engine, core, workflow, cli, engine, compat, cli-v2, engine-int, compat-int)" >&2; exit 2 ;;
 esac
+read -r -a SCOPE_ARG_LIST <<< "$SCOPE_ARGS"
 N8N_TEST_FILTER="${N8N_TEST_FILTER:-$SCOPE_FILTER}"
 # One vitest positional argument per filter; none at all is the package's whole suite.
 read -r -a FILTER_ARGS <<< "$N8N_TEST_FILTER"
@@ -289,14 +312,22 @@ build_chain() {
 run_baseline() {
   local junit="$N8N_DIR/$SCOPE_DIR/junit.xml" out="$RESULTS/baseline$SCOPE_SUFFIX" rc=0 vitest_v
   rm -f "$junit"
+  [ "$SCOPE_PG" -eq 0 ] || pg_preflight
   vitest_v=$(pnpm --filter "$SCOPE_PKG" exec vitest --version 2>/dev/null | tail -1 || true)
   echo "vitest          $vitest_v" >> "$RESULTS/bootstrap-env.txt"
   # CI=true makes @n8n/vitest-config add the junit reporter (outputFile ./junit.xml, relative to
   # the package root) and cap the fork pool at 50 % of the cores. Positional arg = path filter;
   # an empty filter is passed as no argument at all, which is the package's whole suite.
-  CI=true pnpm --filter "$SCOPE_PKG" run test ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} || rc=$?
+  [ "$SCOPE_PG" -eq 0 ] || pg_watch_begin "$out.pg-events.txt"
+  CI=true pnpm --filter "$SCOPE_PKG" run "$SCOPE_SCRIPT" ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} \
+    ${SCOPE_ARG_LIST[@]+"${SCOPE_ARG_LIST[@]}"} || rc=$?
+  pg_watch_end
   [ -f "$junit" ] || die "vitest produced no junit.xml (rc=$rc)"
   mv "$junit" "$out.junit.xml"
+  if [ "$SCOPE_PG" -eq 1 ]; then
+    pg_stamp "$N8N_DIR/$SCOPE_DIR" "$out.pg-events.txt" "$out.pg-stamp.txt"
+    log "Postgres stamp → $out.pg-stamp.txt"
+  fi
   node - "$out.junit.xml" "${N8N_TEST_FILTER:-<whole package>} ($SCOPE_PKG, scope $SCOPE)" > "$out.summary.txt" <<'NODE'
 const fs = require('node:fs');
 const [file, filter] = process.argv.slice(2);
@@ -328,7 +359,7 @@ mkdir -p "$RESULTS"
 touch "$TIMINGS"
 log "repo $ROOT"
 log "n8n  $N8N_DIR @ $N8N_TAG ($N8N_COMMIT)"
-log "scope $SCOPE ($SCOPE_PKG, filter '${N8N_TEST_FILTER:-<whole package>}') → baseline$SCOPE_SUFFIX.junit.xml"
+log "scope $SCOPE ($SCOPE_PKG $SCOPE_SCRIPT, filter '${N8N_TEST_FILTER:-<whole package>}') → baseline$SCOPE_SUFFIX.junit.xml"
 T_ALL=$(date +%s)
 step checkout checkout
 step corepack setup_pnpm

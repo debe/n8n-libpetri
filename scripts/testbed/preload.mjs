@@ -75,3 +75,276 @@ if (process.env[ENGINE_ENV] === 'libpetri') {
     `[n8n-libpetri] scheduler registered: budget=${integer('N8N_LIBPETRI_BUDGET', 1)}, hook=${hook}\n`,
   );
 }
+
+/*
+ * Engine v2 (`n8n-testbed.sh --v2`, `tasks/v2-seam-plan.md` step 11). Independent of the branch
+ * above: that one installs a scheduler for engine v1's `WorkflowExecute`, this one a settlement
+ * policy for `@n8n/engine`, and a process may carry either, both or neither.
+ *
+ * The same three rules hold:
+ * 1. `@n8n/engine` is resolved through `createRequire(packages/cli/package.json)`, so the registry
+ *    set here is the one `EngineV2Runtime` reads: `createEngineRuntime` takes
+ *    `settlementPolicy ?? getSettlementPolicy()` (patch 0004) from the module `packages/cli`'s
+ *    `require('@n8n/engine')` returns, and both resolve the pnpm symlink to one realpath, one CJS
+ *    instance. The registration runs before n8n's modules initialise, so the runtime the
+ *    engine-v2 module builds at boot reads it.
+ * 2. No fallback. An engine without `setSettlementPolicy` is a dist built without patch 0004,
+ *    which would run n8n's own decisions under our name, so the preload throws and n8n does not
+ *    start — in every mode, `off` included, since `off` is the patched-with-nothing-registered leg.
+ * 3. Two claims, two lines. `settlement policy registered` is written by `register.ts` once the
+ *    registry hands back what was set; `settlement policy entered` only by the policy itself when
+ *    a settlement calls it. F5 is the first without the second.
+ *
+ * Every diagnostic and every shadow report is appended to `N8N_LIBPETRI_SETTLEMENT_LEDGER`
+ * (JSONL), the record step 12 counts calls from. stderr gets `registered`, the first `entered` per
+ * execution, every `race` and `error`, and every shadow report that is not an agreement, so the
+ * log stays readable under a 1,000-pass loop.
+ */
+const SETTLEMENT_ENV = 'N8N_LIBPETRI_SETTLEMENT';
+const settlement = process.env[SETTLEMENT_ENV];
+// `--import` runs in every worker thread too (they inherit `execArgv`), and n8n starts some after
+// boot. A worker thread has its own module graph, so a registration there lands on a second
+// `@n8n/engine` instance no runtime reads, and its `registered` line would be a false second
+// claim. Engine v2's runtime is built on the main thread (`EngineV2Runtime.initEngine`).
+const { isMainThread } = await import('node:worker_threads');
+
+if (settlement !== undefined && settlement !== '' && isMainThread) {
+  const { appendFileSync } = await import('node:fs');
+  const resolveFrom = process.env.N8N_LIBPETRI_RESOLVE_FROM;
+  const hook = process.env.N8N_LIBPETRI_V2_HOOK;
+  const ledger = process.env.N8N_LIBPETRI_SETTLEMENT_LEDGER;
+  if (!resolveFrom) throw new Error('N8N_LIBPETRI_RESOLVE_FROM is not set (expected .n8n/packages/cli/package.json)');
+  if (!hook) throw new Error('N8N_LIBPETRI_V2_HOOK is not set (expected typescript/dist/n8n-v2.js)');
+
+  const modules = (process.env.N8N_ENABLED_MODULES ?? '').split(',').map((m) => m.trim());
+  if (!modules.includes('engine-v2')) {
+    throw new Error(`${SETTLEMENT_ENV} is set but N8N_ENABLED_MODULES does not name engine-v2; no runtime would read the policy`);
+  }
+
+  const engine = createRequire(resolveFrom)('@n8n/engine');
+  for (const name of ['setSettlementPolicy', 'getSettlementPolicy', 'resetSettlementPolicy']) {
+    if (typeof engine[name] !== 'function') {
+      throw new Error(
+        `@n8n/engine exports no ${name}: packages/@n8n/engine/dist predates patch 0004. ` +
+          'Run scripts/verify-patch.sh, then rebuild the engine (n8n-testbed.sh does when dist is stale).',
+      );
+    }
+  }
+  if (typeof engine.defaultSettlementPolicy?.decideSuccessors !== 'function') {
+    throw new Error('@n8n/engine exports no defaultSettlementPolicy: packages/@n8n/engine/dist predates patch 0003.');
+  }
+
+  // Buffered, flushed every 200 ms and synchronously at exit. A synchronous append per record would
+  // sit inside the policy's own measured time (`entered` is emitted inside every call), and under
+  // `--timing` that is a cost the `off` leg never pays, so the legs would not be like for like.
+  const pending = [];
+  const flush = () => {
+    if (!ledger || pending.length === 0) return;
+    const chunk = pending.splice(0).join('');
+    try {
+      appendFileSync(ledger, chunk);
+    } catch {
+      // The ledger never changes an answer.
+    }
+  };
+  setInterval(flush, 200).unref();
+  process.on('exit', flush);
+  const record = (entry) => {
+    if (!ledger) return;
+    pending.push(`${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, ...entry })}\n`);
+  };
+  const say = (line) => process.stderr.write(`[n8n-libpetri] ${line}\n`);
+  // The timing instrument's per-settlement context, made here so the policy's `snapshot`
+  // diagnostics (step 12's rerun: which settlement stored a snapshot, which reused it) land in the
+  // settlement record of the handler they were emitted in.
+  const timing = process.env.N8N_LIBPETRI_SETTLEMENT_TIMING === '1';
+  const { AsyncLocalStorage } = await import('node:async_hooks');
+  const als = new AsyncLocalStorage();
+
+  if (settlement === 'off') {
+    // Nothing registered: the runtime keeps n8n's `defaultSettlementPolicy`. The line is the
+    // launcher's gate for this mode, and it says what was checked: the seam is in the dist.
+    record({ kind: 'off', message: 'settlement policy off' });
+    say('settlement policy off: patch 0004 is in @n8n/engine, nothing registered, n8n\'s default answers');
+  } else {
+    const { registerSettlementPolicy, SETTLEMENT_MODES } = await import(pathToFileURL(hook).href);
+    if (!SETTLEMENT_MODES.includes(settlement)) {
+      throw new Error(`${SETTLEMENT_ENV} must be off or one of ${SETTLEMENT_MODES.join(', ')}, got '${settlement}'`);
+    }
+    const announced = new Set();
+    registerSettlementPolicy(engine, {
+      mode: settlement,
+      onDiagnostic: (d) => {
+        if (d.kind === 'snapshot') {
+          // Under --timing it goes into the handler's settlement record; an `overrun` is also a line.
+          const ctx = als.getStore();
+          if (ctx) ctx.snapshots.push({ method: d.method, event: d.event, token: d.token });
+          if (!ctx || d.event === 'overrun') record(d);
+          if (d.event === 'overrun') say(`settlement policy snapshot overrun: method=${d.method}, execution=${d.executionId}`);
+          return;
+        }
+        record(d);
+        if (d.kind === 'registered') {
+          say(`${d.message}: mode=${d.mode}, hook=${hook}`);
+        } else if (d.kind === 'entered') {
+          if (announced.has(d.executionId)) return;
+          announced.add(d.executionId);
+          say(`${d.message}: method=${d.method}, execution=${d.executionId}`);
+        } else if (d.kind === 'race') {
+          say(`${d.message}: ${d.race}, method=${d.method}, execution=${d.executionId}`);
+        } else if (d.kind === 'error') {
+          say(`${d.message}: ${d.name}: ${d.error} (method=${d.method}, execution=${d.executionId})`);
+        }
+      },
+      onShadowReport: (report) => {
+        if (report.verdict === 'agree') {
+          // Without the rows: under a 1,000-pass loop each report carries every row both sides
+          // read, and an agreement is fully described by its answer and its costs.
+          const { primaryRows, candidateRows, ...compact } = report;
+          record({ kind: 'shadow', report: { ...compact, primaryRowCount: primaryRows.length, candidateRowCount: candidateRows.length } });
+        } else {
+          record({ kind: 'shadow', report });
+          say(`settlement shadow ${report.verdict}: method=${report.method}, execution=${report.executionId}, settled=${JSON.stringify(report.settled)}${report.error ? `, error=${report.error}` : ''}`);
+        }
+      },
+    });
+  }
+
+  if (timing) {
+    await instrumentSettlements(engine, createRequire(resolveFrom), record, say, als);
+  }
+}
+
+/*
+ * The settlement timing instrument (`n8n-testbed.sh --timing`, `diff-engines-v2.sh`, plan step 12).
+ * A measuring device, not a seam: it changes no answer and no order of calls, and it is installed the
+ * same way in every mode, `off` included, so the legs are compared like for like.
+ *
+ * It wraps, on the module instance the runtime is built from:
+ * - `StepSettledHandler.prototype.handle`: one record per `step:settled` event, with its wall time and
+ *   an `AsyncLocalStorage` context that the wrappers below write into. Concurrent settlements keep
+ *   their own contexts.
+ * - `announceEnd`: the `ended` response's `status` and `lastStep`, captured as the handler computes it
+ *   whether or not a response is sent (a manual run expects none, `responseExpectation.kind` `none`).
+ * - every method of `TypeOrmStepStore` and `TypeOrmExecutionStore`: store calls per settlement, the
+ *   step and execution the handler loaded, and what its first `hasFailedSteps` returned.
+ * - the policy's `snapshot` diagnostics, emitted inside its calls, go into the same record
+ *   (`snapshots`): which settlement stored a snapshot and which reused it, by token, so the
+ *   comparator can check that a reused snapshot never crosses from one handler to another.
+ * - the two methods of the policy the runtime holds (`getSettlementPolicy()` after registration; in
+ *   `off` that is n8n's `defaultSettlementPolicy` object itself, wrapped in place, so the registry stays
+ *   empty): each call's wall time, its reader calls, and its round trips, a reader call that reaches
+ *   SQL. `loadLatestStepSummaries([])` and `loadStepSummariesByKeys([])` return `{}` in the store
+ *   without a query, so they are reader calls and not round trips.
+ */
+async function instrumentSettlements(engine, req, record, say, als) {
+  const { StepSettledHandler } = req('@n8n/engine/dist/execution/step-settled-handler.js');
+  const { TypeOrmStepStore } = req('@n8n/engine/dist/database/typeorm-step-store.js');
+  const { TypeOrmExecutionStore } = req('@n8n/engine/dist/database/typeorm-execution-store.js');
+  for (const [name, value] of [['StepSettledHandler', StepSettledHandler], ['TypeOrmStepStore', TypeOrmStepStore], ['TypeOrmExecutionStore', TypeOrmExecutionStore]]) {
+    if (typeof value !== 'function') throw new Error(`settlement timing: @n8n/engine/dist has no ${name}`);
+  }
+  for (const name of ['handle', 'announceEnd']) {
+    if (typeof StepSettledHandler.prototype[name] !== 'function') throw new Error(`settlement timing: StepSettledHandler has no ${name}`);
+  }
+
+  const handle = StepSettledHandler.prototype.handle;
+  StepSettledHandler.prototype.handle = async function timedHandle(event) {
+    const ctx = { store: 0, policy: [], snapshots: [], step: null, executionStatus: null, failedFound: null, ended: null };
+    const t0 = performance.now();
+    let threw = null;
+    try {
+      return await als.run(ctx, () => handle.call(this, event));
+    } catch (error) {
+      threw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      throw error;
+    } finally {
+      record({
+        kind: 'settlement', executionId: event.executionId, stepId: event.stepId,
+        ms: performance.now() - t0, step: ctx.step, executionStatus: ctx.executionStatus, failedFound: ctx.failedFound,
+        store: ctx.store, policy: ctx.policy, snapshots: ctx.snapshots, ended: ctx.ended, threw,
+      });
+    }
+  };
+
+  const announceEnd = StepSettledHandler.prototype.announceEnd;
+  StepSettledHandler.prototype.announceEnd = function timedAnnounceEnd(execution, step, node, status) {
+    const ctx = als.getStore();
+    if (ctx) {
+      ctx.ended = {
+        status, responseKind: execution?.responseExpectation?.kind ?? null,
+        lastStep: { nodeId: step.nodeId, nodeName: node?.name ?? null, iteration: step.iteration, status: step.status },
+      };
+    }
+    return announceEnd.call(this, execution, step, node, status);
+  };
+
+  const wrapStore = (cls) => {
+    for (const name of Object.getOwnPropertyNames(cls.prototype)) {
+      if (name === 'constructor') continue;
+      const original = cls.prototype[name];
+      if (typeof original !== 'function') continue;
+      cls.prototype[name] = function timedStoreCall(...args) {
+        const ctx = als.getStore();
+        if (!ctx) return original.apply(this, args);
+        ctx.store++;
+        const result = original.apply(this, args);
+        if (name === 'loadStep' || name === 'loadExecution' || name === 'hasFailedSteps') {
+          return Promise.resolve(result).then((value) => {
+            if (name === 'loadStep' && ctx.step === null && value) ctx.step = { nodeId: value.nodeId, iteration: value.iteration, status: value.status };
+            if (name === 'loadExecution' && ctx.executionStatus === null && value) ctx.executionStatus = value.status;
+            // The first answer is the handler's pre-planning check; a later one is
+            // `finishExecutionIfDone`'s, which chooses the outcome.
+            if (name === 'hasFailedSteps' && ctx.failedFound === null) ctx.failedFound = value === true;
+            return value;
+          });
+        }
+        return result;
+      };
+    }
+  };
+  wrapStore(TypeOrmStepStore);
+  wrapStore(TypeOrmExecutionStore);
+
+  const countingReader = (reader, call) => ({
+    executionId: reader.executionId,
+    loadLatestStepSummaries: async (nodeIds) => {
+      call.readerCalls++;
+      if (nodeIds.length > 0) call.roundTrips++;
+      return await reader.loadLatestStepSummaries(nodeIds);
+    },
+    loadStepSummariesByKeys: async (keys) => {
+      call.readerCalls++;
+      if (keys.length > 0) call.roundTrips++;
+      return await reader.loadStepSummariesByKeys(keys);
+    },
+    countSettledSteps: async () => {
+      call.readerCalls++;
+      call.roundTrips++;
+      return await reader.countSettledSteps();
+    },
+  });
+  const active = engine.getSettlementPolicy();
+  const timed = (method) => {
+    const original = active[method].bind(active);
+    return async (...args) => {
+      const ctx = als.getStore();
+      const call = { method, ms: 0, readerCalls: 0, roundTrips: 0 };
+      const reader = args[args.length - 1];
+      args[args.length - 1] = countingReader(reader, call);
+      const t0 = performance.now();
+      try {
+        return await original(...args);
+      } finally {
+        call.ms = performance.now() - t0;
+        if (ctx) ctx.policy.push(call);
+      }
+    };
+  };
+  active.decideSuccessors = timed('decideSuccessors');
+  active.isFinished = timed('isFinished');
+
+  const who = active === engine.defaultSettlementPolicy ? "n8n's defaultSettlementPolicy (nothing registered)" : 'the registered policy';
+  record({ kind: 'timing', message: 'settlement timing installed', policy: who });
+  say(`settlement timing installed: handler, stores and ${who}`);
+}

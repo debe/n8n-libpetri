@@ -11,6 +11,7 @@ export default defineConfig({
     codec: 'src/codec.ts',
     'n8n-v2': 'src/n8n-v2.ts',
     'n8n-vitest-setup': 'src/n8n-vitest-setup.ts',
+    'n8n-v2-vitest-setup': 'src/n8n-v2-vitest-setup.ts',
   },
   format: ['esm'],
   dts: true,

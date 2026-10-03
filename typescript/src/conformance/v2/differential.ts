@@ -22,6 +22,12 @@
  *   `finishExecutionIfDone`'s count test. An S with a failed row is F3's named race (a failure
  *   landing between the planning read and `hasFailedSteps`): counted, not compared.
  *
+ * - **(f) frontier**, {@link compareFrontier} (`tasks/v2-seam-plan.md` step 14): at a reached S
+ *   (and s), the frontier decode (`codec/v2/frontier.ts`) against the global decoder: the marking
+ *   and row counts from S's frontier alone are `decodeStepRows(S)`'s, both refuse or neither does,
+ *   and the policy's `decideFromRows` / `finishedFromRows` on the frontier (plus s's row) are their
+ *   answers on S with the full snapshot.
+ *
  * **Nothing is loosened to agree.** Legs (a), (b) and (c) compare answers as sets of
  * `(node, iteration)` in both lists, because the net answers in declaration order and
  * `decideSuccessors` in edge order; that is the only normalisation. Leg (a″) compares order as
@@ -36,6 +42,8 @@ import { messageOf } from '../../internal/errors.js';
 import type { V2Graph } from './graph.js';
 import type { NetPoint, NetRun, PlaceCounts } from './net-run.js';
 import { candidateKeys, isFinished, scopePlan } from '../../settlement/scope.js';
+import { decodeFrontier, frontierOf } from '../../codec/v2/frontier.js';
+import { decideFromRows, finishedFromRows } from '../../settlement/policy.js';
 import { handlerPlan, latestTerminal, referenceAnswer, settledCount } from './reference.js';
 import type { ReferencePlan, ReferenceRow, RunResult, SettlementReference, V2Loop } from './reference.js';
 
@@ -399,4 +407,62 @@ export function compareFinished(
   if ('error' in net) return { agree: false, failed, reference, settled, expected, net: null, error: net.error };
   const finished = isFinished(rows, net.plan);
   return { agree: failed ? null : finished === reference, failed, reference, settled, expected, net: finished, error: null };
+}
+
+// ---- (f) frontier ----
+
+/** Leg (f) at one S, and at one (S, s) when `settled` is given. */
+export interface FrontierVerdict {
+  readonly agree: boolean;
+  /** Each way the frontier and the global decoder differ; empty when they agree. */
+  readonly problems: readonly string[];
+  /** Rows in S, and in its frontier (the settled row not counted). */
+  readonly rows: number;
+  readonly frontierRows: number;
+}
+
+/** A decode's marking and row counts as text, or `THROW <class>`. */
+function decodedText(decode: () => { marking: ReadonlyMap<Place<unknown>, readonly unknown[]>; rowCounts: ReadonlyMap<string, number> }): string {
+  try {
+    const d = decode();
+    const places = [...d.marking].filter(([, t]) => t.length > 0).map(([p, t]) => `${p.name}=${t.length}`).sort();
+    return `${places.join(' ')} | ${[...d.rowCounts].map(([id, n]) => `${id}:${n}`).sort().join(' ')}`;
+  } catch (e) {
+    return `THROW ${e instanceof Error ? e.name : typeof e}`;
+  }
+}
+
+/** `answer()` as text, or `THROW <class>`. */
+function answerText(answer: () => unknown): string {
+  try {
+    const a = answer();
+    return typeof a === 'boolean' ? String(a) : JSON.stringify(planSequence(a as StepPlan));
+  } catch (e) {
+    return `THROW ${e instanceof Error ? e.name : typeof e}`;
+  }
+}
+
+/**
+ * Leg (f): at the rows `rows` (and the settled step `settled`), the frontier decode against the
+ * global decoder, and the policy's two pure decisions on S's frontier against the same decisions on
+ * S with the full snapshot. A refusal on both sides agrees; a refusal on one side does not.
+ */
+export function compareFrontier(compiled: CompiledWorkflow, graph: V2Graph, rows: readonly StepRow[], settled?: StepKey): FrontierVerdict {
+  const problems: string[] = [];
+  const frontier = frontierOf(compiled, rows);
+  const global = decodedText(() => decodeStepRows(compiled, rows));
+  const local = decodedText(() => decodeFrontier(compiled, frontier));
+  if (local !== global) problems.push(`decode: frontier ${local}\n      global   ${global}`);
+  const entry = { graph, compiled };
+  const finishedLocal = answerText(() => finishedFromRows(entry, frontier));
+  const finishedGlobal = answerText(() => finishedFromRows(entry, rows, 'full'));
+  if (finishedLocal !== finishedGlobal) problems.push(`isFinished: frontier ${finishedLocal}, full ${finishedGlobal}`);
+  if (settled !== undefined) {
+    const own = rows.find((r) => r.nodeId === settled.nodeId && r.iteration === settled.iteration);
+    const read = own === undefined || frontier.includes(own) ? frontier : [...frontier, own];
+    const decideLocal = answerText(() => decideFromRows(entry, settled, read));
+    const decideGlobal = answerText(() => decideFromRows(entry, settled, rows, 'full'));
+    if (decideLocal !== decideGlobal) problems.push(`decideSuccessors(${keyOf(settled)}): frontier ${decideLocal}, full ${decideGlobal}`);
+  }
+  return { agree: problems.length === 0, problems, rows: rows.length, frontierRows: frontier.length };
 }

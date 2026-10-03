@@ -1,0 +1,171 @@
+{
+  "name": "V2 Loop Over Items",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "6b1f0d1e-0a01-4c6e-9a10-000000000001",
+      "name": "When clicking 'Execute workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6b1f0d1e-0a01-4c6e-9a10-000000000002a",
+              "name": "i",
+              "value": "={{ Array.from({ length: 1000 }, (_, i) => i) }}",
+              "type": "array"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "6b1f0d1e-0a01-4c6e-9a10-000000000002",
+      "name": "Make 1000 Numbers",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "1,000 items, so the loop takes 1,000 passes at batch size 1 (tasks/v2-seam-plan.md F4). No Code node: engine v2 refuses task runners."
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "i",
+        "options": {}
+      },
+      "id": "6b1f0d1e-0a01-4c6e-9a10-000000000006",
+      "name": "Split Out Numbers",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        330,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "6b1f0d1e-0a01-4c6e-9a10-000000000003",
+      "name": "Loop Over Items",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6b1f0d1e-0a01-4c6e-9a10-0000000000a1",
+              "name": "square",
+              "value": "={{ $json.i * $json.i }}",
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "6b1f0d1e-0a01-4c6e-9a10-000000000004",
+      "name": "Process Item",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        120
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "6b1f0d1e-0a01-4c6e-9a10-000000000005",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        660,
+        -120
+      ]
+    }
+  ],
+  "connections": {
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "Make 1000 Numbers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Process Item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Item": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Make 1000 Numbers": {
+      "main": [
+        [
+          {
+            "node": "Split Out Numbers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out Numbers": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

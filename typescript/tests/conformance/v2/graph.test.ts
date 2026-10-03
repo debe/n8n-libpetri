@@ -9,7 +9,7 @@
 import { analyse } from '../../../src/compiler/index.js';
 import type { NodeDescription } from '../../../src/compiler/index.js';
 import {
-  graphToDescription, MANUAL_TRIGGER_TYPE, SPLIT_IN_BATCHES_TYPE, V2_STEP_NODE_TYPES, V2GraphError,
+  graphToDescription, MANUAL_TRIGGER_TYPE, SPLIT_IN_BATCHES_TYPE, V2_OPAQUE_V1_NODE_TYPE, V2_STEP_NODE_TYPES, V2GraphError,
 } from '../../../src/conformance/v2/graph.js';
 import type { V2Edge, V2Graph, V2GraphInput, V2Node, V2StepType } from '../../../src/conformance/v2/graph.js';
 
@@ -231,7 +231,8 @@ describe('graphs the converter cannot produce are refused', () => {
     ['an expression batch size', { nodes: [trigger('T'), batch('B', '={{ 2 }}')], edges: [] }, /batch node 'B' has no batch size/],
     ['a batch node with no config', { nodes: [trigger('T'), { id: 'B', name: 'B', type: 'batch' }], edges: [] }, /batch node 'B' has no batch size/],
     ['a third batch output', { nodes: [trigger('T'), batch('B'), v1('A')], edges: [edge('B', 'A', 2)] }, /edge from output 2/],
-    ['a v1 node with no config', { nodes: [trigger('T'), { id: 'A', name: 'A', type: 'v1-node' }], edges: [] }, /v1 node 'A' has no v1 node config/],
+    ['a v1 node with an empty config', { nodes: [trigger('T'), { id: 'A', name: 'A', type: 'v1-node', config: {} }], edges: [] }, /v1 node 'A' has no v1 node config/],
+    ['a v1 node with a null config', { nodes: [trigger('T'), { id: 'A', name: 'A', type: 'v1-node', config: null }], edges: [] }, /v1 node 'A' has no v1 node config/],
     ['a v1 node without continueOnFail', {
       nodes: [trigger('T'), { id: 'A', name: 'A', type: 'v1-node', config: { nodeType: 'x', typeVersion: 1, parameters: {} } }], edges: [],
     }, /v1 node 'A' has no v1 node config/],
@@ -249,5 +250,94 @@ describe('graphs the converter cannot produce are refused', () => {
     const { description } = graphToDescription(chain);
     expect(() => description.nodeTypes({ id: 'Q', name: 'Q', type: 'x', typeVersion: 1, position: [0, 0] }))
       .toThrow(V2GraphError);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// `tasks/v2-seam-plan.md`, "F7 at step 10": a `v1-node` with no config is an opaque step. The
+// graphs are `@n8n/engine`'s own, from `execution/__tests__/step-execution.integration.test.ts`
+// at the pin, where neither the trigger nor any v1 node carries a config.
+
+const bare = (id: string, name: string, type: V2StepType): V2Node => ({ id, name, type });
+const engineEdge = (from: string, to: string, outputIndex = 0, inputIndex = 0): V2Edge => ({ from, to, outputIndex, inputIndex });
+
+/** `graph`: Webhook → A. */
+const engineSingle: V2Graph = {
+  nodes: [bare('trigger', 'Webhook', 'trigger'), bare('node-a', 'A', 'v1-node')],
+  edges: [engineEdge('trigger', 'node-a')],
+};
+
+/** "runs a fan-in once": the trigger into A and B, and both into M's two slots. */
+const engineFanIn: V2Graph = {
+  nodes: [bare('trigger', 'Webhook', 'trigger'), bare('node-a', 'A', 'v1-node'), bare('node-b', 'B', 'v1-node'), bare('node-m', 'M', 'v1-node')],
+  edges: [
+    engineEdge('trigger', 'node-a'), engineEdge('trigger', 'node-b'),
+    engineEdge('node-a', 'node-m', 0, 0), engineEdge('node-b', 'node-m', 0, 1),
+  ],
+};
+
+/** "settles a conditional diamond": If → A (out 0) and B → C (out 1), A and C into M. */
+const engineConditional: V2Graph = {
+  nodes: [
+    bare('trigger', 'Webhook', 'trigger'), bare('node-if', 'If', 'v1-node'), bare('node-a', 'A', 'v1-node'),
+    bare('node-b', 'B', 'v1-node'), bare('node-c', 'C', 'v1-node'), bare('node-m', 'M', 'v1-node'),
+  ],
+  edges: [
+    engineEdge('trigger', 'node-if'), engineEdge('node-if', 'node-a', 0), engineEdge('node-if', 'node-b', 1),
+    engineEdge('node-b', 'node-c'), engineEdge('node-a', 'node-m', 0, 0), engineEdge('node-c', 'node-m', 0, 1),
+  ],
+};
+
+const ENGINE_GRAPHS: Readonly<Record<string, V2Graph>> = { engineSingle, engineFanIn, engineConditional };
+
+describe('a v1 node with no config is an opaque step (F7 at step 10)', () => {
+  it('gets the opaque type at version 1, no onError and no batch', () => {
+    const { description } = graphToDescription(engineConditional);
+    expect(description.nodes.map((n) => `${n.name}: ${n.type}@${n.typeVersion}`)).toEqual([
+      `Webhook: ${MANUAL_TRIGGER_TYPE}@1`,
+      ...['If', 'A', 'B', 'C', 'M'].map((name) => `${name}: ${V2_OPAQUE_V1_NODE_TYPE}@1`),
+    ]);
+    expect(description.nodes.filter((n) => n.onError !== undefined || n.batch !== undefined)).toEqual([]);
+  });
+
+  it('takes its ports from its edges, as every other node does', () => {
+    expect(portsOf(graphToDescription(engineSingle))).toEqual(['Webhook: 0/1', 'A: 1/0']);
+    expect(portsOf(graphToDescription(engineFanIn))).toEqual(['Webhook: 0/1', 'A: 1/1', 'B: 1/1', 'M: 2/0']);
+    expect(portsOf(graphToDescription(engineConditional)))
+      .toEqual(['Webhook: 0/1', 'If: 1/2', 'A: 1/1', 'B: 1/1', 'C: 1/1', 'M: 2/0']);
+  });
+
+  it('is a type no n8n node has: never a Merge, a Split In Batches, a wait or a subworkflow', () => {
+    expect(V2_OPAQUE_V1_NODE_TYPE.startsWith('@n8n/engine.')).toBe(true);
+    expect([MANUAL_TRIGGER_TYPE, SPLIT_IN_BATCHES_TYPE, 'n8n-nodes-base.merge', ...Object.values(V2_STEP_NODE_TYPES)])
+      .not.toContain(V2_OPAQUE_V1_NODE_TYPE);
+  });
+
+  it.each(Object.entries(ENGINE_GRAPHS))('%s: the engine\'s own test graph analyses under engineV2', (_name, graph) => {
+    const analysis = analyse(graphToDescription(graph).description, { profile: 'engineV2' });
+    expect(analysis.startNode).toBe('Webhook');
+    expect(analysis.edges).toHaveLength(graph.edges.length);
+  });
+
+  it('a configless fan-in node is not a chooseBranch Merge: the analysis refuses nothing on it', () => {
+    expect(() => analyse(graphToDescription(engineFanIn).description, { profile: 'engineV2' })).not.toThrow();
+  });
+
+  it('sits beside configured nodes and a batch loop in one graph', () => {
+    const mixed: V2Graph = {
+      nodes: [trigger('T'), batch('B', 2), bare('Body', 'Body', 'v1-node'), v1('After', 'n8n-nodes-base.set', false, 3.4)],
+      edges: [edge('T', 'B'), edge('B', 'Body', 1), edge('Body', 'B', 0, 0, true), edge('B', 'After', 0)],
+    };
+    const { description } = graphToDescription(mixed);
+    expect(description.nodes.map((n) => n.type)).toEqual([
+      'n8n-nodes-base.manualTrigger', SPLIT_IN_BATCHES_TYPE, V2_OPAQUE_V1_NODE_TYPE, 'n8n-nodes-base.set',
+    ]);
+    expect(() => analyse(description, { profile: 'engineV2' })).not.toThrow();
+  });
+
+  it('leaves every converter-shaped graph as it was: no node there gets the opaque type', () => {
+    for (const [name, graph] of Object.entries(GRAPHS)) {
+      expect(graphToDescription(graph).description.nodes.map((n) => n.type), name).not.toContain(V2_OPAQUE_V1_NODE_TYPE);
+    }
   });
 });

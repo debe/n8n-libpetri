@@ -14,6 +14,13 @@
  *   for F2's and F3's named races (decision 8): a failed row is the race `failure`, a cancelled
  *   row with no failed one the race `cancel`; those are `race`, counted and not compared. Any other
  *   difference is `disagree`. Nothing else is excused.
+ * - **A reused snapshot** (`policy.ts`, step 12's rerun). The net-backed `isFinished` answers from
+ *   the snapshot its `decideSuccessors` read in the same settlement, and reads nothing. A side that
+ *   made no read in `isFinished` is reported with the rows it read in that settlement's
+ *   `decideSuccessors` (kept per graph object, as the policy keeps them), and `reused` names it. Its
+ *   answer can be stale in one direction only: false where a fresh read says true. That difference
+ *   is the verdict `stale`, counted and not an agreement. The reverse, true where the fresh side says
+ *   false, stays `disagree`.
  * - **Skew.** The two sides read at different moments. `skew` says whether a row both read differed
  *   between them: a `disagree` with skew may be the moment, not the policy, and the report keeps the
  *   rows to tell.
@@ -22,6 +29,7 @@
  */
 import type { StepRow } from '../codec/v2/step-rows.js';
 import { messageOf } from '../internal/errors.js';
+import type { V2Graph } from '../n8n/v2-graph.js';
 import type { V2SettlementPolicy, V2SettlementReader, V2StepKey, V2StepSummary, V2SuccessorDecisions } from '../n8n/v2-host.js';
 import type { SettlementMethod } from './policy.js';
 import { namedRace } from './rows.js';
@@ -32,7 +40,7 @@ export interface ShadowReport {
   readonly executionId: string;
   /** The settled step's key, for `decideSuccessors`; `null` for `isFinished`. */
   readonly settled: V2StepKey | null;
-  readonly verdict: 'agree' | 'disagree' | 'race' | 'candidate-threw';
+  readonly verdict: 'agree' | 'disagree' | 'race' | 'candidate-threw' | 'stale';
   /** The named race, when `verdict` is `race`. */
   readonly race: 'failure' | 'cancel' | null;
   readonly primary: V2SuccessorDecisions | boolean;
@@ -40,9 +48,14 @@ export interface ShadowReport {
   readonly candidate: V2SuccessorDecisions | boolean | null;
   /** The candidate's error message, when it threw. */
   readonly error: string | null;
-  /** Rows each side read, in the order read, without ids. */
+  /**
+   * Rows each side read, in the order read, without ids. For a side that reused its snapshot
+   * (`reused`), the rows it read in the same settlement's `decideSuccessors`.
+   */
   readonly primaryRows: readonly StepRow[];
   readonly candidateRows: readonly StepRow[];
+  /** The side whose `isFinished` read nothing and answered from its kept snapshot, if any. */
+  readonly reused: 'primary' | 'candidate' | null;
   /** Reader calls each side made, `countSettledSteps` included. */
   readonly primaryReads: number;
   readonly candidateReads: number;
@@ -111,6 +124,8 @@ function skewOf(a: readonly StepRow[], b: readonly StepRow[]): boolean {
 /** A policy whose answers are `primary`'s, with `candidate` run and compared beside it (see the module doc). */
 export function createShadowPolicy(options: ShadowOptions): V2SettlementPolicy {
   const { primary, candidate, onReport } = options;
+  /** Each side's rows from the last `decideSuccessors` on a graph object: one settlement's snapshot. */
+  const decidedRows = new WeakMap<V2Graph, { primary: readonly StepRow[]; candidate: readonly StepRow[] }>();
   const report = (r: ShadowReport): void => {
     try {
       onReport(r);
@@ -121,6 +136,7 @@ export function createShadowPolicy(options: ShadowOptions): V2SettlementPolicy {
 
   async function shadow<T extends V2SuccessorDecisions | boolean>(
     method: SettlementMethod,
+    graph: V2Graph,
     settled: V2StepKey | null,
     reader: V2SettlementReader,
     ask: (policy: V2SettlementPolicy, reader: V2SettlementReader) => Promise<T>,
@@ -139,26 +155,43 @@ export function createShadowPolicy(options: ShadowOptions): V2SettlementPolicy {
       error = messageOf(e);
     }
     const candidateMs = performance.now() - t0;
+    let primaryRows: readonly StepRow[] = p.rows;
+    let candidateRows: readonly StepRow[] = c.rows;
+    let reused: ShadowReport['reused'] = null;
+    if (method === 'decideSuccessors') {
+      decidedRows.set(graph, { primary: p.rows, candidate: c.rows });
+    } else {
+      const kept = decidedRows.get(graph);
+      decidedRows.delete(graph);
+      if (p.reads() === 0) {
+        reused = 'primary';
+        primaryRows = kept?.primary ?? [];
+      } else if (c.reads() === 0 && candidateAnswer !== null) {
+        reused = 'candidate';
+        candidateRows = kept?.candidate ?? [];
+      }
+    }
     let verdict: ShadowReport['verdict'];
     let race: ShadowReport['race'] = null;
     if (candidateAnswer === null) verdict = 'candidate-threw';
     else if (sameAnswer(primaryAnswer, candidateAnswer)) verdict = 'agree';
     else {
-      race = namedRace([...p.rows, ...c.rows]);
-      verdict = race === null ? 'disagree' : 'race';
+      race = namedRace([...primaryRows, ...candidateRows]);
+      const reusedSaid = reused === 'primary' ? primaryAnswer : reused === 'candidate' ? candidateAnswer : null;
+      verdict = race !== null ? 'race' : reusedSaid === false ? 'stale' : 'disagree';
     }
     report({
       method, executionId: reader.executionId, settled, verdict, race,
       primary: primaryAnswer, candidate: candidateAnswer, error,
-      primaryRows: p.rows, candidateRows: c.rows, primaryReads: p.reads(), candidateReads: c.reads(),
-      skew: skewOf(p.rows, c.rows), primaryMs, candidateMs,
+      primaryRows, candidateRows, reused, primaryReads: p.reads(), candidateReads: c.reads(),
+      skew: skewOf(primaryRows, candidateRows), primaryMs, candidateMs,
     });
     return primaryAnswer;
   }
 
   return {
     decideSuccessors: (graph, settled, reader) =>
-      shadow('decideSuccessors', { nodeId: settled.nodeId, iteration: settled.iteration }, reader, (policy, r) => policy.decideSuccessors(graph, settled, r)),
-    isFinished: (graph, reader) => shadow('isFinished', null, reader, (policy, r) => policy.isFinished(graph, r)),
+      shadow('decideSuccessors', graph, { nodeId: settled.nodeId, iteration: settled.iteration }, reader, (policy, r) => policy.decideSuccessors(graph, settled, r)),
+    isFinished: (graph, reader) => shadow('isFinished', graph, null, reader, (policy, r) => policy.isFinished(graph, r)),
   };
 }
