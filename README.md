@@ -224,8 +224,10 @@ An arriving edge claims its input slot. The node starts once all required slots 
 least one holds data; otherwise it skips and propagates empty output. The places make slot
 allocation and mutual exclusion explicit.
 
-Several producers targeting one input form an OR-input, not an AND-join. Each data arrival may
-activate the node. Empty-capable producers close a delivery round together, which keeps one
+On a node with a single connected input, several producers form an OR-input, not an AND-join.
+Each data arrival may activate the node. On a node with several inputs, a slot fed by several
+producers is not modelled exactly: the first token to reach the slot decides it, and that may be
+an empty one (divergence row 2). Empty-capable producers close a delivery round together, which keeps one
 empty edge from prematurely skipping downstream work. The current round model is positional, and
 interleaved arrivals can expose the FIFO/LIFO divergence recorded in
 [`docs/divergences.md`](docs/divergences.md). [ADR 0003](docs/adr/0003-join-gadget.md) records

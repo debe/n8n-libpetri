@@ -798,6 +798,15 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       are designed terminals for exactly that reason. Detailed observations are in the untracked
       `notes/n8n-agent-runtime.md`
 
+- [ ] **Multi-producer input slot on a multi-input node (divergence row 2), owner decision
+      pending.** Analysed 2026-10-04 (419 scenarios, n8n's real loop = our port on all 419). No
+      construct is exact on every case: concurrent producers are paired positionally (row 41). An
+      exact causal 'arrival form' exists for causally ordered producers, the smoke shape included:
+      empty tokens only report closure, data fills slots FIFO, a missing slot is padded `[]` once
+      all of its edges are closed. That is n8n's R6, justified because R6 implies causal closure
+      when every node runs once. Design: workflow wf_19d47b6e-d54 judge plan (class predicate in
+      `analysis/inputs.ts`, a new `gadget/input-arrival.ts`, a codec re-derivation of
+      report/close places, ADR 0016). Not built
 ### 5. Harness and CI
 
 - [ ] **CI runs on Node 24 and cannot move up yet.** `n8n-workflow` pulls
