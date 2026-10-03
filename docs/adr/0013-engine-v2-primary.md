@@ -61,7 +61,7 @@ The project owner decided to move to v2 as the primary target.
 - The reporting rule in CLAUDE.md still separates kinds of result. v1 conformance numbers are
   frozen-path regression checks. v2 settlement evidence is not a conformance number. The live
   v2 testbed will be an integration result.
-- What v2 does not do (no retries, no error output, agents failing at the first tool call)
+- What v2 does not do (no retries, no error output, agents failing because their sub-nodes are dropped; ADR 0012 Context, corrected 2026-10-03)
   becomes what this project's default compile does not do. `docs/divergences.md` rows 31-35
   carry it; row 35 is cancellation on request, which the net does not model.
 

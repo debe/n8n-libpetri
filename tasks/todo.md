@@ -996,9 +996,12 @@ Model first, seam second, upstream alongside both.
 - [x] **Reference side of the differential**: `tasks/spike-v2-settlement.mts` drives n8n's own
       settlement code. 310 entries, 209 accepted, 83,600 randomized runs, 0 non-confluent, 0
       unfinished (ADR 0012, Evidence)
-- [ ] **v2 has no tool-call round**: the converter accepts agents (sub-nodes are dropped by
-      `rootAt`), and `V1StepExecutor` throws `EngineRequestNotSupportedError` at the first tool
-      call. That affects 85 of the 209 accepted entries. ADR 0008's round is the model to offer
+- [ ] **v2 cannot run agents** (corrected 2026-10-03, `upstream/count-agent-entries.mjs`): the
+      converter accepts them, but `rootAt` drops their sub-nodes, so every agent fails first at its
+      required Chat Model input. An Agent V3 would then also hit `EngineRequestNotSupportedError`,
+      since only V3 sends an `EngineRequest`. 69 of the 209 accepted entries have a tool-using node
+      on the fired graph (12 V3, 44 V1/V2 only, 13 MCP Server Trigger). The draft RFC is
+      `upstream/rfc-tool-call-round.md`
 - [x] **Compiler profile `engineV2`** (`20c2a4f`): v2's settlement rule as arcs, batch loops
       folded, the converter's refusals as CompileErrors, and v1 pinned byte-identical. See
       `tasks/v2-profile-plan.md` steps 1-7

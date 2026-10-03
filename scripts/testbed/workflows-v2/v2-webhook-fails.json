@@ -1,0 +1,87 @@
+{
+  "name": "V2 Webhook Fails",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "v2-fails",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "5e1f0a00-0d05-4c00-8a00-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "5e1f0a00-0d05-4c00-8a00-hook",
+      "notes": "Engine v2 only. `responseMode: lastNode` on a run that fails: the `ended` response carries the failed step, and n8n answers the request with the error."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d05-4c00-8a00-a0020",
+              "name": "tag",
+              "value": "={{ $json.body.tag }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d05-4c00-8a00-000000000002",
+      "name": "Echo",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "Stopped on purpose behind a webhook"
+      },
+      "id": "5e1f0a00-0d05-4c00-8a00-000000000003",
+      "name": "Stop and Error",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Echo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Echo": {
+      "main": [
+        [
+          {
+            "node": "Stop and Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -39,7 +39,7 @@ What v2 leaves out or does differently from v1, each read in the source:
 - A failed step fails the whole execution. `onError: continueRegularOutput` passes items
   through inside the step executor. `continueErrorOutput` is rejected.
 - There is **no retry**: `api.types.ts` says "has no retry mechanism".
-- **Agents are accepted, and then fail at their first tool call.** The converter roots the
+- **Agents are accepted, and then cannot run** (first read as "fail at their first tool call"; see the correction below). The converter roots the
   graph at the fired trigger through `main` connections only (`rootAt`). Sub-nodes such as
   models, tools and memory are only ever the *source* of `ai_*` connections, so they are dropped
   before the connection-type check runs, and the agent becomes an ordinary `v1-node` step. When
@@ -47,7 +47,13 @@ What v2 leaves out or does differently from v1, each read in the source:
   (`v1-step-executor.ts`), and `continueOnFail` cannot catch it. v2 has no counterpart yet to
   ADR 0008's round. (This corrects the first reading of the converter, which said it rejects
   `ai_tool`: `UnsupportedConnectionTypeError` fires only for an `ai_*` connection leaving a node
-  the trigger reaches through `main`.) Sub-workflow and `wait` step types throw
+  the trigger reaches through `main`.) **Corrected 2026-10-03** (measured by `upstream/count-agent-entries.mjs` with n8n's own converter):
+  an agent fails earlier than its first tool call. `rootAt` drops the sub-nodes and the step's workflow is
+  built from main edges only, so the agent fails at its required Chat Model input ("A Chat Model sub-node
+  must be connected and enabled"), which the live testbed records. Only Agent V3 sends an `EngineRequest`
+  at all; V1 and V2 call their tools in-process. Of the 209 accepted entries, 85 come from workflows with any
+  `ai_tool` connection, and 69 have a tool-using node on the fired trigger's graph: 12 with Agent V3, 44 with
+  only Agent V1 or V2, and 13 with an MCP Server Trigger. Sub-workflow and `wait` step types throw
   `UnimplementedError`.
 - The only loop is Split In Batches v3 with a literal batch size. A cycle without a batch node
   is rejected (`graph/loops.ts`, `validate-executable-graph.ts`).
@@ -175,7 +181,7 @@ can fire, 20 behaviours × 20 orders each:
 |---|---:|
 | (workflow, fired trigger) entries | 310 |
 | accepted by converter + `validateExecutableGraph` | 209 (20 with a batch loop) |
-| of those, in a workflow with an `ai_tool` connection | 85, which fail at the first tool call |
+| of those, in a workflow with an `ai_tool` connection | 85 (corrected 2026-10-03: 69 have a tool-using node on the fired graph; every agent fails first at its missing Chat Model, see Context) |
 | randomized runs | 83,600 |
 | drained without finishing, finished with a queued step, or settled ≠ expected | **0** |
 | failure-free behaviours whose fates differ between orders | **0** |

@@ -72,8 +72,9 @@ All notable changes to this project are documented here. The format follows
   n8n's own engine v2 settlement code (`decideSuccessors`, `countExpectedSettledSteps`, and the
   rest), loaded from the pinned checkout, through `StepSettledHandler`'s event loop with
   randomized orders. On 310 (workflow, fired trigger) entries, 209 are accepted, and 83,600 runs
-  give 0 non-confluent and 0 unfinished. It also found that v2 accepts agent workflows and then
-  fails them at the first tool call (85 of the 209).
+  give 0 non-confluent and 0 unfinished. It also found that v2 accepts agent workflows it cannot run. Corrected 2026-10-03: every agent fails
+  first at its missing Chat Model sub-node, and only Agent V3 would reach `EngineRequestNotSupportedError`.
+  69 of the 209 accepted entries have a tool-using node on the fired graph.
 - ADR 0012 (**proposed**): engine v2 (`packages/@n8n/engine`) as a second compilation target.
   The model and the differential against n8n's own `decideSuccessors` come first, a
   `SettlementPolicy` seam second, and the upstream offer leads with the differential.

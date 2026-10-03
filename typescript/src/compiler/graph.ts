@@ -71,9 +71,10 @@ export interface AnalysisOptions {
   /**
    * The engine the analysis is for (ADR 0012 §1); default `engineV2` (ADR 0013 decision 2,
    * `DEFAULT_COMPILE_PROFILE`); v1 callers name `'v1'`. Recorded on the analysis and
-   * hashed. Under `engineV2` the agent budgets below are refused: v2 has no agent round, it
-   * fails an agent at its first tool call (`V1StepExecutor`,
-   * `packages/@n8n/node-engine-compatibility/src/v1-step-executor.ts`).
+   * hashed. Under `engineV2` the agent budgets below are refused: v2 has no agent round. Its
+   * converter drops an agent's sub-nodes, so the agent fails at its missing Chat Model input, and
+   * only Agent V3 would send an `EngineRequest`, which `V1StepExecutor` refuses
+   * (`packages/@n8n/node-engine-compatibility/src/v1-step-executor.ts`).
    */
   readonly profile?: CompileProfile;
   /**

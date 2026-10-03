@@ -1,0 +1,274 @@
+{
+  "name": "V2 Webhook Last Node",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "v2-last-node",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "5e1f0a00-0d02-4c00-8a00-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "5e1f0a00-0d02-4c00-8a00-hook",
+      "notes": "Engine v2 only. A production webhook answered with the last node (`responseMode: lastNode`, engine v2's `runEnd` expectation): the body is the `ended` response's lastStep outputs. One sink, so lastStep is the Answer node under every policy."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d02-4c00-8a00-a0020",
+              "name": "tag",
+              "value": "={{ $json.body.tag }}",
+              "type": "string"
+            },
+            {
+              "id": "5e1f0a00-0d02-4c00-8a00-a0021",
+              "name": "n",
+              "value": "={{ [1, 2, 3, 4] }}",
+              "type": "array"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d02-4c00-8a00-000000000002",
+      "name": "Echo",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "n",
+        "include": "selectedOtherFields",
+        "fieldsToInclude": "tag",
+        "options": {}
+      },
+      "id": "5e1f0a00-0d02-4c00-8a00-000000000003",
+      "name": "Split Out",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5e1f0a00-0d02-4c00-8a00-c1",
+              "leftValue": "={{ $json.n % 2 }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5e1f0a00-0d02-4c00-8a00-000000000004",
+      "name": "Is Even?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d02-4c00-8a00-a0050",
+              "name": "parity",
+              "value": "even",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d02-4c00-8a00-000000000005",
+      "name": "Even",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d02-4c00-8a00-a0060",
+              "name": "parity",
+              "value": "odd",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d02-4c00-8a00-000000000006",
+      "name": "Odd",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        120
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "5e1f0a00-0d02-4c00-8a00-000000000007",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1100,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d02-4c00-8a00-a0080",
+              "name": "answer",
+              "value": "={{ $json.tag + ':' + $json.parity + ':' + $json.n }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d02-4c00-8a00-000000000008",
+      "name": "Answer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1320,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Echo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Echo": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "Is Even?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Even?": {
+      "main": [
+        [
+          {
+            "node": "Even",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Odd",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Even": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Odd": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

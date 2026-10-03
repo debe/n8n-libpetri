@@ -28,7 +28,8 @@
 # `--v2` turns on n8n's engine v2 (`N8N_ENABLED_MODULES=engine-v2`, `N8N_ENGINE_MODE=in-process`)
 # with its data plane on a Docker Postgres that `pg.sh` starts (`LIBPETRI_PG_URL` overrides it),
 # and seeds every testbed workflow engine v2 can start with `settings.engineType: "v2"`, plus
-# three v2-only ones (`workflows-v2/`). `--settlement` picks what answers `decideSuccessors`
+# the v2-only ones (`workflows-v2/`), and publishes the webhook-triggered ones so their production
+# URLs answer. `--settlement` picks what answers `decideSuccessors`
 # and `isFinished` (patches 0003/0004, `tasks/v2-seam-plan.md` step 11): `off` registers nothing,
 # so n8n's default answers in a patched build; `primary` registers the net-backed policy;
 # `shadow` and `primary-shadowed` run both and report every call. The boot gates on the preload's

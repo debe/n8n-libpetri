@@ -829,10 +829,17 @@ is read back after the write, so a REST path that dropped `engineType` would fai
 | **V2 Loop Over Items** | Loop Over Items over 1,000 items at batch size 1: 1,001 batch passes |
 | **V2 If Switch Diamond** | If, then a Switch on its true branch, into a three-input Merge |
 | **V2 Stop And Error Sibling** | Stop and Error beside a sibling chain held 1.5 s by the stub's `/slow` |
+| **V2 Wide Fan-Out** | six chains of four Set nodes, six sinks: 25 settlements, with other chains' steps queued while one chain's settlement is handled |
+| **V2 Webhook Last Node** | production webhook, `responseMode: lastNode` (engine v2's `runEnd`); Split Out, If, Merge, one sink |
+| **V2 Webhook Two Sinks** | production webhook, `lastNode`; two sinks fed by one node, so the body names the sink whose settlement ended the run |
+| **V2 Webhook Respond Node** | production webhook, `responseMode: responseNode` (`stepResponse`); Respond to Webhook answers 201 with a header, and one node runs after it |
+| **V2 Webhook Fails** | production webhook, `lastNode`, on a run that ends at a Stop and Error |
 
 The v2-only workflows (`scripts/testbed/workflows-v2/`, apart from `workflows/` so that
 `v1-identity` does not fingerprint them) have no Code node, because engine v2 refuses task
-runners. Their items come from a Set expression and Split Out instead.
+runners. Their items come from a Set expression and Split Out instead. The seed publishes the four
+webhook workflows (`POST /rest/workflows/:id/activate`), so their production URLs answer, and
+records each URL in `ids.json`. They are never run manually.
 
 These runs are integration results, like everything else in the testbed. They are not
 conformance numbers, not policy-entering case counts, and not settlement evidence. The comparison
@@ -1029,7 +1036,7 @@ results.
 
 **What this does not cover.** These are manual runs, one execution at a time, on an in-process
 engine. Webhook responses (`runEnd`), concurrent executions and the cancel race are not
-exercised. The races counted as 0 here are counted, not excluded by construction. The same holds
+exercised here; the next section adds them. The races counted as 0 here are counted, not excluded by construction. The same holds
 for the snapshot reuse's safe direction (`stale`) and for the scoped read's overrun path: neither
 occurred, and with one manual execution at a time a loop's settlements run one after another, so 0
 here says little about them. `stale` is exercised by the concurrent handler leg
@@ -1038,6 +1045,355 @@ here says little about them. `stale` is exercised by the concurrent handler leg
 occurred in no leg; only `tests/settlement/reuse.test.ts` exercises it. The timing
 instrument adds a wrapper call per store method and per policy call in every leg alike. Its cost
 was not measured separately.
+
+### The live phases: webhooks, concurrent executions, the cancel race
+
+```bash
+scripts/testbed/diff-engines-v2.sh --repeat=2 --loop-repeat=3 --webhook-repeat=10 --concurrent-rounds=3 \
+  --cancel-sweep="V2 Wide Fan-Out@0:900:5,V2 If Switch Diamond@0:300:5,V2 Loop Over Items@1000:9000:2000"
+# reports: .testbed/v2-diff/report.md (sequential), .testbed/v2-diff/live-report.md (the three below)
+```
+
+ADR 0014's "Open" listed three paths the testbed never took. Each leg now runs them after its
+sequential manual runs, on the same server, through `scripts/testbed/drive-v2.mjs`:
+- **webhook**: each activated webhook workflow's production URL, 10 requests one at a time, each
+  with a body `{ tag }`. `responseMode: lastNode` is engine v2's `runEnd` expectation: the body is
+  the `ended` response's lastStep outputs. `responseNode` is `stepResponse`: Respond to Webhook
+  answers as it runs.
+- **concurrent**: 16 runs in flight at once, 3 rounds: Wide Fan-Out ×4, If Switch Diamond ×4, Stop
+  And Error Sibling ×1, Loop Over Items ×1 (1,001 passes), and webhook requests to Two Sinks ×3,
+  Last Node ×2 and Respond Node ×1.
+- **cancel**: a manual run stopped through `POST /rest/executions/:id/stop` after a delay. That is
+  n8n's stop button: `ExecutionService.stop`, then the data plane's cancel route, then
+  `CancelExecutionService.cancel` (n8n commit `56d6e9da2c`). The delay sweeps 0–900 ms in 5 ms steps
+  on Wide Fan-Out (181 runs), 0–300 ms on If Switch Diamond (61) and 1–9 s on Loop Over Items (5):
+  247 cancels per leg.
+
+`tests/testbed/compare-v2-live.ts` compares them. Its pure parts are pinned by
+`tests/testbed/compare-v2-live.test.ts`.
+- **Webhook executions** are found in the data plane by the tag in their Webhook node's output.
+  The HTTP response does not carry the execution id.
+- **No one-to-one pairing.** Under concurrency, n8n's own runs need not agree with each other.
+  Which sink ended a run is one example. For each workflow, the `off` leg's runs form a reference
+  pool, with the tag replaced. For the concurrent phase, `off`'s sequential and webhook-phase runs
+  of the workflow join the pool. A field on which the pool is constant must be equal in every run
+  of every leg, or it is a finding. A field on which the pool varies is reported as each leg's
+  distribution. The fields are status, rows, fates, slots, outputs and lastStep, and for webhook
+  runs the HTTP status, the headers (without `date`, `etag`, `content-length` and the connection
+  headers) and the body.
+- **The ending is judged from the ledger, not from the pool.** Which settlement ends a run (its
+  lastStep, and under `runEnd` the body) is the one field that depends on the policy, and `off`'s
+  pool is only a sample of interleavings. When the pool happens to be constant, an ending that n8n's
+  default would produce just as well on another interleaving differs from it. So in a leg where
+  ours answers, each run's ending is accounted from its own settlements (`endingAccount`):
+  - *n8n ends here too*: the ending settlement's `isFinished` said true, and no earlier settlement
+    of the run reused its snapshot and said false. A reused true implies a fresh count says true on
+    the same rows (row 39's theorem), so n8n's default ends this interleaving at the same settlement.
+  - *row 39*: an earlier settlement reused its snapshot and said false, so n8n's fresh count could
+    have said true there and ended the run earlier. Where a shadow check ran beside ours, its fresh
+    count decides: `false` removes the occasion, `true` confirms it.
+  - *failure path*: the run ended `failed`; the handler's failure path writes that ending.
+  - *unaccounted*: two settlements ended the run, or one ended it `completed` without an
+    `isFinished` that said true. That is a finding.
+
+  A lastStep off a constant pool is a note when the run's ending is accounted. The body difference
+  of the same run is a note with it when the body is the ending step's first output item, which is
+  what n8n's `lastNode` answer sends; a `runEnd` body that is not is a finding in every leg. Before
+  this rule the comparator could not judge the field: in both full runs `off`'s own runs varied on
+  Two Sinks' ending, so no run was checked there, and in a reduced rerun where `off` happened to be
+  constant, a `primary` run that ended earlier, on a reused true, was reported as two findings.
+- **n8n's own variation.** In `off` and `shadow` n8n's default answers. A lastStep or body off the
+  pool there is n8n's own interleaving, reported as a note.
+- **Per phase and leg,** the same checks as the sequential phase: policy calls against settled
+  non-failed rows, executions left live, shadow verdicts, policy errors, snapshot binding
+  (`crossed`), overruns and latency per settlement.
+- **Per cancel run:** the stop response, then the end status, which must be `cancelled` when the
+  stop was accepted. A refused stop must carry n8n's `Only running or waiting executions can be
+  stopped` on a run that ended other than `cancelled`; a refusal for any other reason is a finding.
+  No row may be left `queued`, `running` or `waiting` (read 4 s after the phase). The comparator also
+  records where the cancel's compare-and-set landed against that execution's settlement then in
+  flight, the named races, and the rows `createSteps` inserted after the cancel.
+- **How a row created after the cancel was cancelled.** `cancelPendingSteps` is one bulk update and
+  `StepReadyHandler`'s `cancelStep` cancels a row at claim; both leave `cancelled`. A row counts as
+  cancelled at claim when the ledger's `cancel-step` record names it, or, in a ledger without those
+  records, when `createSteps` was called after `cancelPendingSteps` answered. Otherwise it is
+  "either", which the instrument does not tell apart.
+- **Each shadow `stale` verdict is checked on its own settlement.** The shadow policy reports inside
+  the call and handlers run one at a time, so a verdict belongs to the next settlement record of its
+  execution (`linkShadows`). It is row 36's second clause when that settlement reused its snapshot in
+  `isFinished`, the cancel's compare-and-set landed inside it, and the execution's final rows hold a
+  `cancelled` row. n8n's count can only reach its total on the final rows, so a fresh true there read
+  after the cancel and counted a row it had cancelled. Every other `stale` verdict is row 39's
+  occasion.
+
+**The instrument grew** (`preload.mjs`; measurement only, the same in every leg). On one clock
+(`performance.now()` in the server), each settlement record now carries:
+- when the handler started and ended;
+- when its `loadExecution` answered, which is the liveness read;
+- when the policy's first read started;
+- when `createSteps` was called, and which keys it created.
+
+Each policy call records its answer, and whether its reads held a cancelled row and no failed one.
+A `cancel` record times `CancelExecutionService.cancel`: when its compare-and-set answered and
+whether it won, and when `cancelPendingSteps` answered. Since the review of these runs, each created
+row also carries its id, and a `cancel-step` record names each row `StepReadyHandler` cancelled at
+claim. The two full runs below predate both, so their "cancelled at claim" counts are split by
+timing only (below).
+
+**How the in-process engine runs bounds what concurrency can show.** `createEngineRuntime` builds two
+`InMemoryWorkQueue`s, and each dispatches one message at a time (`in-memory-work-queue.ts`).
+- **The orchestration queue** runs one `StepSettledHandler.handle` at a time, across all
+  executions. Settlement handlers never overlap.
+- **The step queue** runs one step at a time. `StepReadyHandler.handle` awaits the node, so Stop And
+  Error Sibling's 1.5 s HTTP call holds up every execution's steps.
+
+So "concurrent" here means the following. Settlements of up to 16 executions interleave one after
+another. Each handler overlaps the step worker and any HTTP request: a stop, or a webhook. Reading
+the source gives four consequences:
+- **`crossed` cannot occur in-process.** It needs two handlers in flight. The check still runs.
+- **The scoped read's overrun cannot occur in-process.** It needs a loop to advance two passes
+  between two reads of one handler. Only settlement handlers create pass rows, and none runs
+  meanwhile.
+- **`stale` can occur.** A step can complete in the step worker between a handler's read and its
+  `isFinished`.
+- **A cancel can land inside a settlement.** It arrives over HTTP and runs beside the queues.
+
+**Host load. Both runs are under external load and no clean-host run was obtained.** On
+2026-10-03 the machine was shared with other sessions' test suites: z3 and vitest in two other
+repositories, and later a Lean/mathlib build. They started at 11:18 by their process start times,
+during run 1's `primary` cancel phase.
+- **Run 1** (11:05–12:05): `off`'s phases and `primary`'s sequential, webhook and concurrent phases
+  ran before 11:18. Load was not sampled before then. Over `shadow` and `primary-shadowed` the load
+  average was 60–110.
+- **Run 2** (12:06–13:00, and 14:16–14:41 for `primary-shadowed`): sampled every 15 s, the
+  1-minute average ranged 8.6–222 over 12:06–13:00 (peak 222.00 at 12:20:55, `load-run2.log`) and
+  5.1–86 over `primary-shadowed`'s 14:16–14:41 (`load-run2-ps.log`). By leg, the medians were:
+  `off`'s sequential phase 9.5, its live phases 20–23; `primary`'s sequential phase 137, concurrent
+  125, cancel 71; `shadow` 17–39; `primary-shadowed` 32–56.
+
+Outcomes and invariants do not depend on load. Latencies and the race windows do: a slower handler
+widens every window. So the live phases' latencies below are not compared across legs, and the race
+counts belong to the load they ran under. These are integration results: not conformance numbers,
+not policy-entering case counts, not neutrality legs and not settlement evidence.
+
+Same build and versions as above: n8n `944afe5` with 0001–0004, Node 26.8.1, Docker 25.0.2 with a
+953,692,160-byte VM, and `postgres:18.4-alpine` (`db676a0ed906`) capped at 384 MB in every leg. No
+memory failure occurred in the Docker VM in either run. Run 2's `primary-shadowed` leg completed
+on its sixth attempt (14:16–14:41). It was run on its own and combined with the other three legs;
+each leg is its own fresh server, so the combination is like for like. The five failed attempts:
+- **Attempt 1, a connection reset.** n8n's REST API reset a connection (`ECONNRESET`), logged
+  beside n8n's own `Database ping failed: Database connection timed out` on its sqlite main
+  database, at a load average near 160.
+- **Attempts 2 and 3, no boot.** n8n did not boot within the launcher's 180 s. The host had about
+  100 MB of free memory, Docker took 35 s to answer `docker info`, and Postgres took 5 minutes to
+  initialise.
+- **Attempt 4, a script bug.** A relative `--out` path broke the script's `node -e` helpers. The
+  bug predates this work and is fixed: `--out` is now made absolute.
+- **Attempt 5, a loop that did not end in time.** The third Loop Over Items run did not end within
+  the 900 s run timeout. It had not stalled. It settled at about 10 ms per settlement to pass 486,
+  then at 0.2–3.8 s per settlement, and reached pass 842 by the timeout. Host CPU load stayed near
+  13 while free memory swung between 70 MB and 1.4 GB. Six consecutive loops on a fresh
+  `primary-shadowed` server then took 50–61 s each, with n8n's RSS steady at 0.7–1.0 GB, so the
+  slowdown did not reproduce. It is host memory pressure, not a policy effect. The artefacts are
+  in `.testbed/v2-diff-run2/primary-shadowed.timeout4/`.
+
+**Results, 2026-10-03.** Both runs have all four legs. The artefacts are in `.testbed/v2-diff-run1-loaded/`
+and `.testbed/v2-diff-run2/`. The live comparator reported **no findings** in either run. Run 1's
+one candidate finding is explained below ("n8n's own variation"). The sequential comparator
+reported one in run 2, F4's latency clause, and it is not an F4 reading (below).
+
+**Webhook phase** (40 requests per leg: 10 to each of the four workflows, one at a time).
+
+| | `off` | `primary` | `shadow` | `primary-shadowed` |
+|---|---|---|---|---|
+| HTTP status, headers, body against `off`'s pool | — | equal, both runs | equal, both runs | equal, both runs |
+| answers | Fails 500 `{"message":"Error in workflow"}`; Last Node 200; Respond Node 201 with `x-testbed`; Two Sinks 200 | same | same | same |
+| Two Sinks body | sink B, 10 of 10 | sink B, 10 of 10 | sink B, 10 of 10 | sink B, 10 of 10 |
+| rows (status, fates, slots, outputs, lastStep) against the pool | — | equal | equal | equal |
+| settled non-failed rows / `decideSuccessors` / `isFinished` | 180 / 180 / 50 | same | same | same |
+| shadow agree / other verdicts | – | – | 230 / 0 | 230 / 0 |
+| snapshots stored / reused / crossed / overruns | – | 180 / 50 / 0 / 0 | same | same |
+
+Under `runEnd` the body is the outputs of the step whose settlement ended the run. With requests one
+at a time, every leg ended Two Sinks at sink B. The Respond Node's 201, its header and its body come
+from the node as it runs (`stepResponse`), and every leg ran it.
+
+**Concurrent phase** (48 executions per leg: 3 rounds of 16 at once; 6,522 settled non-failed rows
+per leg in both runs).
+
+| | `off` | `primary` | `shadow` | `primary-shadowed` |
+|---|---|---|---|---|
+| fields on which `off`'s pool is constant | — | equal, both runs | equal, both runs | equal, both runs |
+| `decideSuccessors` (no call because the run had already ended), run 1 / run 2 | 6,520 (2) / 6,519 (3) | 6,521 (1) / 6,514 (8) | 6,511 (11) / 6,519 (3) | 6,519 (3) / 6,513 (9) |
+| unexplained settlements without a call, policy errors, races | 0 | 0 | 0 | 0 |
+| shadow agree / disagree / stale, run 1 / run 2 | – | – | 6,644 / 0 / 0; 6,660 / 0 / 0 | 6,660 / 0 / 0; 6,648 / 0 / 0 |
+| snapshots crossed / overruns | – | 0 / 0 | 0 / 0 | 0 / 0 |
+| most executions in flight at once / switches between executions | 16 / 253–254 | 16 / 252–254 | 16 / 251–254 | 16 / 252–254 |
+| Two Sinks lastStep, sink A : sink B, run 1 / run 2 | 2 : 7 / 3 : 6 | 1 : 8 / 8 : 1 | 9 : 0 / 3 : 6 | 3 : 6 / 9 : 0 |
+
+- **Every field on which `off`'s pool is constant was equal** in every run of every leg. That is
+  every field of every workflow except one: which settlement ended a run with more than one sink.
+- **That field varies under `off` itself.** n8n's own runs of Two Sinks ended at sink A in 2 of 9
+  (run 1) and 3 of 9 (run 2). The body followed the lastStep each time. So the pool comparison never
+  checked that field here, and "equal" in the first row says nothing about it. The ending table
+  below does.
+- **The legs' sink ratios are not comparable here.** Each leg ran at its own host load. In run 2,
+  `primary`'s concurrent phase ran at a median load of 125 and `off`'s at 20. A handler that falls
+  behind the step worker sees both sinks settled at A's settlement, under either policy.
+- **n8n's own variation.** In run 1 one `shadow` Wide Fan-Out run ended at Chain 4's sink, where
+  all 14 runs of `off`'s pool ended at Chain 6's. n8n's default answers in `shadow`, so this is its
+  own interleaving. The comparator counted it as a finding, which led to the rule above.
+- **Policy calls.** The settlements without a `decideSuccessors` call are the ones that arrived
+  after their execution had ended. An example is Two Sinks' second sink, after the first sink's
+  settlement ended the run. Each is attributed by the execution status the handler loaded.
+- **0 `stale` in 27,532 shadowed calls of the webhook and concurrent phases,** across both runs
+  and both directions. That is these two runs' count, not an observed absence. A reduced rerun
+  (below) gave 2 in its concurrent phase.
+
+**Endings, judged from the ledger** (the comparator rerun on both runs' artefacts after the
+review, `live-report.review.md` in each run's directory; the runs were not repeated). Every run of a leg where ours answers:
+
+| run 1 / run 2 | runs | n8n ends here too | row 39: earlier reused false (confirmed by a fresh count) | failure path | unaccounted |
+|---|---:|---|---|---|---:|
+| webhook, `primary` | 40 | 10; 10 | 20 (–); 20 (–) | 10; 10 | 0 |
+| webhook, `primary-shadowed` | 40 | 30; 30 | 0; 0 | 10; 10 | 0 |
+| concurrent, `primary` | 48 | 7; 14 | 38 (–); 31 (–) | 3; 3 | 0 |
+| concurrent, `primary-shadowed` | 48 | 45; 45 | 0; 0 | 3; 3 | 0 |
+
+- **Under `primary-shadowed` the policies agree on the ending, run by run.** Every completed run
+  ended at the settlement where n8n's fresh count, run beside ours in the same call, first said
+  true. Where ours reused its snapshot and said false earlier, that count said false too. So n8n's
+  default would have ended each of these interleavings at the same settlement.
+- **Under `primary` the ledger cannot decide the runs marked row 39.** No fresh count runs there, so
+  an earlier reused false is an occasion that nothing checked, not a moved ending. Every ending
+  under `primary` was one of the four kinds; none was unaccounted.
+- In every leg, every `runEnd` body was the ending step's first output item.
+
+**A reduced rerun** (2026-10-03, 14:53–14:58, `.testbed/review-reduced/`; `off`, `primary` and
+`shadow`; 12 webhook requests, 2 concurrent rounds of 14, 112 cancels per leg; the host was loaded
+by another session from about 14:55). `off`'s 6 concurrent Two Sinks runs all ended at sink B. One `primary` run ended at sink A:
+A's settlement read B already completed, and its reused `isFinished` said true. A reused true is
+only possible where a fresh count would say true too, so n8n's default ends that interleaving at A
+as well (`shadow`, where it answers, ended at A in 6 of 6). The comparator before the ledger rule
+reported this as two findings, `lastStep` and `httpBody`; it now notes it as "n8n ends here too".
+The same rerun gave 2 shadow `stale` verdicts in its concurrent phase, both under `shadow` on V2
+Wide Fan-Out runs that completed: n8n's fresh count said true and ours, reused, said false. That is
+row 39's occasion outside any cancel. The rerun's host load was not sampled.
+
+**The schedule repeats.** Each round's 16 executions are started by the client within 3–13 ms of
+each other, and all of them are in flight together for a while (by settlement spans, a common window
+of 34 ms to 1.6 s per round in run 1 and 54 ms to 1.4 s in run 2). But the orchestration queue is
+FIFO and runs one handler at a time, so each execution's settlements fall into the same number of
+contiguous blocks in every round of every leg of both runs: Two Sinks 3, Respond Node 4, Wide
+Fan-Out 5, If Switch Diamond 7, Last Node 7, Stop And Error Sibling 2, and Loop Over Items 7 or 8.
+The rounds' block sequences differ only in the order executions arrive within a wave. So "48
+executions, 16 in flight, about 250 switches" is about three repetitions of one FIFO schedule per
+leg, with its waves permuted, not broad coverage of interleavings. The comparator now reports this
+per round (`roundSchedule`).
+
+**Cancel phase** (247 stops per leg: 181 on Wide Fan-Out, 61 on If Switch Diamond, 5 on Loop Over
+Items).
+
+| run 1 / run 2 | `off` | `primary` | `shadow` | `primary-shadowed` |
+|---|---|---|---|---|
+| stop accepted / refused because the run had ended | 174 / 73; 230 / 17 | 247 / 0; 229 / 18 | 247 / 0; 206 / 41 | 221 / 26; 247 / 0 |
+| accepted stops that did not end `cancelled`; rows left `queued`, `running` or `waiting` | 0; 0 | 0; 0 | 0; 0 | 0; 0 |
+| CAS landed with no settlement of the run in flight | 83; 108 | 93; 117 | 77; 77 | 77; 75 |
+| … before the liveness read | 19; 13 | 17; 18 | 11; 17 | 11; 18 |
+| … between the liveness read and the policy's first read | 9; 19 | 16; 11 | 14; 15 | 11; 22 |
+| … between that read and `createSteps` | 5; 12 | 27; 26 | 60; 37 | 37; 51 |
+| … after the policy read, with no `createSteps` | 16; 19 | 0; 9 | 0; 21 | 36; 3 |
+| … after `createSteps` | 42; 59 | 94; 48 | 85; 39 | 49; 78 |
+| `settlement policy race` (`cancel`) from ours | – | 0; 0 | 13; 19 | 2; 6 |
+| `decideSuccessors` on a cancelled row set (answer that planned) | 0; 0 | 0; 0 | 13 (n8n's: 13); 16 (13) | 1 (ours: 0); 7 (0) |
+| shadow `race` verdicts | – | – | 13; 15 | 1; 4 |
+| shadow `stale`, row 36's second clause (checked on its own settlement) / other | – | – | 0 / 0; 2 / 0 | 6 / 0; 1 / 0 |
+| rows `createSteps` inserted after the CAS, all queued, all ended `cancelled` | 20; 34 | 60; 40 | 86; 56 | 52; 77 |
+| … of which `createSteps` was called after `cancelPendingSteps` answered (at claim) | 0; 8 | 0; 4 | 16; 19 | 7; 22 |
+| … of which it was called before (either path, not told apart) | 20; 26 | 60; 36 | 70; 37 | 45; 55 |
+
+- **The invariants hold under both policies.** Every accepted stop ended the run `cancelled`, and
+  no row was left `queued`, `running` or `waiting`. Every refused stop carried n8n's answer for a
+  run that had already ended (`Only running or waiting executions can be stopped`), and every
+  refused run had ended `completed` (REST status `success`). The comparator now checks the message;
+  when these runs were first reported it counted any refusal as "ended first".
+- **Row 35's case occurred under every policy.** Some cancels landed while no row was pending, or
+  after the policy had read. The rows planned then were inserted after the cancel, and every one of
+  them ended `cancelled`. Their number depends on where the cancels landed, not on the policy.
+- **Which path cancelled them is shown for some rows only.** `cancelPendingSteps` is one bulk update
+  and leaves the same status as `StepReadyHandler`'s `cancelStep` at claim. The two runs predate the
+  `cancel-step` record, so only the rows whose `createSteps` was called after `cancelPendingSteps`
+  answered are cancelled at claim by the instrument. For the rest, the data plane supports claim
+  time without proving it: every such row's `createdAt` is after its execution's `finishedAt`, and
+  none shares its `updatedAt` with another `cancelled` row of its execution, where one bulk update
+  gives every row it cancels the same one. A smoke run with the `cancel-step` record (2026-10-03, 15:18,
+  `.testbed/v2-smoke-cancel-step/`, `off` and `primary`, 31 cancels each on Wide Fan-Out) named every one of its 26 such rows as
+  cancelled at claim, 20 of them rows whose `createSteps` was called before `cancelPendingSteps`
+  answered. Divergence row 36's "cancelled at claim (`cancelStep`)" rests on that, not on the two
+  runs' counts.
+- **Row 36's race did not occur under `primary`,** in 494 stops, of which 89 landed between the
+  liveness read and `createSteps`. Ours makes one keyed read just after `hasFailedSteps`. To show
+  it a cancelled row, the cancel path must commit three statements in that gap: the
+  compare-and-set, `loadExecution` and `cancelPendingSteps`. Of the in-window cancels, none had
+  `cancelPendingSteps` answer before the policy's first read in any leg.
+- **It did occur in the shadow legs.** There the second policy reads after the first, which
+  widens the gap.
+  - Under `shadow` (ours as candidate), ours emitted `settlement policy race` 13 times in run 1
+    and 19 times in run 2. Of the `decideSuccessors` calls whose rows held a cancelled row and no
+    failed one (13 and 16), n8n's answer, which the handler used, planned rows on 13 and 13. Ours
+    answered ∅ on every one. Those planned rows are among the ones cancelled at claim.
+  - Under `primary-shadowed`, ours answered every one of its races (2 and 6) with ∅ or not
+    finished. Run 1's single `race` verdict is an `isFinished` where n8n's count said finished on
+    a cancelled row set.
+- **The `stale` verdicts in cancels are row 36's second clause.** There were 9: 6 in run 1's
+  `primary-shadowed`, and 2 in `shadow` and 1 in `primary-shadowed` in run 2. The comparator, as first
+  run, counted every `stale` verdict of an execution once any settlement in flight at the cancel
+  reused `isFinished`; it now checks each verdict on the settlement it was made in. All 9 pass:
+  - each verdict's settlement reused its snapshot in `isFinished` and called no `createSteps`, and
+    the cancel's compare-and-set landed inside it (after the policy's first read in 8 of 9);
+  - each execution's final rows hold `cancelled` rows (1 to 5) that existed before that settlement.
+
+  n8n's count can only say finished on the final rows, so its fresh true read after the cancel and
+  counted rows the cancel had cancelled as settled. Ours, reusing its snapshot, said not finished.
+  The cancel had already won the run, so n8n's `finishExecution` would have lost. These are not row
+  39's moved ending. The clocks alone order the compare-and-set before `isFinished` began in 6 of
+  the 9; the rows order all 9.
+- **Every count here belongs to its host load.** A slower handler widens every window. That is
+  visible in run 1, where `primary` and `shadow` ran their cancel phase under heavy load and no
+  stop was refused for an ended run.
+
+**Latency.** Only run 1's `off` leg, and `primary`'s webhook and concurrent phases, ran before the
+external load began. Load was not sampled before 11:18. On them, per settlement (p50 / p95 ms):
+- webhook: handler 8.10 / 11.4 under `off` and 7.01 / 11.2 under `primary`; policy 1.15 / 2.66
+  and 1.15 / 2.63;
+- concurrent: handler 8.40 / 23.2 and 9.35 / 23.8; policy 1.76 / 4.37 and 2.82 / 5.10;
+- at most 2 policy round trips in one settlement under `primary`, and 3 under `off`.
+
+Every other live-phase latency ran under load and is in the reports, not here. **F4** was read
+again on the sequential phase:
+- **Run 1 holds.** At most 2 round trips; policy p95 4.38 ms against `off`'s handler p95 15.1 ms,
+  a ratio of 0.29.
+- **Run 2's latency clause reads 4.24.** That is not an F4 reading. `off`'s sequential phase ran
+  at a median load of 9.5 and `primary`'s at 137 (peak 222), so the ratio compares a quiet server
+  with a starved one. Its round-trip clause holds at 2.
+- F4 stands as measured after the F4 fix above, and in run 1.
+
+**What this adds, and what it does not.**
+- **Added:** webhook `runEnd` and `stepResponse` answers are equal across the policies. Settlements
+  of up to 16 executions interleave in one engine process with 0 disagreements, 0 crossed
+  snapshots and 0 overruns, though on one FIFO schedule per leg, repeated with its waves permuted.
+  Under `primary-shadowed` every completed run's ending is the one n8n's default gives on its
+  interleaving. Stops that land inside settlements show row 36's race live, in both
+  of its clauses, with the invariants intact.
+- **Not added:** a clean-host latency comparison of the live phases. Also `responseMode:
+  streaming`, a stop of a webhook run, queue mode (refused by the engine-v2 module), and a
+  multi-worker engine, the only place two settlement handlers could overlap and binding B could
+  break.
+- **Row 39's effect on the ending.** Under `primary-shadowed`, every completed webhook and
+  concurrent run ended where n8n's fresh count first said true (0 confirmed occasions). Under
+  `primary` an earlier reused false went unchecked in 20 of 40 webhook runs and 38 and 31 of 48
+  concurrent runs. Outside cancels the two runs' webhook and concurrent phases gave no `stale`
+  verdict; the reduced rerun gave 2. Inside cancels all 9 were row 36.
 
 ## Caveats
 

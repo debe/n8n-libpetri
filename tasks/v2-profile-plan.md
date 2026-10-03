@@ -246,7 +246,7 @@ Where the three plans disagreed, I read the code at `.n8n` n8n@2.41.3 and in `ty
     - `docs/divergences.md` gets a new "engine v2 target" section:
       - queued rows that v2 cancels still run in the net;
       - the `$('Y')` race is not modelled;
-      - agents halt at their first tool call;
+      - agents halt (corrected 2026-10-03: at their missing Chat Model sub-node, before any tool call);
       - wait and sub-workflow steps halt.
     - The ADR 0012 Evidence section gets the Step 10 and Step 12 results, and `tasks/todo.md` is updated.
 
@@ -254,7 +254,7 @@ Where the three plans disagreed, I read the code at `.n8n` n8n@2.41.3 and in `ty
 
 - **An `X_cancel` transition and cancelled-row semantics beyond decoding.** v2 cancels only after a failure, and every comparison stops at the first failure.
 - **Nested loops and several back edges.** v2 rejects both (`UnimplementedError`). Supporting them would need an iteration colour.
-- **Agent tool rounds.** v2 fails an agent at its first tool call, which is the halt branch here. An ADR 0008-style round waits until v2 has one.
+- **Agent tool rounds.** v2 cannot run an agent (corrected 2026-10-03: its sub-nodes are dropped, so it fails at its missing Chat Model; only Agent V3 sends an `EngineRequest`), which is the halt branch here. An ADR 0008-style round waits until v2 has one.
 - **Seam patches 0003 and 0004, and driving v2 from the net.** ADR 0012 §3 puts them after §2 is green.
 - **Data-carrying tokens.** v2 gathers node inputs from its own rows, so the planner never needs values.
 - **An exact count of steps per loop.** Termination depends on the data, so only the linear form (`terminal + 1 + terminal · (|members| − 1)`) is stated, on bounded runs.

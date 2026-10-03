@@ -1,0 +1,1063 @@
+From b17bdcbe6747ef6f7ea260c3b14233ea9d003f3c Mon Sep 17 00:00:00 2001
+From: Dennis Berger <dbgh@knownhosts.org>
+Date: Sat, 3 Oct 2026 11:50:05 +0200
+Subject: [PATCH] test(engine): Add property tests for the settlement loop
+ (no-changelog)
+
+`settlement.ts`, `completion.ts` and `StepSettledHandler` document claims
+about the whole settlement loop: fates do not depend on the order of
+events, the execution finishes when the settled count reaches
+`countExpectedSettledSteps`, a skip cascades one hop for each event, and
+any planner at any time recomputes the same decisions. The unit tests
+check single decisions. The existing property test checks loopless graphs
+on `decideSuccessors` alone.
+
+This test runs `ExecutionStartHandler` and `StepSettledHandler` without
+changes, over in-memory stores that follow the `ExecutionStore` and
+`StepStore` contracts. A step worker settles each queued step with an
+outcome that depends on its step key only. The test delivers the messages
+of each scenario in every order. It checks that:
+
+- the fates match a whole-graph evaluation of rules 2 and 3, and are the
+  same in every order
+- the execution ends `completed` with the settled count equal to
+  `countExpectedSettledSteps`, and no step is created after it ends
+- every order ends, after one delivery for each step and one for each
+  queued step
+- a settlement creates only direct successors of its step, and announces
+  each one
+- in every state reached, planning a settled step again agrees with the
+  final fates, and the rows that `decisionKeys` names give the same
+  decisions as all rows
+
+Scenarios: every DAG of up to 3 nodes with every output slot pattern, and
+every DAG of 4 nodes with the pattern that fills every read slot and one
+other seeded pattern (1,696 graphs, 4,160 scenarios, 88,115 delivery
+orders). 48 loop graphs (1,152 scenarios, 8,892 orders). 150 random
+graphs, in 20 random orders each, with redelivered messages: 53 DAGs, 48
+with one loop and 49 with two loops. 222 scenarios in which one step
+fails, where the execution must end `failed` with every step settled.
+The test pins the scenario counts and the count of each random kind, so
+a generator that shrinks or stops making a kind fails.
+
+The random generators seed the PRNG from a hash of a label. With integer
+seeds 1 to 150, the first draw of the LCG lies in [0.23, 0.30], so a
+first draw of `randomInt(rand, 3)` is always 0.
+
+Each delivery runs alone, so the test does not cover concurrent handlers.
+The file runs in about 2 to 4 seconds. Each test has a 60 s timeout,
+because the default 5 s is too short on a loaded CI machine. The test
+adds no dependency and changes no source file.
+---
+ .../__tests__/settlement.property.test.ts     | 999 ++++++++++++++++++
+ 1 file changed, 999 insertions(+)
+ create mode 100644 packages/@n8n/engine/src/execution/__tests__/settlement.property.test.ts
+
+diff --git a/packages/@n8n/engine/src/execution/__tests__/settlement.property.test.ts b/packages/@n8n/engine/src/execution/__tests__/settlement.property.test.ts
+new file mode 100644
+index 0000000000..4e54323328
+--- /dev/null
++++ b/packages/@n8n/engine/src/execution/__tests__/settlement.property.test.ts
+@@ -0,0 +1,999 @@
++import { describe, expect, it } from 'vitest';
++
++import {
++	deriveLoops,
++	findTriggerNode,
++	getDescendantNodeIds,
++	validateExecutableGraph,
++	type GraphEdge,
++	type GraphNode,
++	type WorkflowGraph,
++	type WorkflowLoop,
++} from '../../graph';
++import type { LifecycleEventPublisher } from '../../lifecycle-events';
++import type { OrchestrationMessage, StepMessage, WorkQueue } from '../../queue';
++import { noopExecutionResponseSender } from '../../response-channel';
++import { countExpectedSettledSteps } from '../completion';
++import { ExecutionStartHandler } from '../execution-start-handler';
++import type { ExecutionRecord, ExecutionStore } from '../execution-store';
++import {
++	isLiveExecutionStatus,
++	isSettledStatus,
++	stepKeyId,
++	type ExecutionStatus,
++	type StepKey,
++	type StepKeyId,
++	type StepSlots,
++} from '../execution.types';
++import { classifyEdge, targetKey } from '../iteration-mapping';
++import { loadTerminalIterations } from '../loop-ledger';
++import { decideSuccessors, decisionKeys, type SuccessorDecisions } from '../settlement';
++import { StepSettledHandler } from '../step-settled-handler';
++import type { NewStepRecord, StepRecord, StepStore, StepSummary } from '../step-store';
++
++/**
++ * Property tests for the settlement loop. `ExecutionStartHandler` and
++ * `StepSettledHandler` run unmodified over in-memory stores, and a step worker
++ * settles each queued step with a fixed outcome. So every decision comes from
++ * `decisionKeys`, `decideSuccessors`, `loadTerminalIterations` and
++ * `countExpectedSettledSteps`.
++ *
++ * A scenario is a graph and an outcome for each step key. The tests deliver its
++ * messages in every order, or in seeded random orders for larger graphs. Each
++ * delivery runs to the end before the next one starts. The tests check the
++ * claims of `settlement.ts`, `completion.ts` and the handler:
++ *
++ * - rules 2 and 3: the fates are the ones a whole-graph evaluation of the rules
++ *   gives (`specFates`);
++ * - confluence: the same outcomes give the same fates in every order;
++ * - completion: the execution ends `completed` when the settled count reaches
++ *   `countExpectedSettledSteps`. Then every step has settled, and no step is
++ *   created after that;
++ * - termination: every order ends, after one delivery for each created step
++ *   and one for each queued step;
++ * - rule 4: a settlement creates only direct successors of its step, and
++ *   announces each one, so a skip cascades one hop per event;
++ * - re-planning: at every state reached, planning a settled step again gives
++ *   decisions that agree with the final fates. Planning from the rows that
++ *   `decisionKeys` names gives the same decisions as planning from every row.
++ *
++ * Out of scope: concurrent handlers (each delivery here runs alone), waits,
++ * cancellation on request, and the step executors.
++ */
++
++const EXECUTION_ID = 'exec-1';
++
++type Outcome = { kind: 'completed'; filled: boolean[] } | { kind: 'failed' };
++
++/** The outcome of each step, from its key alone, so every order sees the same outcomes. */
++type Oracle = (key: StepKey) => Outcome;
++
++interface Scenario {
++	label: string;
++	graph: WorkflowGraph;
++	oracle: Oracle;
++}
++
++interface Context {
++	scenario: Scenario;
++	loops: WorkflowLoop[];
++	reachable: Set<string>;
++	/** The fates of a first run, by step key. Set for scenarios with no failed step. */
++	reference?: Map<StepKeyId, string>;
++}
++
++/**
++ * Everything the stores and queues hold. A message is its text, such as
++ * `step:ready n0@0`, and a step id is its step key, so states compare across
++ * orders.
++ */
++interface World {
++	context: Context;
++	status: ExecutionStatus;
++	rows: Map<StepKeyId, StepRecord>;
++	pending: string[];
++	/** Lifecycle event types, in publish order. */
++	events: string[];
++	/** The row count when the execution finished, or `undefined` while it runs. */
++	rowsAtFinish: number | undefined;
++	/** The messages delivered so far, to reproduce a failure. */
++	trace: string[];
++}
++
++function newStats() {
++	return { scenarios: 0, orders: 0n, redeliveries: 0, failedOutcomes: 0 };
++}
++
++type Stats = ReturnType<typeof newStats>;
++
++function check(world: World, ok: boolean, message: string): void {
++	if (!ok) {
++		throw new Error(
++			`${world.context.scenario.label}: ${message}\n  after: ${world.trace.join(', ')}`,
++		);
++	}
++}
++
++/** Builds a graph with one edge per input slot, as `validateExecutableGraph` requires. */
++class GraphBuilder {
++	private readonly nodes: GraphNode[] = [{ id: 'trigger', name: 'trigger', type: 'trigger' }];
++
++	private readonly edges: GraphEdge[] = [];
++
++	private readonly nextInput = new Map<string, number>();
++
++	node(id: string): this {
++		this.nodes.push({ id, name: id, type: 'v1-node' });
++		return this;
++	}
++
++	batch(id: string): this {
++		this.nodes.push({ id, name: id, type: 'batch', config: { batchSize: 1 } });
++		return this;
++	}
++
++	edge(from: string, to: string, outputIndex = 0): this {
++		const inputIndex = this.nextInput.get(to) ?? 0;
++		this.nextInput.set(to, inputIndex + 1);
++		this.edges.push({ from, to, outputIndex, inputIndex });
++		return this;
++	}
++
++	backEdge(from: string, to: string, outputIndex = 0): this {
++		this.edges.push({ from, to, outputIndex, inputIndex: 0, isBackEdge: true });
++		return this;
++	}
++
++	build(): WorkflowGraph {
++		const graph = { nodes: [...this.nodes], edges: [...this.edges] };
++		validateExecutableGraph(graph);
++		return graph;
++	}
++}
++
++/**
++ * Every loopless graph of `size` nodes after the trigger, where node `n<i>` has
++ * one or two distinct predecessors among the earlier nodes, each through output
++ * slot 0 or 1. The trigger has one output slot.
++ */
++function enumerateDags(size: number): WorkflowGraph[] {
++	type Edge = [from: string, outputIndex: number];
++	let graphs: Edge[][][] = [[]];
++	for (let index = 0; index < size; index++) {
++		const sources = ['trigger', ...Array.from({ length: index }, (_, j) => `n${j}`)];
++		const ends = sources.flatMap((from) =>
++			(from === 'trigger' ? [0] : [0, 1]).map((slot): Edge => [from, slot]),
++		);
++		const choices: Edge[][] = ends.flatMap((a) => [
++			[a],
++			...ends.filter((b) => sources.indexOf(b[0]) > sources.indexOf(a[0])).map((b) => [a, b]),
++		]);
++		graphs = graphs.flatMap((inputs) => choices.map((choice) => [...inputs, choice]));
++	}
++
++	return graphs.map((inputs) => {
++		const builder = new GraphBuilder();
++		for (const [index, edges] of inputs.entries()) {
++			builder.node(`n${index}`);
++			for (const [from, outputIndex] of edges) builder.edge(from, `n${index}`, outputIndex);
++		}
++		return builder.build();
++	});
++}
++
++type BodyShape = (builder: GraphBuilder, loop: string, prefix: string) => void;
++
++function chain(inner: number, back: number): BodyShape {
++	return (b, loop, p) => {
++		b.node(`${p}0`).node(`${p}1`).edge(loop, `${p}0`, 1).edge(`${p}0`, `${p}1`, inner);
++		b.backEdge(`${p}1`, loop, back);
++	};
++}
++
++/** Small loop bodies. Every body node lies on a cycle through the batch node, as `validateLoops` requires. */
++const BODY_SHAPES: Record<string, BodyShape> = {
++	'single, returns slot 0': (b, loop, p) =>
++		b.node(`${p}0`).edge(loop, `${p}0`, 1).backEdge(`${p}0`, loop, 0),
++	'single, returns slot 1': (b, loop, p) =>
++		b.node(`${p}0`).edge(loop, `${p}0`, 1).backEdge(`${p}0`, loop, 1),
++	'chain 0 0': chain(0, 0),
++	'chain 0 1': chain(0, 1),
++	'chain 1 0': chain(1, 0),
++	'chain 1 1': chain(1, 1),
++	fork: (b, loop, p) => {
++		b.node(`${p}0`).node(`${p}1`).edge(loop, `${p}0`, 1).edge(loop, `${p}1`, 1);
++		b.edge(`${p}0`, `${p}1`, 0).backEdge(`${p}1`, loop, 0);
++	},
++	'both slots into one node': (b, loop, p) => {
++		b.node(`${p}0`).node(`${p}1`).edge(loop, `${p}0`, 1).edge(`${p}0`, `${p}1`, 0);
++		b.edge(`${p}0`, `${p}1`, 1).backEdge(`${p}1`, loop, 0);
++	},
++};
++
++/** A random loop body of 1 to 3 nodes, each one reaching the node that returns. */
++function randomBody(rand: () => number): BodyShape {
++	const size = 1 + randomInt(rand, 3);
++	// source -1 is the batch node, which feeds the body from its loop slot
++	const inputs = Array.from({ length: size }, (_, i) =>
++		shuffle([-1, ...Array.from({ length: i }, (_, j) => j)], rand)
++			.slice(0, 1 + randomInt(rand, 2))
++			.map((from) => ({ from, slot: from === -1 ? 1 : randomInt(rand, 2) })),
++	);
++	// a body node that feeds nothing would leave the loop mid-body
++	for (let i = 0; i < size - 1; i++) {
++		if (!inputs.slice(i + 1).some((list) => list.some(({ from }) => from === i))) {
++			inputs[size - 1].push({ from: i, slot: randomInt(rand, 2) });
++		}
++	}
++	const back = randomInt(rand, 2);
++
++	return (b, loop, p) => {
++		for (let i = 0; i < size; i++) b.node(`${p}${i}`);
++		for (const [i, list] of inputs.entries()) {
++			for (const { from, slot } of list)
++				b.edge(from === -1 ? loop : `${p}${from}`, `${p}${i}`, slot);
++		}
++		b.backEdge(`${p}${size - 1}`, loop, back);
++	};
++}
++
++const AFTER = ['none', 'exit', 'merge'] as const;
++
++/**
++ * trigger -> [pre ->] loop, with the body inside. After the loop: nothing, one
++ * node, or one node that also waits on a branch from the trigger.
++ */
++function loopGraph(pre: boolean, body: BodyShape, after: (typeof AFTER)[number]): WorkflowGraph {
++	const b = new GraphBuilder().batch('loop');
++	if (pre) b.node('pre').edge('trigger', 'pre').edge('pre', 'loop');
++	else b.edge('trigger', 'loop');
++	body(b, 'loop', 'body');
++	if (after !== 'none') b.node('after').edge('loop', 'after', 0);
++	if (after === 'merge') b.node('side').edge('trigger', 'side').edge('side', 'after');
++	return b.build();
++}
++
++/** Two loops, one after the other or side by side, and a node after both. */
++function twoLoopGraph(sequential: boolean, first: BodyShape, second: BodyShape): WorkflowGraph {
++	const b = new GraphBuilder().batch('loopA').batch('loopB').node('after');
++	b.edge('trigger', 'loopA');
++	first(b, 'loopA', 'a');
++	if (sequential) b.edge('loopA', 'loopB', 0);
++	else b.edge('trigger', 'loopB').edge('loopA', 'after', 0);
++	second(b, 'loopB', 'b');
++	b.edge('loopB', 'after', 0);
++	return b.build();
++}
++
++/**
++ * Deterministic PRNG, seeded from `hash(label)`. Consecutive seeds give close
++ * first draws: `lcg(1)` to `lcg(150)` all start in [0.23, 0.30].
++ */
++function lcg(seed: number): () => number {
++	let state = seed >>> 0;
++	return () => (state = (state * 1664525 + 1013904223) >>> 0) / 2 ** 32;
++}
++
++function randomInt(rand: () => number, bound: number): number {
++	return Math.floor(rand() * bound);
++}
++
++function shuffle<T>(items: T[], rand: () => number): T[] {
++	const copy = [...items];
++	for (let i = copy.length - 1; i > 0; i--) {
++		const j = randomInt(rand, i + 1);
++		[copy[i], copy[j]] = [copy[j], copy[i]];
++	}
++	return copy;
++}
++
++/** FNV-1a, so an outcome depends on the seed and the key only. */
++function hash(text: string): number {
++	let h = 0x811c9dc5;
++	for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
++	return h >>> 0;
++}
++
++/**
++ * Every assignment of filled slots to the slots each node's out-edges read. A
++ * slot that no edge reads cannot change a decision, so a leaf has one pattern.
++ */
++function enumerateSlotPatterns(graph: WorkflowGraph): Array<Map<string, boolean[]>> {
++	let patterns: Array<Map<string, boolean[]>> = [new Map()];
++	for (const node of graph.nodes) {
++		const read = graph.edges.filter((edge) => edge.from === node.id);
++		const slots = Math.max(0, ...read.map((edge) => edge.outputIndex + 1));
++		const options = Array.from({ length: 2 ** slots }, (_, bits) =>
++			Array.from({ length: Math.max(slots, 1) }, (_, slot) => Boolean(bits & (1 << slot))),
++		);
++		patterns = patterns.flatMap((pattern) =>
++			options.map((filled) => new Map([...pattern, [node.id, filled]])),
++		);
++	}
++	return patterns;
++}
++
++/**
++ * A batch node fills its loop slot for `passes` passes, then its done slot, or
++ * no slot when `doneEmpty`, as `runBatchStep` does. Every other step fills
++ * slots from a hash of the seed and its key.
++ */
++function loopOracle(
++	seed: number,
++	passes: Record<string, number>,
++	doneEmpty: boolean,
++	failing?: StepKey,
++): Oracle {
++	return ({ nodeId, iteration }) => {
++		if (nodeId === failing?.nodeId && iteration === failing.iteration) return { kind: 'failed' };
++		const loopPasses = passes[nodeId];
++		if (loopPasses !== undefined) {
++			const filled = iteration < loopPasses ? [false, true] : [!doneEmpty, false];
++			return { kind: 'completed', filled };
++		}
++		const h = hash(`${seed}|${nodeId}|${iteration}`);
++		return { kind: 'completed', filled: [Boolean(h & 1), Boolean(h & 2)] };
++	};
++}
++
++function slotsOf(filled: boolean[]): StepSlots {
++	return filled.map((isFilled) => (isFilled ? [{}] : null));
++}
++
++function fateOf(status: string, filled: boolean[]): string {
++	return `${status}/${filled.map((f) => (f ? '1' : '0')).join('')}`;
++}
++
++function summaryOf(row: StepRecord): StepSummary {
++	// as the store computes it: one flag per stored slot, none until completed
++	const filled = row.status === 'completed' ? (row.outputs ?? []).map((v) => v !== null) : [];
++	const { id, nodeId, iteration, status } = row;
++	return { id, nodeId, iteration, status, filledOutputSlots: filled };
++}
++
++function rowFate(row: StepRecord): string {
++	return fateOf(row.status, summaryOf(row).filledOutputSlots);
++}
++
++function hasFailedRow(world: World): boolean {
++	return [...world.rows.values()].some((row) => row.status === 'failed');
++}
++
++function notUsed(): never {
++	throw new Error('not used by the settlement loop');
++}
++
++/** The stores and queues over one world, as their interfaces describe them. */
++function makePorts(world: World) {
++	const { scenario } = world.context;
++	const trigger = scenario.oracle({ nodeId: findTriggerNode(scenario.graph)!.id, iteration: 0 });
++	const record: ExecutionRecord = {
++		id: EXECUTION_ID,
++		workflowId: 'wf-1',
++		status: world.status,
++		mode: 'production',
++		graph: scenario.graph,
++		workflow: {},
++		triggerOutputs: trigger.kind === 'completed' ? slotsOf(trigger.filled) : [],
++		callerContext: { hostMode: 'trigger' },
++		responseExpectation: { kind: 'none' },
++		finishedAt: null,
++	};
++	const rows = () => [...world.rows.values()];
++
++	const executionStore = {
++		createExecution: notUsed,
++		loadExecution: async () => await Promise.resolve({ ...record, status: world.status }),
++		transitionStatus: async (_: string, from: ExecutionStatus, to: ExecutionStatus) => {
++			const claimed = world.status === from;
++			if (claimed) world.status = to;
++			return await Promise.resolve(claimed);
++		},
++		finishExecution: async (_: string, status: 'completed' | 'failed') => {
++			const live = isLiveExecutionStatus(world.status);
++			if (live) world.status = status;
++			return await Promise.resolve(live ? { finishedAt: new Date(0) } : null);
++		},
++		cancelExecution: notUsed,
++		// no step waits here, so a live execution stays `running`
++		refreshLiveStatus: async () => await Promise.resolve(),
++	} satisfies ExecutionStore;
++
++	const stepStore = {
++		createSteps: async (_: string, records: NewStepRecord[]) => {
++			const created: Array<{ id: string } & StepKey> = [];
++			// nothing is created once a step has failed
++			for (const { nodeId, iteration, status, outputs } of hasFailedRow(world) ? [] : records) {
++				const id = stepKeyId({ nodeId, iteration });
++				if (world.rows.has(id)) continue;
++				const row = { id, executionId: EXECUTION_ID, nodeId, iteration, status };
++				world.rows.set(id, {
++					...row,
++					outputs: outputs ?? null,
++					waitDeclaration: null,
++					resumeCause: null,
++				});
++				created.push({ id, nodeId, iteration });
++			}
++			return await Promise.resolve(created);
++		},
++		loadStep: async (id: string) => await Promise.resolve({ ...world.rows.get(id)! }),
++		claimStep: notUsed,
++		completeStep: notUsed,
++		suspendStep: notUsed,
++		resumeStep: notUsed,
++		resumeDueSteps: notUsed,
++		nextWaitDeadline: notUsed,
++		failStep: notUsed,
++		cancelStep: notUsed,
++		cancelPendingSteps: async () => {
++			for (const row of rows()) {
++				if (row.status === 'queued' || row.status === 'waiting') row.status = 'cancelled';
++			}
++			await Promise.resolve();
++		},
++		loadStepsByKeys: notUsed,
++		loadStepSummariesByKeys: async (_: string, keys: StepKey[]) => {
++			const found = keys.flatMap((key) => world.rows.get(stepKeyId(key)) ?? []);
++			return await Promise.resolve(Object.fromEntries(found.map((r) => [r.id, summaryOf(r)])));
++		},
++		loadLatestStepSummaries: async (_: string, nodeIds: string[]) => {
++			const latest: Record<string, StepSummary> = {};
++			for (const row of rows().filter((r) => nodeIds.includes(r.nodeId))) {
++				const current = latest[row.nodeId];
++				if (!current || current.iteration < row.iteration) latest[row.nodeId] = summaryOf(row);
++			}
++			return await Promise.resolve(latest);
++		},
++		loadAllSteps: notUsed,
++		countSettledSteps: async () =>
++			await Promise.resolve(rows().filter((row) => isSettledStatus(row.status)).length),
++		hasFailedSteps: async () => await Promise.resolve(hasFailedRow(world)),
++	} satisfies StepStore;
++
++	function queue<T extends StepMessage | OrchestrationMessage>(): WorkQueue<T> {
++		return {
++			publish: async (message) => {
++				world.pending.push(
++					'stepId' in message ? `${message.type} ${message.stepId}` : message.type,
++				);
++				await Promise.resolve();
++			},
++			start: notUsed,
++			stop: notUsed,
++		};
++	}
++
++	const lifecycleEventPublisher: LifecycleEventPublisher = {
++		publish: (event) => world.events.push(event.type),
++		stop: notUsed,
++	};
++
++	const [stepQueue, orchestrationQueue] = [queue<StepMessage>(), queue<OrchestrationMessage>()];
++	return { executionStore, stepStore, stepQueue, orchestrationQueue, lifecycleEventPublisher };
++}
++
++/** The step worker: claims a queued step, settles it with its outcome, and announces it. */
++function runStep(world: World, stepId: StepKeyId): void {
++	const row = world.rows.get(stepId);
++	check(world, row !== undefined, `step:ready for ${stepId}, which has no row`);
++	// the claim refuses a step that is not queued, and every step once one failed
++	if (row!.status !== 'queued' || hasFailedRow(world)) return;
++
++	const outcome = world.context.scenario.oracle(row!);
++	if (outcome.kind === 'failed') {
++		row!.status = 'failed';
++		row!.error = { name: 'Error', message: 'failed by the scenario' };
++	} else {
++		row!.status = 'completed';
++		row!.outputs = slotsOf(outcome.filled);
++	}
++	world.pending.push(`step:settled ${stepId}`);
++}
++
++async function deliver(world: World, message: string): Promise<void> {
++	world.trace.push(message);
++	const ports = makePorts(world);
++	const { executionStore, stepStore, orchestrationQueue, lifecycleEventPublisher: events } = ports;
++	const [type, stepId] = message.split(' ');
++
++	if (type === 'execution:enqueued') {
++		const handler = new ExecutionStartHandler(
++			executionStore,
++			stepStore,
++			orchestrationQueue,
++			events,
++		);
++		return await handler.handle({ type: 'execution:enqueued', executionId: EXECUTION_ID });
++	}
++	if (type === 'step:ready') return runStep(world, stepId);
++
++	const before = new Map([...world.rows].map(([id, row]) => [id, rowFate(row)]));
++	const announcedFrom = world.pending.length;
++	const wasLive = isLiveExecutionStatus(world.status);
++	const settled = world.rows.get(stepId)!;
++
++	await new StepSettledHandler(
++		executionStore,
++		stepStore,
++		ports.stepQueue,
++		orchestrationQueue,
++		events,
++		noopExecutionResponseSender,
++	).handle({ type: 'step:settled', executionId: EXECUTION_ID, stepId });
++
++	// Rule 4: only direct successors of the settled step are created, each one
++	// queued or skipped, and each one is announced once.
++	const { graph } = world.context.scenario;
++	const successors = graph.edges
++		.filter((edge) => edge.from === settled.nodeId)
++		.map((edge) => stepKeyId(targetKey(edge, classifyEdge(edge, world.context.loops), settled)));
++	const created = [...world.rows.values()].filter((row) => !before.has(row.id));
++	for (const row of created) {
++		check(world, successors.includes(row.id), `${stepId} created ${row.id}, not a successor`);
++		check(world, ['queued', 'skipped'].includes(row.status), `${row.id} created ${row.status}`);
++	}
++	const announced = world.pending.slice(announcedFrom).sort().join(', ');
++	const expected = created
++		.map((row) => `${row.status === 'queued' ? 'step:ready' : 'step:settled'} ${row.id}`)
++		.sort()
++		.join(', ');
++	check(world, announced === expected, `${stepId} announced [${announced}], not [${expected}]`);
++
++	// Settled fates are immutable. After a failure, queued steps are cancelled.
++	for (const [id, fate] of before) {
++		const now = rowFate(world.rows.get(id)!);
++		const cancelled = fate.startsWith('queued/') && now === 'cancelled/' && hasFailedRow(world);
++		check(world, now === fate || cancelled, `${id} changed from ${fate} to ${now}`);
++	}
++
++	// Completion cannot pass early: when the execution finishes, every step it
++	// owes has settled, and no step is created after that.
++	if (wasLive && world.status === 'completed') {
++		world.rowsAtFinish = world.rows.size;
++		await checkSettledCount(world, 'at finish');
++	}
++	const finished = world.rowsAtFinish;
++	check(world, finished === undefined || finished === world.rows.size, 'a step after finish');
++}
++
++async function terminalIterations(world: World): Promise<Map<string, number>> {
++	const batchNodeIds = world.context.loops.map((loop) => loop.batchNodeId);
++	return await loadTerminalIterations(makePorts(world).stepStore, EXECUTION_ID, batchNodeIds);
++}
++
++async function checkSettledCount(world: World, when: string): Promise<void> {
++	const rows = [...world.rows.values()];
++	const unsettled = rows.filter((row) => !isSettledStatus(row.status)).map((row) => row.id);
++	check(world, unsettled.length === 0, `${when}: ${unsettled.join(', ')} not settled`);
++	const strays = rows.filter((row) => !world.context.reachable.has(row.nodeId));
++	check(world, strays.length === 0, `${when}: steps for unreachable nodes`);
++
++	const { loops, reachable } = world.context;
++	const expected = countExpectedSettledSteps(loops, reachable, await terminalIterations(world));
++	check(world, expected === rows.length, `${when}: ${rows.length} settled, ${expected} expected`);
++}
++
++function fates(world: World): Map<StepKeyId, string> {
++	return new Map([...world.rows].map(([id, row]) => [id, rowFate(row)]));
++}
++
++function fateText(fateMap: Map<StepKeyId, string>): string {
++	return [...fateMap]
++		.map(([id, fate]) => `${id}=${fate}`)
++		.sort()
++		.join(' ');
++}
++
++function decisionText({ toQueue, toSkip }: SuccessorDecisions): string {
++	return `queue [${toQueue.map(stepKeyId).join(', ')}] skip [${toSkip.map(stepKeyId).join(', ')}]`;
++}
++
++/**
++ * Plans every settled step again from the rows of this state, as the handler
++ * does. Each decision must agree with the reference fates, and planning from
++ * the rows `decisionKeys` names must equal planning from every row.
++ */
++async function checkReplanning(world: World): Promise<void> {
++	const { scenario, loops, reference } = world.context;
++	if (!reference) return;
++
++	const terminal = await terminalIterations(world);
++	const allRows = Object.fromEntries([...world.rows].map(([id, row]) => [id, summaryOf(row)]));
++	for (const row of world.rows.values()) {
++		if (row.status !== 'completed' && row.status !== 'skipped') continue;
++
++		const named = Object.fromEntries(
++			decisionKeys(scenario.graph, loops, row, terminal).flatMap((key) => {
++				const summary = allRows[stepKeyId(key)];
++				return summary ? [[summary.id, summary]] : [];
++			}),
++		);
++		const fromNamed = decisionText(decideSuccessors(scenario.graph, loops, row, named, terminal));
++		const decisions = decideSuccessors(scenario.graph, loops, row, allRows, terminal);
++		const fromAll = decisionText(decisions);
++		check(world, fromNamed === fromAll, `planning ${row.id}: ${fromNamed}, from all ${fromAll}`);
++
++		for (const [keys, fate] of [
++			[decisions.toQueue, 'completed/'],
++			[decisions.toSkip, 'skipped/'],
++		] as const) {
++			for (const id of keys.map(stepKeyId)) {
++				const final = reference.get(id);
++				check(world, final?.startsWith(fate) === true, `planning ${row.id}: ${id} ends ${final}`);
++			}
++		}
++		if (world.pending.length === 0) {
++			check(world, fromAll === 'queue [] skip []', `planning ${row.id} at the end: ${fromAll}`);
++		}
++	}
++}
++
++/** The checks on a state with nothing left to deliver. Returns what must not depend on order. */
++async function checkTerminal(world: World, redelivered = 0): Promise<string> {
++	const rows = [...world.rows.values()];
++	const count = (type: string) => world.events.filter((event) => event === type).length;
++	const events = `${count('execution:completed')} completed, ${count('execution:failed')} failed`;
++
++	// Termination: one delivery for the start, a `step:settled` for each step and
++	// a `step:ready` for each queued step, which is every step but the skipped
++	// ones and the trigger. Redelivered messages come on top.
++	const queued = rows.filter((row) => row.status !== 'skipped').length - 1;
++	const bound = 1 + rows.length + queued + redelivered;
++	const deliveries = world.trace.length;
++	check(world, deliveries <= bound, `${deliveries} deliveries for ${rows.length} steps`);
++
++	if (hasFailedRow(world)) {
++		check(world, world.status === 'failed', `ended ${world.status} with a failed step`);
++		check(world, events === '0 completed, 1 failed', `lifecycle events: ${events}`);
++		const unsettled = rows.filter((row) => !isSettledStatus(row.status)).map((row) => row.id);
++		check(world, unsettled.length === 0, `${unsettled.join(', ')} not settled after failure`);
++		return 'failed';
++	}
++
++	check(world, world.status === 'completed', `ended ${world.status}`);
++	check(world, events === '1 completed, 0 failed', `lifecycle events: ${events}`);
++	check(world, deliveries === bound, `${deliveries} deliveries for ${rows.length} steps`);
++	check(world, world.rowsAtFinish === rows.length, 'a step after finish');
++	await checkSettledCount(world, 'at the end');
++	return `completed ${fateText(fates(world))}`;
++}
++
++function newWorld(context: Context): World {
++	return {
++		context,
++		status: 'queued',
++		rows: new Map(),
++		pending: ['execution:enqueued'],
++		events: [],
++		rowsAtFinish: undefined,
++		trace: [],
++	};
++}
++
++function cloneWorld(world: World): World {
++	return {
++		...world,
++		rows: new Map([...world.rows].map(([id, row]) => [id, { ...row }])),
++		pending: [...world.pending],
++		events: [...world.events],
++		trace: [...world.trace],
++	};
++}
++
++function stateKey(world: World): string {
++	const pending = [...world.pending].sort().join();
++	return `${world.status}|${world.events.join()}|${world.rowsAtFinish}|${fateText(fates(world))}|${pending}`;
++}
++
++/**
++ * The fates that rules 2 and 3 of `settlement.ts` give, from a whole-graph
++ * fixpoint that does not use the planner. A step at iteration `i` reads its
++ * sources by edge kind. A return edge reads iteration `i - 1`. An edge out of a
++ * loop reads the batch node's last pass. Any other edge into a batch node reads
++ * iteration 0. Every other edge reads iteration `i`. A loop body has steps only
++ * at the passes where the batch node filled its loop slot.
++ */
++function specFates(context: Context): Map<StepKeyId, string> {
++	const { graph, oracle } = context.scenario;
++	const fate = new Map<StepKeyId, { completed: boolean; filled: boolean[] }>();
++	const at = (nodeId: string, iteration: number) => fate.get(stepKeyId({ nodeId, iteration }));
++	const loopOf = (nodeId: string) => context.loops.find((loop) => loop.memberIds.has(nodeId));
++	const lastPass = (batchNodeId: string): number | undefined => {
++		for (let i = 0; at(batchNodeId, i); i++) {
++			if (!at(batchNodeId, i)!.filled[1]) return i;
++		}
++		return undefined;
++	};
++	const run = (key: StepKey) => {
++		const outcome = oracle(key);
++		fate.set(stepKeyId(key), {
++			completed: true,
++			filled: outcome.kind === 'completed' ? outcome.filled : [],
++		});
++	};
++	run({ nodeId: findTriggerNode(graph)!.id, iteration: 0 });
++
++	for (let changed = true; changed; ) {
++		changed = false;
++		for (const node of graph.nodes) {
++			const loop = loopOf(node.id);
++			for (let iteration = 0; iteration <= 8; iteration++) {
++				if (at(node.id, iteration)) continue;
++				if (loop && loop.batchNodeId !== node.id && !at(loop.batchNodeId, iteration)?.filled[1]) {
++					continue;
++				}
++
++				let sources = 0;
++				let decidable = true;
++				let live = false;
++				for (const edge of graph.edges.filter((e) => e.to === node.id)) {
++					let from: number | undefined = iteration;
++					if (edge.isBackEdge) from = iteration === 0 ? undefined : iteration - 1;
++					else if (loopOf(edge.from) && loopOf(edge.from) !== loop) {
++						// an edge out of a loop, into another loop's batch node too
++						from = iteration === 0 ? lastPass(edge.from) : undefined;
++						if (iteration === 0 && from === undefined) decidable = false;
++					} else if (loop?.batchNodeId === node.id) from = iteration === 0 ? 0 : undefined;
++					if (from === undefined) continue;
++
++					sources += 1;
++					const source = at(edge.from, from);
++					if (!source) decidable = false;
++					else if (source.completed && source.filled[edge.outputIndex]) live = true;
++				}
++				if (!decidable || sources === 0) continue;
++
++				if (live) run({ nodeId: node.id, iteration });
++				else fate.set(stepKeyId({ nodeId: node.id, iteration }), { completed: false, filled: [] });
++				changed = true;
++			}
++		}
++	}
++
++	return new Map(
++		[...fate].map(([id, f]) => [id, fateOf(f.completed ? 'completed' : 'skipped', f.filled)]),
++	);
++}
++
++/**
++ * Runs the scenario once, oldest message first. With no failed step, its fates
++ * must be the ones `specFates` gives, and they become the reference.
++ */
++async function prepare(scenario: Scenario): Promise<{ context: Context; outcome: string }> {
++	const trigger = findTriggerNode(scenario.graph)!.id;
++	const reachable = new Set([trigger, ...getDescendantNodeIds(scenario.graph, trigger)]);
++	const context: Context = { scenario, loops: deriveLoops(scenario.graph), reachable };
++	const world = newWorld(context);
++	while (world.pending.length > 0) await deliver(world, world.pending.shift()!);
++
++	const outcome = await checkTerminal(world);
++	if (!hasFailedRow(world)) {
++		const [actual, expected] = [fateText(fates(world)), fateText(specFates(context))];
++		check(world, actual === expected, `fates ${actual}, the rules give ${expected}`);
++		context.reference = fates(world);
++	}
++	return { context, outcome };
++}
++
++interface Explored {
++	orders: bigint;
++	outcomes: Set<string>;
++}
++
++/**
++ * Delivers the pending messages in every order. A state that two orders reach
++ * is explored once, and `orders` counts the distinct delivery sequences.
++ */
++async function exploreAllOrders(world: World, seen: Map<string, Explored>): Promise<Explored> {
++	const key = stateKey(world);
++	const known = seen.get(key);
++	if (known) return known;
++
++	await checkReplanning(world);
++	const result: Explored = { orders: 0n, outcomes: new Set() };
++	if (world.pending.length === 0) {
++		result.orders = 1n;
++		result.outcomes.add(await checkTerminal(world));
++	}
++	for (const message of new Set(world.pending)) {
++		const next = cloneWorld(world);
++		next.pending.splice(next.pending.indexOf(message), 1);
++		await deliver(next, message);
++		const child = await exploreAllOrders(next, seen);
++		result.orders += child.orders;
++		for (const outcome of child.outcomes) result.outcomes.add(outcome);
++	}
++
++	seen.set(key, result);
++	return result;
++}
++
++/** Runs a scenario in every delivery order. They must all reach the first run's outcome. */
++async function checkAllOrders(scenario: Scenario, stats: Stats): Promise<void> {
++	const { context, outcome } = await prepare(scenario);
++	const explored = await exploreAllOrders(newWorld(context), new Map());
++	stats.scenarios += 1;
++	stats.orders += explored.orders;
++	if (outcome === 'failed') stats.failedOutcomes += 1;
++
++	const outcomes = [...explored.outcomes];
++	if (outcomes.length !== 1 || outcomes[0] !== outcome) {
++		const found = outcomes.join('\n  ');
++		throw new Error(
++			`${scenario.label}: over ${explored.orders} orders\n  ${found}\n  first: ${outcome}`,
++		);
++	}
++}
++
++/**
++ * Runs a scenario in seeded random orders. Some messages are delivered twice,
++ * as a queue that redelivers would, and the outcome must not change.
++ */
++async function checkRandomOrders(scenario: Scenario, runs: number, stats: Stats): Promise<void> {
++	const { context, outcome } = await prepare(scenario);
++	const rand = lcg(hash(scenario.label));
++
++	for (let run = 0; run < runs; run++) {
++		const world = newWorld(context);
++		let redelivered = 0;
++		while (world.pending.length > 0) {
++			const [message] = world.pending.splice(randomInt(rand, world.pending.length), 1);
++			await deliver(world, message);
++			if (redelivered < 3 && message !== 'execution:enqueued' && rand() < 0.1) {
++				redelivered += 1;
++				world.pending.push(message);
++			}
++			if (rand() < 0.2) await checkReplanning(world);
++		}
++		const actual = await checkTerminal(world, redelivered);
++		check(world, actual === outcome, `run ${run} ended ${actual}, the first run ${outcome}`);
++		stats.orders += 1n;
++		stats.redeliveries += redelivered;
++	}
++	stats.scenarios += 1;
++}
++
++/**
++ * Every DAG of `size` nodes, with every slot pattern, or with `sample` of them:
++ * the one that fills every read slot, which runs the most steps at once, and
++ * seeded random others drawn from the rest.
++ */
++function dagScenarios(size: number, sample?: number): Scenario[] {
++	return enumerateDags(size).flatMap((graph, graphIndex) => {
++		const patterns = enumerateSlotPatterns(graph);
++		const rand = lcg(hash(`dag ${size}#${graphIndex}`));
++		const random = Array.from({ length: (sample ?? 1) - 1 }, () =>
++			randomInt(rand, patterns.length - 1),
++		);
++		const chosen =
++			sample === undefined ? patterns.keys() : new Set([patterns.length - 1, ...random]);
++		return [...chosen].map((index) => ({
++			label: `dag ${size}#${graphIndex} pattern ${index}`,
++			graph,
++			oracle: ({ nodeId }: StepKey): Outcome => ({
++				kind: 'completed',
++				filled: patterns[index].get(nodeId)!,
++			}),
++		}));
++	});
++}
++
++function loopScenarios(seeds: number): Scenario[] {
++	return [false, true].flatMap((pre) =>
++		Object.entries(BODY_SHAPES).flatMap(([shape, body]) =>
++			AFTER.flatMap((after) => {
++				const graph = loopGraph(pre, body, after);
++				return [0, 1, 2, 3].flatMap((passes) =>
++					[false, true].flatMap((doneEmpty) =>
++						Array.from({ length: seeds }, (_, seed) => ({
++							label: `loop pre=${pre} body=${shape} after=${after} passes=${passes} doneEmpty=${doneEmpty} seed=${seed}`,
++							graph,
++							oracle: loopOracle(seed, { loop: passes }, doneEmpty),
++						})),
++					),
++				);
++			}),
++		),
++	);
++}
++
++/** A DAG of 4 to 7 nodes, a loop with a random body, or two loops. */
++function randomScenario(seed: number): Scenario & { kind: 'dag' | 'loop' | 'two loops' } {
++	const rand = lcg(hash(`random ${seed}`));
++	const kind = randomInt(rand, 3);
++	const passes = { loop: randomInt(rand, 5), loopA: randomInt(rand, 4), loopB: randomInt(rand, 4) };
++	const oracle = loopOracle(seed, passes, rand() < 0.2);
++
++	if (kind === 0) {
++		const builder = new GraphBuilder();
++		const size = 4 + randomInt(rand, 4);
++		for (let i = 0; i < size; i++) {
++			const sources = ['trigger', ...Array.from({ length: i }, (_, j) => `n${j}`)];
++			builder.node(`n${i}`);
++			for (const from of shuffle(sources, rand).slice(0, 1 + randomInt(rand, 3))) {
++				builder.edge(from, `n${i}`, from === 'trigger' ? 0 : randomInt(rand, 2));
++			}
++		}
++		return { kind: 'dag', label: `random dag seed=${seed}`, graph: builder.build(), oracle };
++	}
++	if (kind === 1) {
++		const graph = loopGraph(rand() < 0.5, randomBody(rand), AFTER[randomInt(rand, 3)]);
++		return { kind: 'loop', label: `random loop seed=${seed}`, graph, oracle };
++	}
++	const sequential = rand() < 0.5;
++	const graph = twoLoopGraph(sequential, randomBody(rand), randomBody(rand));
++	const label = `random two loops sequential=${sequential} seed=${seed}`;
++	return { kind: 'two loops', label, graph, oracle };
++}
++
++/** Every DAG of up to 3 nodes with each node failing in turn, and loops whose body fails. */
++function failureScenarios(): Scenario[] {
++	const dags = [1, 2, 3].flatMap((size) =>
++		enumerateDags(size).flatMap((graph, graphIndex) =>
++			Array.from({ length: size }, (_, failing) => ({
++				label: `dag ${size}#${graphIndex} n${failing} fails`,
++				graph,
++				oracle: ({ nodeId }: StepKey): Outcome =>
++					nodeId === `n${failing}`
++						? { kind: 'failed' }
++						: { kind: 'completed', filled: [true, true] },
++			})),
++		),
++	);
++	const loops = Object.entries(BODY_SHAPES).flatMap(([shape, body]) =>
++		[0, 1].map((iteration) => ({
++			label: `loop body=${shape} body0@${iteration} fails`,
++			graph: loopGraph(false, body, 'merge'),
++			oracle: loopOracle(1, { loop: 2 }, false, { nodeId: 'body0', iteration }),
++		})),
++	);
++	return [...dags, ...loops];
++}
++
++describe('the settlement loop', { timeout: 60_000 }, () => {
++	// The scenario counts pin the generators, so a generator that shrinks fails
++	// here instead of passing on fewer cases. A test runs thousands of scenarios,
++	// too many for the default 5 s timeout on a busy CI machine.
++
++	it('reaches one outcome in every delivery order, on every DAG of up to 4 nodes', async () => {
++		const stats = newStats();
++		for (const size of [1, 2, 3]) {
++			for (const scenario of dagScenarios(size)) await checkAllOrders(scenario, stats);
++		}
++		for (const scenario of dagScenarios(4, 2)) await checkAllOrders(scenario, stats);
++
++		expect(stats.scenarios).toBe(4160);
++		expect(stats.orders).toBeGreaterThan(BigInt(stats.scenarios));
++	});
++
++	it('reaches one outcome in every delivery order, on small loops', async () => {
++		const stats = newStats();
++		for (const scenario of loopScenarios(3)) await checkAllOrders(scenario, stats);
++
++		expect(stats.scenarios).toBe(1152);
++		expect(stats.orders).toBeGreaterThan(BigInt(stats.scenarios));
++	});
++
++	it('reaches the first outcome in random orders with redelivered messages, on larger graphs', async () => {
++		const stats = newStats();
++		const kinds = { dag: 0, loop: 0, 'two loops': 0 };
++		for (let seed = 1; seed <= 150; seed++) {
++			const scenario = randomScenario(seed);
++			kinds[scenario.kind] += 1;
++			await checkRandomOrders(scenario, 20, stats);
++		}
++
++		expect(stats.scenarios).toBe(150);
++		expect(kinds).toEqual({ dag: 53, loop: 48, 'two loops': 49 });
++		expect(stats.redeliveries).toBeGreaterThan(0);
++	});
++
++	it('ends failed with every step settled, in every delivery order, when a step fails', async () => {
++		const stats = newStats();
++		for (const scenario of failureScenarios()) await checkAllOrders(scenario, stats);
++
++		expect(stats.scenarios).toBe(222);
++		expect(stats.failedOutcomes).toBeGreaterThan(0);
++	});
++});
+-- 
+2.50.1 (Apple Git-155)
+

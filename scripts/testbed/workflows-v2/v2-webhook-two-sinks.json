@@ -1,0 +1,127 @@
+{
+  "name": "V2 Webhook Two Sinks",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "v2-two-sinks",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "5e1f0a00-0d03-4c00-8a00-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "5e1f0a00-0d03-4c00-8a00-hook",
+      "notes": "Engine v2 only. `responseMode: lastNode` with two sinks fed by one node. The body is the outputs of whichever sink's settlement ended the run, so it shows which settlement wrote the ending (divergence row 39) in the HTTP response itself."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d03-4c00-8a00-a0020",
+              "name": "tag",
+              "value": "={{ $json.body.tag }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d03-4c00-8a00-000000000002",
+      "name": "Echo",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d03-4c00-8a00-a0030",
+              "name": "sink",
+              "value": "A",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d03-4c00-8a00-000000000003",
+      "name": "Sink A",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d03-4c00-8a00-a0040",
+              "name": "sink",
+              "value": "B",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d03-4c00-8a00-000000000004",
+      "name": "Sink B",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        120
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Echo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Echo": {
+      "main": [
+        [
+          {
+            "node": "Sink A",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sink B",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

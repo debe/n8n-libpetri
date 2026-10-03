@@ -1,0 +1,134 @@
+{
+  "name": "V2 Webhook Respond Node",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "v2-respond-node",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "5e1f0a00-0d04-4c00-8a00-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "5e1f0a00-0d04-4c00-8a00-hook",
+      "notes": "Engine v2 only. `responseMode: responseNode` (engine v2's `stepResponse` expectation): Respond to Webhook answers with 201, a header and a JSON body, and the run goes on to one more node after the answer."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d04-4c00-8a00-a0020",
+              "name": "tag",
+              "value": "={{ $json.body.tag }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d04-4c00-8a00-000000000002",
+      "name": "Echo",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ tag: $json.tag, via: 'respond node' }) }}",
+        "options": {
+          "responseCode": 201,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "X-Testbed",
+                "value": "engine-v2"
+              }
+            ]
+          }
+        }
+      },
+      "id": "5e1f0a00-0d04-4c00-8a00-000000000003",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d04-4c00-8a00-a0040",
+              "name": "after",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d04-4c00-8a00-000000000004",
+      "name": "After Respond",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Echo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Echo": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook": {
+      "main": [
+        [
+          {
+            "node": "After Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

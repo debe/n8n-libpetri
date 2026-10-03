@@ -205,6 +205,25 @@ async function workflow(file, cred, seeded) {
     const engineType = dataOf(stored)?.settings?.engineType;
     if (engineType !== 'v2') fail(`workflow ${parsed.name} stored settings.engineType=${JSON.stringify(engineType)}, not "v2"; the REST path did not keep it`, stored);
   }
+  // A Webhook trigger is published, so its production URL is registered: a manual run of it would
+  // only open a test webhook and wait. `diff-engines-v2.sh` reads `webhook` to call it and to keep
+  // it out of the manual runs.
+  const hook = parsed.nodes.find((n) => n.type === 'n8n-nodes-base.webhook');
+  if (engineV2 && hook) {
+    const stored = dataOf(await call('GET', `/workflows/${id}`));
+    const activated = await call('POST', `/workflows/${id}/activate`, { versionId: stored.versionId });
+    if (!activated.ok) fail(`workflow activate ${parsed.name}`, activated);
+    const active = dataOf(activated);
+    if (active?.active !== true && !active?.activeVersionId) fail(`workflow ${parsed.name} did not become active`, activated);
+    const webhook = {
+      method: hook.parameters.httpMethod ?? 'GET',
+      path: hook.parameters.path,
+      responseMode: hook.parameters.responseMode ?? 'onReceived',
+      url: `${base}/webhook/${hook.parameters.path}`,
+    };
+    console.log(`[seed] workflow activated: ${parsed.name} -> ${webhook.method} ${webhook.url} (${webhook.responseMode})`);
+    return { name: parsed.name, id, file, webhook };
+  }
   return { name: parsed.name, id, file };
 }
 
@@ -227,7 +246,12 @@ if (engineV2) {
   // Engine v2 only (`tasks/v2-seam-plan.md` step 11): a Loop Over Items of 1,000 passes at batch
   // size 1 (F4's workload), an If/Switch diamond into a three-input Merge, and a Stop and Error
   // beside a long sibling chain (the failure race named under F2).
-  files.push('v2-loop-over-items.json', 'v2-if-switch-diamond.json', 'v2-stop-and-error-sibling.json');
+  files.push('v2-loop-over-items.json', 'v2-if-switch-diamond.json', 'v2-stop-and-error-sibling.json',
+    // The coverage ADR 0014 left open: a wide fan-out for the concurrent and cancel phases, and
+    // production webhooks answered with the last node (`runEnd`) and by a Respond to Webhook node
+    // (`stepResponse`). The webhook ones are activated below and never run manually.
+    'v2-wide-fan-out.json', 'v2-webhook-last-node.json', 'v2-webhook-two-sinks.json',
+    'v2-webhook-respond-node.json', 'v2-webhook-fails.json');
 }
 for (const file of files) {
   if (engineV2) {

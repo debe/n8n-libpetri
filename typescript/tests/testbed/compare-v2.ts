@@ -85,6 +85,10 @@ export interface PolicyCall {
   readonly ms: number;
   readonly readerCalls: number;
   readonly roundTrips: number;
+  /** The answer: queue and skip counts, or the boolean (absent in ledgers written before the live phases). */
+  readonly result?: { queue: number; skip: number } | boolean | null;
+  /** The rows the call read held a cancelled row and no failed one (divergence row 36's row set). */
+  readonly cancelSeen?: boolean;
 }
 
 export interface SnapshotEvent {
@@ -108,6 +112,46 @@ export interface SettlementRecord {
   readonly policy: readonly PolicyCall[];
   readonly ended: { status: string; responseKind: string | null; lastStep: { nodeId: string; nodeName: string | null; iteration: number; status: string } } | null;
   readonly threw: string | null;
+  /**
+   * On the preload's `performance.now()` clock (absent before the live phases): the handler's start
+   * and end, when its `loadExecution` answered (the liveness read), when the policy's first read
+   * started, and when `createSteps` was called, with the keys it created.
+   */
+  readonly t0?: number;
+  readonly t1?: number;
+  readonly tLoaded?: number | null;
+  readonly tRead?: number | null;
+  readonly tCreate?: number | null;
+  /** The rows `createSteps` inserted, with each row's status as asked (and its id, in ledgers since the review of the live phases). */
+  readonly created?: readonly { nodeId: string; iteration: number; status: string | null; id?: string }[] | null;
+}
+
+/** One `CancelExecutionService.cancel`, on the same clock as the settlement records. */
+export interface CancelRecord {
+  readonly kind: 'cancel';
+  readonly executionId: string;
+  readonly t0: number;
+  readonly t1: number;
+  /** When the compare-and-set answered, and whether this request's write won it. */
+  readonly tCas: number | null;
+  readonly won: boolean | null;
+  /** When `cancelPendingSteps` answered; `null` when the CAS lost and it was not called. */
+  readonly tPending: number | null;
+  readonly status: string | null;
+  readonly threw: string | null;
+}
+
+/**
+ * One `TypeOrmStepStore.cancelStep` (only `StepReadyHandler` calls it, cancelling a row it claimed for
+ * an ended execution), on the same clock. `won` is whether the row's `running` →
+ * `cancelled` transition took. Absent from ledgers written before the review of the live phases.
+ */
+export interface CancelStepRecord {
+  readonly kind: 'cancel-step';
+  readonly executionId: string | null;
+  readonly stepId: string;
+  readonly t: number;
+  readonly won: boolean;
 }
 
 export interface ShadowRecord {
@@ -117,6 +161,9 @@ export interface ShadowRecord {
     readonly executionId: string;
     readonly verdict: 'agree' | 'disagree' | 'race' | 'candidate-threw' | 'stale';
     readonly reused?: 'primary' | 'candidate' | null;
+    /** Each side's answer (the boolean for `isFinished`). */
+    readonly primary?: unknown;
+    readonly candidate?: unknown;
     readonly race: 'failure' | 'cancel' | null;
     readonly skew: boolean;
     readonly primaryMs: number;
@@ -136,7 +183,13 @@ export interface DiagnosticRecord {
   readonly mode?: string;
 }
 
-export type LedgerRecord = SettlementRecord | ShadowRecord | DiagnosticRecord;
+export type LedgerRecord = SettlementRecord | ShadowRecord | DiagnosticRecord | CancelRecord | CancelStepRecord;
+
+/** The execution a ledger record is about, or `null` for a process-wide one (`registered`, `timing`). */
+export function executionOf(record: LedgerRecord): string | null {
+  if (record.kind === 'shadow') return record.report.executionId;
+  return record.executionId ?? null;
+}
 
 export interface Run {
   readonly workflow: string;
@@ -377,8 +430,12 @@ export function byQuarter(records: readonly SettlementRecord[]): QuarterLatency[
 export function loadLeg(dir: string, label: string): Leg {
   const sql = JSON.parse(readFileSync(join(dir, 'sql.json'), 'utf8')) as { serverVersion?: string; executions: SqlExecution[] };
   const ledgerPath = join(dir, 'settlement.jsonl');
+  // The live phases (`compare-v2-live.ts`) run on the same server after this one, so the ledger is
+  // kept to this leg's executions: records about other executions are theirs to count.
+  const mine = new Set(sql.executions.map((e) => e.id));
   const ledger = existsSync(ledgerPath)
     ? readFileSync(ledgerPath, 'utf8').split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l) as LedgerRecord)
+      .filter((r) => { const id = executionOf(r); return id === null || mine.has(id); })
     : [];
   const runsDir = join(dir, 'runs');
   const runs: Run[] = readdirSync(runsDir).filter((f) => f.endsWith('.json')).sort().map((f) => {

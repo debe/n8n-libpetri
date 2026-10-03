@@ -13,16 +13,18 @@ gets in, and what was measured is in [`docs/testbed.md`](../../docs/testbed.md).
 | `seed.mjs` | Instance owner, stub credential and both workflows, over REST. Writes `.testbed/ids.json`. |
 | `run.mjs` | One manual execution through `POST /rest/workflows/:id/run` — the editor's own path — captured to a file. |
 | `diff-engines.sh` | Every workflow under legacy and libpetri, one server per engine, compared on data, happens-before and order. |
-| `diff-engines-v2.sh` | Engine v2 under `--settlement=off`, `primary`, `shadow` and `primary-shadowed`, one fresh server and Postgres per leg, all with `--timing`; compared by `tests/testbed/compare-v2.ts`. |
-| `dump-v2.mjs` | Reads executions and their step rows from engine v2's data plane over SQL, with the engine's own `pg`. |
+| `diff-engines-v2.sh` | Engine v2 under `--settlement=off`, `primary`, `shadow` and `primary-shadowed`, one fresh server and Postgres per leg, all with `--timing`. Four phases per leg: sequential manual runs (compared by `tests/testbed/compare-v2.ts`), then webhook, concurrent and cancel (compared by `tests/testbed/compare-v2-live.ts`). |
+| `drive-v2.mjs` | The live phases' driver: production webhook requests, a batch of runs in flight at once, and manual runs stopped through `POST /rest/executions/:id/stop` after swept delays. |
+| `dump-v2.mjs` | Reads executions and their step rows from engine v2's data plane over SQL, with the engine's own `pg`, by execution id or, for webhook runs, by workflow id. |
 | `browser-check.sh` | Drives the editor with `agent-browser`: sign in, execute, wait for the success toast, screenshot. |
-| `workflows/`, `credentials/` | The seeded n8n exports. `workflows-v2/` holds the three seeded only with `--v2`; it is apart so that `v1-identity` does not fingerprint them. |
+| `workflows/`, `credentials/` | The seeded n8n exports. `workflows-v2/` holds the eight seeded only with `--v2` (four of them webhook-triggered and activated by the seed); it is apart so that `v1-identity` does not fingerprint them. |
 
 `tests/testbed/compare-run.ts` (under `typescript/`, so `npm run check` typechecks it) is the
 comparator `diff-engines.sh` calls. It reuses `firstDifference`, `dependencyEdges`,
 `activationKey` and `executionOrder` from `src/conformance/differ.ts` rather than restating them.
-`tests/testbed/compare-v2.ts` is `diff-engines-v2.sh`'s comparator; its pure parts are pinned by
-`tests/testbed/compare-v2.test.ts`.
+`tests/testbed/compare-v2.ts` is `diff-engines-v2.sh`'s comparator for the sequential phase and
+`tests/testbed/compare-v2-live.ts` for the live phases; their pure parts are pinned by
+`tests/testbed/compare-v2.test.ts` and `tests/testbed/compare-v2-live.test.ts`.
 
 ## Usage
 
@@ -45,6 +47,7 @@ grep 'settlement policy entered' .testbed/v2/n8n.log
 
 scripts/testbed/diff-engines-v2.sh                              # four legs; report in .testbed/v2-diff/report.md
 scripts/testbed/diff-engines-v2.sh --legs=off,primary --repeat=2 --loop-repeat=3
+scripts/testbed/diff-engines-v2.sh --phases=webhook,concurrent,cancel   # live phases only; .testbed/v2-diff/live-report.md
 ```
 
 `--v2` needs Docker (or `LIBPETRI_PG_URL`). It cannot be combined with `--queue`, because the
@@ -71,7 +74,7 @@ Everything runtime lives in `.testbed/` (gitignored) — `home/` (the sqlite dat
 `stub-llm.log`, `ids.json`, `runs/`, `shots/`. The `--v2` testbed has the same layout under
 `.testbed/v2/`, plus `settlement.jsonl` (every policy diagnostic and shadow report) and
 `pg-stamp.txt` (the Postgres image id and server version). `diff-engines-v2.sh` writes each leg
-to `.testbed/v2-diff/<leg>/` and the report to `.testbed/v2-diff/report.md`. The `--v2` testbed's
+to `.testbed/v2-diff/<leg>/` and the reports to `.testbed/v2-diff/report.md` and `live-report.md`. The `--v2` testbed's
 Postgres outlives a foreground run and is removed by `--stop`, or by the next `--fresh`. Nothing is written under
 `.n8n/packages/core/src` or `.n8n/packages/@n8n/engine/src`, which `verify-patch.sh` resets. The
 engine rebuild leaves one marker file, `packages/@n8n/engine/dist/.n8n-libpetri-built`, in the

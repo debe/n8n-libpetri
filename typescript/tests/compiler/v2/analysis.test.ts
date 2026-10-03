@@ -78,7 +78,7 @@ describe('the v1 phases, not run under engineV2', () => {
     ]);
     expect(diagnostics(agentOneTool)).toEqual([
       'ai_tool connection Calculator -> Agent is ignored under engineV2: engine v2 roots the graph at the trigger ' +
-      'through main connections only, and fails an agent at its first tool call',
+      'through main connections only, so the agent\'s sub-nodes are dropped and it cannot run',
       "node 'Calculator' is not reachable from the trigger 'Trigger'; engine v2's converter drops it (rootAt), so it " +
       'is not compiled under engineV2',
     ]);

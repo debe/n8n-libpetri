@@ -10,7 +10,8 @@
  *   subset of nodes that must hear of one;
  * - `ai_tool` wiring: the converter roots the graph at the trigger through `main` only
  *   (`rootAt`, `v1-workflow-converter.ts`), so sub-nodes never become steps, and an agent fails
- *   at its first tool call (`EngineRequestNotSupportedError`, `v1-step-executor.ts`);
+ *   at its missing Chat Model input; only Agent V3 would send an `EngineRequest`, which
+ *   `v1-step-executor.ts` refuses (`EngineRequestNotSupportedError`);
  * - depth: v2 has no ordering priority, so every node sits at depth 0;
  * - k-safety: v2 has no concurrency budget (`compile/options.ts` refuses one);
  * - retry and the failure policy: v2 has no retry (`api.types.ts`: "has no retry mechanism"),
@@ -63,7 +64,7 @@ export function analyseEngineV2(
   for (const c of workflow.toolConnections ?? []) {
     diagnostics.push(
       `ai_tool connection ${c.tool} -> ${c.agent} is ignored under engineV2: engine v2 roots the graph at the ` +
-      'trigger through main connections only, and fails an agent at its first tool call');
+      'trigger through main connections only, so the agent\'s sub-nodes are dropped and it cannot run');
   }
   for (const n of conversion.unrooted) {
     diagnostics.push(

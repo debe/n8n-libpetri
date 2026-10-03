@@ -146,9 +146,10 @@ Decision 12 of the plan, which extends CLAUDE.md's reporting rule to engine v2:
   accept a process-global registry is open.
 - **No fallback, and no `_cancel` place.** Cancellation on request is not modelled (row 35). The
   race it opens is decided as ∅ (row 36).
-- **Not exercised:** queue mode (the engine-v2 module refuses it), webhook `runEnd` responses,
-  concurrent executions in the live server, and file-parallel integration runs (every `-int` leg
-  ran with `--maxWorkers=1` on a 0.95 GB Docker VM).
+- **Not exercised:** queue mode (the engine-v2 module refuses it), a multi-worker engine,
+  `responseMode: streaming`, and file-parallel integration runs (every `-int` leg ran with
+  `--maxWorkers=1` on a 0.95 GB Docker VM). Webhook `runEnd` responses, concurrent executions and
+  stops during settlements were added to the testbed later ("Measured results", live phases).
 - **No Postgres provider other than Docker.** The embedded-postgres and brew shims the plan named
   were not built. Under Docker, testcontainers runs unmodified.
 
@@ -158,9 +159,11 @@ Decision 12 of the plan, which extends CLAUDE.md's reporting rule to engine v2:
 - With the policy registered, the net answers each engine v2 settlement the handler asks about,
   through n8n's handler and stores. It does not run steps, gather inputs, persist, or handle
   failures or cancellations.
-- Four behaviours differ from n8n's default, each in a race or a refusal (rows 36–39). None of
-  them occurred in the live testbed. Row 39's occurred in n8n's own `engine-int` suite on
-  Postgres: in "settles a conditional diamond", once in each shadow direction, and the case passed.
+- Four behaviours differ from n8n's default, each in a race or a refusal (rows 36–39). Row 39's
+  occurred in n8n's own `engine-int` suite on Postgres: in "settles a conditional diamond", once
+  in each shadow direction, and the case passed. Row 36's occurred in the testbed's cancel phase,
+  in the shadow legs only, with every stopped run ending `cancelled` and no row left pending. Rows
+  37 and 38 occurred in no live leg.
 - The patches widen the drift surface. `check-n8n-drift.sh` lists commits touching
   `step-settled-handler.ts`, the decision core and `create-engine-runtime.ts` (F8). At the time of
   writing, `stable` and `beta` (2.40.7) stop at 0003, and `n8n@2.42.2` stops at 0004. That is
@@ -230,19 +233,57 @@ per leg, four legs):
 - Over 1,000 loop passes the policy's p50 stays between 2.43 and 2.86 ms. Before the fix it grew
   from 2.75 to 5.41 ms.
 
+**Integration results, the live phases** (`diff-engines-v2.sh` after its sequential runs, two runs,
+both under external host load; `docs/testbed.md`, "The live phases"):
+- **Webhook** (40 production requests per leg): HTTP status, headers and body, and the rows, were
+  equal under every policy. That covers `lastNode` (`runEnd`) on a single sink, on two sinks and
+  on a failure, and `responseNode` (`stepResponse`).
+- **Concurrent** (48 executions per leg, 16 in flight at once): every field on which `off`'s runs
+  agree was equal. Which sink ended a two-sink run varied under `off` itself, so that field is
+  judged per run from the ledger instead: under `primary-shadowed` every completed run ended where
+  n8n's fresh count, run beside ours, first said true. The shadow checks gave 0 disagreements, 0
+  `stale`, 0 crossed snapshots and 0 overruns in these two runs. In-process, `InMemoryWorkQueue`
+  runs one settlement handler at a time, so `crossed` and the overrun cannot occur there, and the
+  rounds repeat one FIFO schedule: each execution's settlements fall into the same number of
+  contiguous blocks in every round of every leg (Loop Over Items: 7 or 8).
+- **Cancel** (247 stops per leg through `POST /rest/executions/:id/stop`): every accepted stop
+  ended `cancelled`, with no row `queued`, `running` or `waiting`.
+  - Row 36's race occurred 13 and 19 times under `shadow`, 2 and 6 times under
+    `primary-shadowed`, and 0 times under `primary` (494 stops, 89 inside the window). n8n's answer planned on 13 and 13
+    of the cancelled row sets it was asked about; ours answered ∅.
+  - Row 36's second clause, n8n's count saying finished on rows the cancel had just cancelled,
+    showed as 9 shadow `stale` verdicts inside cancels, each checked on its own settlement.
+- **F4.** The first run's sequential phase holds (2 round trips, ratio 0.29). The second run's
+  latency ratio, 4.24, compares legs at median host loads of 9.5 and 137, and is not an F4 reading.
+
 ## Open
 
 - Binding B rests on `TypeOrmExecutionStore.loadExecution` building a fresh record per call. If n8n
-  caches execution records, B breaks silently. The testbed's `crossed` count and the handler leg
-  would show it. The policy cannot.
+  caches execution records, B breaks silently. The handler leg would show it. The testbed's
+  `crossed` count would not: the in-process engine runs one settlement handler at a time
+  (`InMemoryWorkQueue`), so two handlers never overlap there. A multi-worker engine is where B is
+  exposed, and none is available at the pin.
 - The safe direction of reuse (`stale`) occurs in the concurrent handler leg and in `engine-int`'s
-  conditional diamond on Postgres, not in the testbed's manual runs. The overrun path occurred in
-  no leg (0 in the handler legs and the testbed; the Postgres ledger does not count it). Only
-  `tests/settlement/reuse.test.ts` exercises it.
-- The effect of reuse on `lastStep` (row 39) was not measured. Under concurrency the handler leg
-  compares status and final rows only, and the `engine-int` case asserts status and rows.
-- No cancel on request was sent to the Postgres legs or the testbed, so their 0 cancel races say
-  nothing about row 36. Only the handler leg sends cancels.
+  conditional diamond on Postgres. In the testbed's two full runs, the webhook and concurrent phases
+  gave 0 in 27,532 shadowed calls. That is those runs' count, not an absence: a reduced rerun gave
+  2 in its concurrent phase under `shadow`, on V2 Wide Fan-Out runs that completed, where n8n's fresh
+  count said true and ours, reused, said false. The 9 the full runs' cancel phases recorded were
+  row 36, each checked on its own settlement. The overrun path occurred in no leg, and in-process it
+  cannot occur. Only `tests/settlement/reuse.test.ts` exercises it.
+- The effect of reuse on `lastStep` (row 39) is judged per run from the ledger, not against `off`'s
+  runs, which are one sample of interleavings. Under `primary-shadowed`, every completed webhook and
+  concurrent run of both full runs (75 per run) ended where n8n's fresh count first said true, so no
+  moved ending occurred there. Under `primary` no fresh count runs: an earlier reused false went
+  unchecked in 20 of 40 webhook runs and 38 and 31 of 48 concurrent runs. A moved ending has not
+  been observed live.
+- The concurrent phase covers few interleavings. Its rounds repeat one FIFO schedule per leg with
+  its waves permuted (`docs/testbed.md`, "The schedule repeats"). A multi-worker engine, or a step
+  worker that runs steps in parallel, would vary it.
+- Row 36's race is now observed live, but only in the shadow legs: there the second policy's read
+  widens the window. Under `primary` it did not occur in 494 stops. The cancel path needs three
+  statements to commit inside the handler's one.
+- No clean-host latency was obtained for the testbed's live phases. Both runs shared the machine
+  with other sessions' suites (1-minute load averages up to 222, sampled in run 2).
 - The golden's loops end by pass 2. On the golden the frontier is S itself, so it does not
   exercise the compression. The deep differential, the 7-pass exhaustive run and the deep handler
   legs do.
@@ -257,5 +298,6 @@ per leg, four legs):
 `patches/n8n/0003-settlement-policy.patch`, `patches/n8n/0004-settlement-policy-registry.patch`;
 `typescript/src/settlement/`, `typescript/src/codec/v2/frontier.ts`; `tasks/v2-differential.mts`,
 `tasks/spike-v2-exhaustive.mts`, `tasks/v2-handler-leg.mts`; `tests/fixtures/v2/` (the golden);
-`docs/testbed.md`, "Engine v2: the settlement policy in the live server";
+`docs/testbed.md`, "Engine v2: the settlement policy in the live server" and "The live phases";
+`scripts/testbed/drive-v2.mjs`, `tests/testbed/compare-v2-live.ts`;
 `docs/divergences.md` rows 35–39.

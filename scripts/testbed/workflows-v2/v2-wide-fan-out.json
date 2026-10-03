@@ -1,0 +1,976 @@
+{
+  "name": "V2 Wide Fan-Out",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000001",
+      "name": "When clicking 'Execute workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Engine v2 only. Six chains of four Set nodes, each ending in its own sink: 25 settlements per run, and while one chain's settlement is handled the other chains' steps are queued. The shape the concurrent and cancel phases of diff-engines-v2.sh need: a cancel that lands during a settlement finds pending rows to cancel."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0020",
+              "name": "chain",
+              "value": 1,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0021",
+              "name": "step1",
+              "value": 1,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000002",
+      "name": "Chain 1 Step 1",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        -400.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0030",
+              "name": "chain",
+              "value": 1,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0031",
+              "name": "step2",
+              "value": 2,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000003",
+      "name": "Chain 1 Step 2",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        -400.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0040",
+              "name": "chain",
+              "value": 1,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0041",
+              "name": "step3",
+              "value": 3,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000004",
+      "name": "Chain 1 Step 3",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        -400.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0050",
+              "name": "chain",
+              "value": 1,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0051",
+              "name": "step4",
+              "value": 4,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000005",
+      "name": "Chain 1 Step 4",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        -400.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0060",
+              "name": "chain",
+              "value": 2,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0061",
+              "name": "step1",
+              "value": 1,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000006",
+      "name": "Chain 2 Step 1",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        -240.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0070",
+              "name": "chain",
+              "value": 2,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0071",
+              "name": "step2",
+              "value": 2,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000007",
+      "name": "Chain 2 Step 2",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        -240.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0080",
+              "name": "chain",
+              "value": 2,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0081",
+              "name": "step3",
+              "value": 3,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000008",
+      "name": "Chain 2 Step 3",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        -240.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0090",
+              "name": "chain",
+              "value": 2,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0091",
+              "name": "step4",
+              "value": 4,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000009",
+      "name": "Chain 2 Step 4",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        -240.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0100",
+              "name": "chain",
+              "value": 3,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0101",
+              "name": "step1",
+              "value": 1,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000010",
+      "name": "Chain 3 Step 1",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        -80.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0110",
+              "name": "chain",
+              "value": 3,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0111",
+              "name": "step2",
+              "value": 2,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000011",
+      "name": "Chain 3 Step 2",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        -80.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0120",
+              "name": "chain",
+              "value": 3,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0121",
+              "name": "step3",
+              "value": 3,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000012",
+      "name": "Chain 3 Step 3",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        -80.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0130",
+              "name": "chain",
+              "value": 3,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0131",
+              "name": "step4",
+              "value": 4,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000013",
+      "name": "Chain 3 Step 4",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        -80.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0140",
+              "name": "chain",
+              "value": 4,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0141",
+              "name": "step1",
+              "value": 1,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000014",
+      "name": "Chain 4 Step 1",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        80.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0150",
+              "name": "chain",
+              "value": 4,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0151",
+              "name": "step2",
+              "value": 2,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000015",
+      "name": "Chain 4 Step 2",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        80.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0160",
+              "name": "chain",
+              "value": 4,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0161",
+              "name": "step3",
+              "value": 3,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000016",
+      "name": "Chain 4 Step 3",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        80.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0170",
+              "name": "chain",
+              "value": 4,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0171",
+              "name": "step4",
+              "value": 4,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000017",
+      "name": "Chain 4 Step 4",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        80.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0180",
+              "name": "chain",
+              "value": 5,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0181",
+              "name": "step1",
+              "value": 1,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000018",
+      "name": "Chain 5 Step 1",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        240.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0190",
+              "name": "chain",
+              "value": 5,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0191",
+              "name": "step2",
+              "value": 2,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000019",
+      "name": "Chain 5 Step 2",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        240.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0200",
+              "name": "chain",
+              "value": 5,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0201",
+              "name": "step3",
+              "value": 3,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000020",
+      "name": "Chain 5 Step 3",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        240.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0210",
+              "name": "chain",
+              "value": 5,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0211",
+              "name": "step4",
+              "value": 4,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000021",
+      "name": "Chain 5 Step 4",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        240.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0220",
+              "name": "chain",
+              "value": 6,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0221",
+              "name": "step1",
+              "value": 1,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000022",
+      "name": "Chain 6 Step 1",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        400.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0230",
+              "name": "chain",
+              "value": 6,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0231",
+              "name": "step2",
+              "value": 2,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000023",
+      "name": "Chain 6 Step 2",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        400.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0240",
+              "name": "chain",
+              "value": 6,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0241",
+              "name": "step3",
+              "value": 3,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000024",
+      "name": "Chain 6 Step 3",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        400.0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0250",
+              "name": "chain",
+              "value": 6,
+              "type": "number"
+            },
+            {
+              "id": "5e1f0a00-0d01-4c00-8a00-a0251",
+              "name": "step4",
+              "value": 4,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "5e1f0a00-0d01-4c00-8a00-000000000025",
+      "name": "Chain 6 Step 4",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        400.0
+      ]
+    }
+  ],
+  "connections": {
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "Chain 1 Step 1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Chain 2 Step 1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Chain 3 Step 1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Chain 4 Step 1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Chain 5 Step 1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Chain 6 Step 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 1 Step 1": {
+      "main": [
+        [
+          {
+            "node": "Chain 1 Step 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 1 Step 2": {
+      "main": [
+        [
+          {
+            "node": "Chain 1 Step 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 1 Step 3": {
+      "main": [
+        [
+          {
+            "node": "Chain 1 Step 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 2 Step 1": {
+      "main": [
+        [
+          {
+            "node": "Chain 2 Step 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 2 Step 2": {
+      "main": [
+        [
+          {
+            "node": "Chain 2 Step 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 2 Step 3": {
+      "main": [
+        [
+          {
+            "node": "Chain 2 Step 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 3 Step 1": {
+      "main": [
+        [
+          {
+            "node": "Chain 3 Step 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 3 Step 2": {
+      "main": [
+        [
+          {
+            "node": "Chain 3 Step 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 3 Step 3": {
+      "main": [
+        [
+          {
+            "node": "Chain 3 Step 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 4 Step 1": {
+      "main": [
+        [
+          {
+            "node": "Chain 4 Step 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 4 Step 2": {
+      "main": [
+        [
+          {
+            "node": "Chain 4 Step 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 4 Step 3": {
+      "main": [
+        [
+          {
+            "node": "Chain 4 Step 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 5 Step 1": {
+      "main": [
+        [
+          {
+            "node": "Chain 5 Step 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 5 Step 2": {
+      "main": [
+        [
+          {
+            "node": "Chain 5 Step 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 5 Step 3": {
+      "main": [
+        [
+          {
+            "node": "Chain 5 Step 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 6 Step 1": {
+      "main": [
+        [
+          {
+            "node": "Chain 6 Step 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 6 Step 2": {
+      "main": [
+        [
+          {
+            "node": "Chain 6 Step 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chain 6 Step 3": {
+      "main": [
+        [
+          {
+            "node": "Chain 6 Step 4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -236,12 +236,33 @@ if (settlement !== undefined && settlement !== '' && isMainThread) {
  *   empty): each call's wall time, its reader calls, and its round trips, a reader call that reaches
  *   SQL. `loadLatestStepSummaries([])` and `loadStepSummariesByKeys([])` return `{}` in the store
  *   without a query, so they are reader calls and not round trips.
+ *
+ * For the concurrent and cancel phases (ADR 0014, "Open") it also records, on one clock
+ * (`performance.now()`, this process):
+ * - per settlement: when the handler started (`t0`) and ended (`t1`), when its `loadExecution`
+ *   answered (`tLoaded`, the liveness read), when the policy's first read started (`tRead`), when
+ *   `createSteps` was called (`tCreate`) and which keys it created (`created`, with each row's
+ *   status as asked and its id);
+ * - per policy call: its answer (`result`: queue and skip counts, or the boolean) and whether the
+ *   rows it read held a cancelled row and no failed one (`cancelSeen`, the row set of divergence
+ *   row 36; a call reads only what it asks for, so n8n's default can miss a cancelled row it did
+ *   not ask about);
+ * - per `CancelExecutionService.cancel` (the engine's side of `POST /rest/executions/:id/stop`): a
+ *   `cancel` record with when it started, when its compare-and-set answered and whether it won
+ *   (`tCas`, `won`), when `cancelPendingSteps` answered (`tPending`), and the status it returned;
+ * - per `TypeOrmStepStore.cancelStep` (only `StepReadyHandler` calls it, cancelling a row it claimed
+ *   after the execution ended): a `cancel-step` record with the row's id, its execution (from
+ *   the settlement that created it) and whether the transition took. `cancelPendingSteps` is one bulk
+ *   update, so without this record a row created after the cancel and found `cancelled` could have
+ *   ended either way.
+ * None of it changes an answer, an order of calls or a query.
  */
 async function instrumentSettlements(engine, req, record, say, als) {
   const { StepSettledHandler } = req('@n8n/engine/dist/execution/step-settled-handler.js');
   const { TypeOrmStepStore } = req('@n8n/engine/dist/database/typeorm-step-store.js');
   const { TypeOrmExecutionStore } = req('@n8n/engine/dist/database/typeorm-execution-store.js');
-  for (const [name, value] of [['StepSettledHandler', StepSettledHandler], ['TypeOrmStepStore', TypeOrmStepStore], ['TypeOrmExecutionStore', TypeOrmExecutionStore]]) {
+  const { CancelExecutionService } = req('@n8n/engine/dist/execution/cancel-execution.service.js');
+  for (const [name, value] of [['StepSettledHandler', StepSettledHandler], ['TypeOrmStepStore', TypeOrmStepStore], ['TypeOrmExecutionStore', TypeOrmExecutionStore], ['CancelExecutionService', CancelExecutionService]]) {
     if (typeof value !== 'function') throw new Error(`settlement timing: @n8n/engine/dist has no ${name}`);
   }
   for (const name of ['handle', 'announceEnd']) {
@@ -250,7 +271,10 @@ async function instrumentSettlements(engine, req, record, say, als) {
 
   const handle = StepSettledHandler.prototype.handle;
   StepSettledHandler.prototype.handle = async function timedHandle(event) {
-    const ctx = { store: 0, policy: [], snapshots: [], step: null, executionStatus: null, failedFound: null, ended: null };
+    const ctx = {
+      kind: 'settlement', store: 0, policy: [], snapshots: [], step: null, executionStatus: null, failedFound: null, ended: null,
+      tLoaded: null, tRead: null, tCreate: null, created: null,
+    };
     const t0 = performance.now();
     let threw = null;
     try {
@@ -259,11 +283,33 @@ async function instrumentSettlements(engine, req, record, say, als) {
       threw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
       throw error;
     } finally {
+      const t1 = performance.now();
       record({
         kind: 'settlement', executionId: event.executionId, stepId: event.stepId,
-        ms: performance.now() - t0, step: ctx.step, executionStatus: ctx.executionStatus, failedFound: ctx.failedFound,
+        ms: t1 - t0, step: ctx.step, executionStatus: ctx.executionStatus, failedFound: ctx.failedFound,
         store: ctx.store, policy: ctx.policy, snapshots: ctx.snapshots, ended: ctx.ended, threw,
+        t0, t1, tLoaded: ctx.tLoaded, tRead: ctx.tRead, tCreate: ctx.tCreate, created: ctx.created,
       });
+    }
+  };
+
+  // The engine's side of a stop request. Its own context, so the store wrappers below time its two
+  // writes; a cancel is never inside a settlement's context (it arrives over HTTP).
+  const cancel = CancelExecutionService.prototype.cancel;
+  CancelExecutionService.prototype.cancel = async function timedCancel(executionId) {
+    const ctx = { kind: 'cancel', tCas: null, won: null, tPending: null };
+    const t0 = performance.now();
+    let status = null;
+    let threw = null;
+    try {
+      const result = await als.run(ctx, () => cancel.call(this, executionId));
+      status = result?.status ?? null;
+      return result;
+    } catch (error) {
+      threw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      throw error;
+    } finally {
+      record({ kind: 'cancel', executionId, t0, t1: performance.now(), tCas: ctx.tCas, won: ctx.won, tPending: ctx.tPending, status, threw });
     }
   };
 
@@ -279,6 +325,9 @@ async function instrumentSettlements(engine, req, record, say, als) {
     return announceEnd.call(this, execution, step, node, status);
   };
 
+  // The execution of each row a settlement created, so a `cancelStep` (which gets only the row's id)
+  // can name it. Dropped when the row is cancelled at claim; a row that settles otherwise stays.
+  const rowExecution = new Map();
   const wrapStore = (cls) => {
     for (const name of Object.getOwnPropertyNames(cls.prototype)) {
       if (name === 'constructor') continue;
@@ -286,13 +335,45 @@ async function instrumentSettlements(engine, req, record, say, als) {
       if (typeof original !== 'function') continue;
       cls.prototype[name] = function timedStoreCall(...args) {
         const ctx = als.getStore();
+        if (name === 'cancelStep') {
+          // `StepReadyHandler` cancelling a row it claimed for an ended execution (row 35), recorded so
+          // the comparator can tell it from `cancelPendingSteps`' bulk update. Whatever the context:
+          // the step queue's dispatch loop runs in the context of whoever published to it while it was
+          // idle, which can be a settlement handler. No settlement handler calls `cancelStep` itself.
+          if (ctx?.kind === 'settlement') ctx.store++;
+          return Promise.resolve(original.apply(this, args)).then((value) => {
+            const stepId = args[0];
+            record({ kind: 'cancel-step', executionId: rowExecution.get(stepId) ?? null, stepId, t: performance.now(), won: value === true });
+            rowExecution.delete(stepId);
+            return value;
+          });
+        }
         if (!ctx) return original.apply(this, args);
+        if (ctx.kind === 'cancel') {
+          const result = original.apply(this, args);
+          if (name !== 'cancelExecution' && name !== 'cancelPendingSteps') return result;
+          return Promise.resolve(result).then((value) => {
+            if (name === 'cancelExecution') { ctx.tCas = performance.now(); ctx.won = value !== null && value !== undefined; }
+            else ctx.tPending = performance.now();
+            return value;
+          });
+        }
         ctx.store++;
+        if (name === 'createSteps' && ctx.tCreate === null) ctx.tCreate = performance.now();
         const result = original.apply(this, args);
+        if (name === 'createSteps') {
+          const asked = new Map((args[1] ?? []).map((r) => [`${r.nodeId}@${r.iteration}`, r.status]));
+          return Promise.resolve(result).then((value) => {
+            const rows = (Array.isArray(value) ? value : []).map((r) => ({ nodeId: r.nodeId, iteration: r.iteration, status: asked.get(`${r.nodeId}@${r.iteration}`) ?? null, id: r.id }));
+            for (const r of rows) if (r.id !== undefined) rowExecution.set(r.id, args[0]);
+            ctx.created = [...(ctx.created ?? []), ...rows];
+            return value;
+          });
+        }
         if (name === 'loadStep' || name === 'loadExecution' || name === 'hasFailedSteps') {
           return Promise.resolve(result).then((value) => {
             if (name === 'loadStep' && ctx.step === null && value) ctx.step = { nodeId: value.nodeId, iteration: value.iteration, status: value.status };
-            if (name === 'loadExecution' && ctx.executionStatus === null && value) ctx.executionStatus = value.status;
+            if (name === 'loadExecution' && ctx.executionStatus === null && value) { ctx.executionStatus = value.status; ctx.tLoaded = performance.now(); }
             // The first answer is the handler's pre-planning check; a later one is
             // `finishExecutionIfDone`'s, which chooses the outcome.
             if (name === 'hasFailedSteps' && ctx.failedFound === null) ctx.failedFound = value === true;
@@ -306,37 +387,53 @@ async function instrumentSettlements(engine, req, record, say, als) {
   wrapStore(TypeOrmStepStore);
   wrapStore(TypeOrmExecutionStore);
 
-  const countingReader = (reader, call) => ({
-    executionId: reader.executionId,
-    loadLatestStepSummaries: async (nodeIds) => {
-      call.readerCalls++;
-      if (nodeIds.length > 0) call.roundTrips++;
-      return await reader.loadLatestStepSummaries(nodeIds);
-    },
-    loadStepSummariesByKeys: async (keys) => {
-      call.readerCalls++;
-      if (keys.length > 0) call.roundTrips++;
-      return await reader.loadStepSummariesByKeys(keys);
-    },
-    countSettledSteps: async () => {
-      call.readerCalls++;
-      call.roundTrips++;
-      return await reader.countSettledSteps();
-    },
-  });
+  // `seen` collects the statuses of every row the call read, for `cancelSeen`.
+  const countingReader = (reader, call, ctx, seen) => {
+    const first = () => { if (ctx && ctx.tRead === null) ctx.tRead = performance.now(); };
+    const keep = (summaries) => {
+      for (const s of Object.values(summaries ?? {})) seen.add(s.status);
+      return summaries;
+    };
+    return {
+      executionId: reader.executionId,
+      loadLatestStepSummaries: async (nodeIds) => {
+        call.readerCalls++;
+        if (nodeIds.length > 0) { call.roundTrips++; first(); }
+        return keep(await reader.loadLatestStepSummaries(nodeIds));
+      },
+      loadStepSummariesByKeys: async (keys) => {
+        call.readerCalls++;
+        if (keys.length > 0) { call.roundTrips++; first(); }
+        return keep(await reader.loadStepSummariesByKeys(keys));
+      },
+      countSettledSteps: async () => {
+        call.readerCalls++;
+        call.roundTrips++;
+        first();
+        return await reader.countSettledSteps();
+      },
+    };
+  };
+  const summarise = (answer) => (typeof answer === 'boolean'
+    ? answer
+    : answer && Array.isArray(answer.toQueue) ? { queue: answer.toQueue.length, skip: answer.toSkip.length } : null);
   const active = engine.getSettlementPolicy();
   const timed = (method) => {
     const original = active[method].bind(active);
     return async (...args) => {
       const ctx = als.getStore();
-      const call = { method, ms: 0, readerCalls: 0, roundTrips: 0 };
+      const call = { method, ms: 0, readerCalls: 0, roundTrips: 0, result: null, cancelSeen: false };
+      const seen = new Set();
       const reader = args[args.length - 1];
-      args[args.length - 1] = countingReader(reader, call);
+      args[args.length - 1] = countingReader(reader, call, ctx?.kind === 'settlement' ? ctx : null, seen);
       const t0 = performance.now();
       try {
-        return await original(...args);
+        const answer = await original(...args);
+        call.result = summarise(answer);
+        return answer;
       } finally {
         call.ms = performance.now() - t0;
+        call.cancelSeen = seen.has('cancelled') && !seen.has('failed');
         if (ctx) ctx.policy.push(call);
       }
     };

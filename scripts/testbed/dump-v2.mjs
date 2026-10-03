@@ -4,6 +4,10 @@
  * wrote, not what n8n's REST API renders from it.
  *
  *   node dump-v2.mjs <postgres-url> <out.json> <execution-id> [more ids ...]
+ *   node dump-v2.mjs <postgres-url> <out.json> workflow:<workflow-id> [...]   # every execution of it
+ *
+ * The `workflow:` form is for webhook runs, whose execution id the HTTP response does not carry;
+ * the comparator finds each one by the tag in its Webhook node's output.
  *
  * The client is the `pg` the engine itself depends on, resolved from `packages/@n8n/engine`, so
  * nothing is installed for this. Filled output slots are computed with the store's own SQL
@@ -18,11 +22,13 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const { Client } = createRequire(resolve(here, '../../.n8n/packages/@n8n/engine/package.json'))('pg');
 
-const [url, outPath, ...ids] = process.argv.slice(2);
-if (!url || !outPath || ids.length === 0) {
-  console.error('usage: node dump-v2.mjs <postgres-url> <out.json> <execution-id> [more ids ...]');
+const [url, outPath, ...args] = process.argv.slice(2);
+if (!url || !outPath || args.length === 0) {
+  console.error('usage: node dump-v2.mjs <postgres-url> <out.json> <execution-id | workflow:<id>> [more ...]');
   process.exit(2);
 }
+const workflowIds = args.filter((a) => a.startsWith('workflow:')).map((a) => a.slice('workflow:'.length));
+const ids = args.filter((a) => !a.startsWith('workflow:'));
 
 const FILLED_OUTPUT_SLOTS = `COALESCE(
   (SELECT array_agg(jsonb_typeof(slot.value) <> 'null' ORDER BY slot.ordinality)
@@ -33,6 +39,10 @@ const FILLED_OUTPUT_SLOTS = `COALESCE(
 const client = new Client({ connectionString: url });
 await client.connect();
 try {
+  if (workflowIds.length > 0) {
+    const found = await client.query('SELECT id FROM workflow_execution WHERE workflow_id = ANY($1::text[]) ORDER BY created_at', [workflowIds]);
+    for (const row of found.rows) if (!ids.includes(row.id)) ids.push(row.id);
+  }
   const executions = await client.query(
     `SELECT id, workflow_id, status, mode, graph, response_expectation, created_at, finished_at
        FROM workflow_execution WHERE id = ANY($1::uuid[])`,

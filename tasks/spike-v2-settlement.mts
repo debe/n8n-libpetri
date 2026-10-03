@@ -123,7 +123,11 @@ const kindOf = (e: Error) => `${e.constructor.name}: ${String(e.message)
   .replace(/Node \S+ has/, 'Node <n> has').replace(/Edge .* leaves/, 'Edge <e> leaves')
   .replace(/Batch node .* has/, 'Batch node <b> has').replace(/\d+ triggers \(.*?\)/, 'N triggers').slice(0, 100)}`;
 
-/** Does a node that the trigger reaches have tools? v2 accepts it and fails at the first tool call. */
+/**
+ * Does the workflow have any `ai_tool` connection? An over-count: it does not check that the agent is on the
+ * fired trigger's graph (`upstream/count-agent-entries.mjs` does: 69 of the 85). v2 accepts such a workflow
+ * and cannot run its agent, whose sub-nodes `rootAt` drops.
+ */
 function hasToolAgent(wf: { connections: Record<string, Record<string, unknown>> }): boolean {
   return Object.values(wf.connections ?? {}).some((byType) => 'ai_tool' in (byType ?? {}));
 }
