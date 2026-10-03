@@ -1,0 +1,914 @@
+From 62871da65945e4a987996dd978c7fb8b68380e9a Mon Sep 17 00:00:00 2001
+From: Dennis Berger <theabyssinspace@gmail.com>
+Date: Sat, 3 Oct 2026 00:25:26 +0200
+Subject: [PATCH] refactor(engine): Extract the settlement decisions into a
+ SettlementPolicy (no-changelog)
+
+`StepSettledHandler` took two decisions from the step rows itself: which
+successors a settlement decides, and whether the execution owes no further
+step. Both now come from a `SettlementPolicy`, the handler's optional seventh
+constructor argument.
+
+`defaultSettlementPolicy` is the code that was in the handler. It calls
+`decisionKeys`, `decideSuccessors` and `countExpectedSettledSteps` in the same
+order, with the same store reads. `settlement.ts`, `completion.ts`,
+`loop-ledger.ts`, `iteration-mapping.ts` and `graph/loops.ts` do not change.
+
+A policy reads rows through a `SettlementReader`. The reader is bound to one
+execution and has only the three planning reads:
+`loadLatestStepSummaries`, `loadStepSummariesByKeys` and `countSettledSteps`.
+It has no write method. `settlementReaderFor` passes each read through to the
+`StepStore`, with no cache.
+
+The failure branch, `hasFailedSteps`, `createSteps`, the announcements and
+`cancelPendingSteps` stay in the handler. A failed execution does not ask the
+policy.
+
+No caller passes a policy, so the behaviour does not change. The existing
+tests are not edited. `settlement-policy.test.ts` checks that the default
+policy gives the same answers as direct calls, and that the handler uses an
+injected policy.
+---
+ .../__tests__/settlement-policy.test.ts       | 530 ++++++++++++++++++
+ packages/@n8n/engine/src/execution/index.ts   |   7 +
+ .../engine/src/execution/settlement-policy.ts | 138 +++++
+ .../src/execution/step-settled-handler.ts     |  78 +--
+ packages/@n8n/engine/src/index.ts             |  12 +-
+ 5 files changed, 705 insertions(+), 60 deletions(-)
+ create mode 100644 packages/@n8n/engine/src/execution/__tests__/settlement-policy.test.ts
+ create mode 100644 packages/@n8n/engine/src/execution/settlement-policy.ts
+
+diff --git a/packages/@n8n/engine/src/execution/__tests__/settlement-policy.test.ts b/packages/@n8n/engine/src/execution/__tests__/settlement-policy.test.ts
+new file mode 100644
+index 0000000000..7000c5b977
+--- /dev/null
++++ b/packages/@n8n/engine/src/execution/__tests__/settlement-policy.test.ts
+@@ -0,0 +1,530 @@
++import { describe, expect, it, vi } from 'vitest';
++
++import type { GraphEdge, WorkflowGraph } from '../../graph';
++import { deriveLoops, getDescendantNodeIds } from '../../graph';
++import type { LifecycleEventPublisher } from '../../lifecycle-events';
++import type { ExecutionResponseSender } from '../../response-channel';
++import { countExpectedSettledSteps } from '../completion';
++import type { ExecutionRecord, ExecutionStore } from '../execution-store';
++import { isSettledStatus, stepKeyId, type StepKey, type StepStatus } from '../execution.types';
++import { decideSuccessors, type SuccessorDecisions } from '../settlement';
++import {
++	defaultSettlementPolicy,
++	settlementReaderFor,
++	terminalIterationsOf,
++	type SettlementPolicy,
++	type SettlementReader,
++} from '../settlement-policy';
++import { StepSettledHandler } from '../step-settled-handler';
++import type { StepRecord, StepStore, StepSummary } from '../step-store';
++
++function makeGraph(
++	edges: Array<Partial<GraphEdge> & Pick<GraphEdge, 'from' | 'to'>>,
++	batchNodeIds: string[] = [],
++): WorkflowGraph {
++	const nodeIds = [...new Set(edges.flatMap(({ from, to }) => [from, to]))];
++	return {
++		nodes: nodeIds.map((id) => ({
++			id,
++			name: id.toUpperCase(),
++			type: id === 'trigger' ? 'trigger' : batchNodeIds.includes(id) ? 'batch' : 'v1-node',
++		})),
++		edges: edges.map((edge) => ({ outputIndex: 0, inputIndex: 0, ...edge })),
++	};
++}
++
++/** trigger -> if -> {a (out 0), b (out 1)} -> m: the conditional diamond. */
++const diamond = makeGraph([
++	{ from: 'trigger', to: 'if' },
++	{ from: 'if', to: 'a', outputIndex: 0 },
++	{ from: 'if', to: 'b', outputIndex: 1 },
++	{ from: 'a', to: 'm', inputIndex: 0 },
++	{ from: 'b', to: 'm', inputIndex: 1 },
++]);
++
++/**
++ * trigger -> B, a batch node: its loop slot (out 1) runs x, which returns to
++ * B; its done slot (out 0) runs d once the loop has ended. `u -> U -> u` is a
++ * second loop the trigger cannot reach.
++ */
++const looped = makeGraph(
++	[
++		{ from: 'trigger', to: 'B' },
++		{ from: 'B', to: 'x', outputIndex: 1 },
++		{ from: 'x', to: 'B', isBackEdge: true },
++		{ from: 'B', to: 'd', outputIndex: 0 },
++		{ from: 'U', to: 'u', outputIndex: 1 },
++		{ from: 'u', to: 'U', isBackEdge: true },
++	],
++	['B', 'U'],
++);
++
++function at(
++	nodeId: string,
++	iteration: number,
++	status: StepStatus,
++	filledOutputSlots: boolean[] = [],
++): StepSummary {
++	return { id: `step-${nodeId}-${iteration}`, nodeId, iteration, status, filledOutputSlots };
++}
++
++const key = (nodeId: string, iteration = 0): StepKey => ({ nodeId, iteration });
++
++function byKey(rows: StepSummary[]): Record<string, StepSummary> {
++	return Object.fromEntries(rows.map((row) => [stepKeyId(row), row]));
++}
++
++/** The latest row of each node, as the store's query returns it. */
++function latestOf(rows: StepSummary[], nodeIds: string[]): Record<string, StepSummary> {
++	const latest: Record<string, StepSummary> = {};
++	for (const row of rows) {
++		if (!nodeIds.includes(row.nodeId)) continue;
++		const seen = latest[row.nodeId];
++		if (!seen || seen.iteration < row.iteration) latest[row.nodeId] = row;
++	}
++	return latest;
++}
++
++/** The three planning reads over a fixed row set, like the store: absent keys are absent. */
++function makeReader(rows: StepSummary[]) {
++	const settled = rows.filter((row) => isSettledStatus(row.status)).length;
++	return {
++		executionId: 'exec-1',
++		loadLatestStepSummaries: vi.fn(async (nodeIds: string[]) => {
++			await Promise.resolve();
++			return latestOf(rows, nodeIds);
++		}),
++		loadStepSummariesByKeys: vi.fn(async (keys: StepKey[]) => {
++			await Promise.resolve();
++			const all = byKey(rows);
++			return Object.fromEntries(
++				keys.map(stepKeyId).flatMap((id) => (all[id] ? [[id, all[id]]] : [])),
++			) as Record<string, StepSummary>;
++		}),
++		countSettledSteps: vi.fn(async () => {
++			await Promise.resolve();
++			return settled;
++		}),
++	} satisfies SettlementReader;
++}
++
++/** `decideSuccessors` called directly, with every row and every loop's terminal pass. */
++function decideDirectly(graph: WorkflowGraph, settled: StepKey, rows: StepSummary[]) {
++	const loops = deriveLoops(graph);
++	const latest = latestOf(
++		rows,
++		loops.map((loop) => loop.batchNodeId),
++	);
++	return decideSuccessors(graph, loops, settled, byKey(rows), terminalIterationsOf(latest));
++}
++
++describe('defaultSettlementPolicy.decideSuccessors', () => {
++	const cases: Array<{
++		name: string;
++		graph: WorkflowGraph;
++		settled: StepKey;
++		rows: StepSummary[];
++		expected: SuccessorDecisions;
++	}> = [
++		{
++			name: 'a branch decides its live and dead successors',
++			graph: diamond,
++			settled: key('if'),
++			rows: [at('trigger', 0, 'completed', [true]), at('if', 0, 'completed', [true, false])],
++			expected: { toQueue: [key('a')], toSkip: [key('b')] },
++		},
++		{
++			name: 'a merge waits for its other input',
++			graph: diamond,
++			settled: key('a'),
++			rows: [
++				at('trigger', 0, 'completed', [true]),
++				at('if', 0, 'completed', [true, true]),
++				at('a', 0, 'completed', [true]),
++				at('b', 0, 'queued'),
++			],
++			expected: { toQueue: [], toSkip: [] },
++		},
++		{
++			name: 'an existing row is not decided again',
++			graph: diamond,
++			settled: key('b'),
++			rows: [
++				at('trigger', 0, 'completed', [true]),
++				at('if', 0, 'completed', [true, true]),
++				at('a', 0, 'completed', [true]),
++				at('b', 0, 'completed', [true]),
++				at('m', 0, 'queued'),
++			],
++			expected: { toQueue: [], toSkip: [] },
++		},
++		{
++			name: 'a running loop decides its body',
++			graph: looped,
++			settled: key('B', 1),
++			rows: [
++				at('trigger', 0, 'completed', [true]),
++				at('B', 0, 'completed', [false, true]),
++				at('x', 0, 'completed', [true]),
++				at('B', 1, 'completed', [false, true]),
++			],
++			expected: { toQueue: [key('x', 1)], toSkip: [] },
++		},
++		{
++			name: 'the body returns to the next pass',
++			graph: looped,
++			settled: key('x', 1),
++			rows: [
++				at('trigger', 0, 'completed', [true]),
++				at('B', 0, 'completed', [false, true]),
++				at('x', 0, 'completed', [true]),
++				at('B', 1, 'completed', [false, true]),
++				at('x', 1, 'completed', [true]),
++			],
++			expected: { toQueue: [key('B', 2)], toSkip: [] },
++		},
++		{
++			name: 'the terminal pass decides what follows the loop',
++			graph: looped,
++			settled: key('B', 1),
++			rows: [
++				at('trigger', 0, 'completed', [true]),
++				at('B', 0, 'completed', [false, true]),
++				at('x', 0, 'completed', [true]),
++				at('B', 1, 'completed', [true, false]),
++			],
++			expected: { toQueue: [key('d')], toSkip: [] },
++		},
++	];
++
++	it.each(cases)(
++		'equals the direct call when $name',
++		async ({ graph, settled, rows, expected }) => {
++			const reader = makeReader(rows);
++
++			const decisions = await defaultSettlementPolicy.decideSuccessors(graph, settled, reader);
++
++			expect(decisions).toEqual(decideDirectly(graph, settled, rows));
++			expect(decisions).toEqual(expected);
++		},
++	);
++
++	it('reads the decision rows in one query, and no loop tip when no exit edge is resolved', async () => {
++		const reader = makeReader(cases[0].rows);
++
++		await defaultSettlementPolicy.decideSuccessors(diamond, key('if'), reader);
++
++		expect(reader.loadLatestStepSummaries).not.toHaveBeenCalled();
++		expect(reader.loadStepSummariesByKeys).toHaveBeenCalledOnce();
++		expect(reader.countSettledSteps).not.toHaveBeenCalled();
++	});
++
++	it('reads the tip of the loop an exit edge leaves, then the decision rows', async () => {
++		const reader = makeReader(cases[5].rows);
++
++		await defaultSettlementPolicy.decideSuccessors(looped, key('B', 1), reader);
++
++		expect(reader.loadLatestStepSummaries).toHaveBeenCalledExactlyOnceWith(['B']);
++		expect(reader.loadStepSummariesByKeys).toHaveBeenCalledOnce();
++		expect(reader.loadLatestStepSummaries.mock.invocationCallOrder[0]).toBeLessThan(
++			reader.loadStepSummariesByKeys.mock.invocationCallOrder[0],
++		);
++	});
++});
++
++describe('defaultSettlementPolicy.isFinished', () => {
++	/** The count test called directly, with every row. */
++	function finishedDirectly(graph: WorkflowGraph, rows: StepSummary[]): boolean {
++		const loops = deriveLoops(graph);
++		const reachable = new Set(['trigger', ...getDescendantNodeIds(graph, 'trigger')]);
++		const latest = latestOf(
++			rows,
++			loops.map((loop) => loop.batchNodeId),
++		);
++		const expected = countExpectedSettledSteps(loops, reachable, terminalIterationsOf(latest));
++		const settled = rows.filter((row) => isSettledStatus(row.status)).length;
++		return expected !== undefined && settled >= expected;
++	}
++
++	const cases: Array<{
++		name: string;
++		graph: WorkflowGraph;
++		rows: StepSummary[];
++		expected: boolean;
++	}> = [
++		{
++			name: 'a step is still queued',
++			graph: diamond,
++			rows: [
++				at('trigger', 0, 'completed', [true]),
++				at('if', 0, 'completed', [true, false]),
++				at('a', 0, 'queued'),
++				at('b', 0, 'skipped'),
++			],
++			expected: false,
++		},
++		{
++			name: 'every reachable step has settled',
++			graph: diamond,
++			rows: [
++				at('trigger', 0, 'completed', [true]),
++				at('if', 0, 'completed', [true, false]),
++				at('a', 0, 'completed', [true]),
++				at('b', 0, 'skipped'),
++				at('m', 0, 'completed', [true]),
++			],
++			expected: true,
++		},
++		{
++			name: 'a loop is between two passes',
++			graph: looped,
++			rows: [
++				at('trigger', 0, 'completed', [true]),
++				at('B', 0, 'completed', [false, true]),
++				at('x', 0, 'completed', [true]),
++			],
++			expected: false,
++		},
++		{
++			name: 'the loop has ended and what follows it has settled',
++			graph: looped,
++			rows: [
++				at('trigger', 0, 'completed', [true]),
++				at('B', 0, 'completed', [false, true]),
++				at('x', 0, 'completed', [true]),
++				at('B', 1, 'completed', [true, false]),
++				at('d', 0, 'completed', [true]),
++			],
++			expected: true,
++		},
++	];
++
++	it.each(cases)('equals the count test when $name', async ({ graph, rows, expected }) => {
++		const reader = makeReader(rows);
++
++		const finished = await defaultSettlementPolicy.isFinished(graph, reader);
++
++		expect(finished).toBe(finishedDirectly(graph, rows));
++		expect(finished).toBe(expected);
++	});
++
++	it('is true once the settled count reaches the expected one', async () => {
++		const reader = makeReader(cases[1].rows);
++
++		expect(await defaultSettlementPolicy.isFinished(diamond, reader)).toBe(true);
++		expect(reader.loadLatestStepSummaries).not.toHaveBeenCalled();
++		expect(reader.countSettledSteps).toHaveBeenCalledOnce();
++	});
++
++	it('does not count while a reachable loop is running, and never reads an unreachable one', async () => {
++		const reader = makeReader(cases[2].rows);
++
++		expect(await defaultSettlementPolicy.isFinished(looped, reader)).toBe(false);
++		expect(reader.loadLatestStepSummaries).toHaveBeenCalledExactlyOnceWith(['B']);
++		expect(reader.countSettledSteps).not.toHaveBeenCalled();
++	});
++
++	it('rejects a graph with no trigger before reading anything', async () => {
++		const reader = makeReader([]);
++		const triggerless = makeGraph([{ from: 'a', to: 'b' }]);
++
++		await expect(defaultSettlementPolicy.isFinished(triggerless, reader)).rejects.toMatchObject({
++			name: 'UnexpectedError',
++			message: 'Execution exec-1 has no trigger node in its graph',
++		});
++		expect(reader.loadLatestStepSummaries).not.toHaveBeenCalled();
++		expect(reader.countSettledSteps).not.toHaveBeenCalled();
++	});
++});
++
++describe('settlementReaderFor', () => {
++	it("passes each read through to the store, bound to the execution's id", async () => {
++		const latest = { B: at('B', 2, 'completed', [true, false]) };
++		const rows = { 'x:0': at('x', 0, 'completed', [true]) };
++		const stepStore = {
++			loadLatestStepSummaries: vi.fn().mockResolvedValue(latest),
++			loadStepSummariesByKeys: vi.fn().mockResolvedValue(rows),
++			countSettledSteps: vi.fn().mockResolvedValue(7),
++		} as unknown as StepStore;
++
++		const reader = settlementReaderFor(stepStore, 'exec-9');
++
++		expect(reader.executionId).toBe('exec-9');
++		expect(await reader.loadLatestStepSummaries(['B'])).toBe(latest);
++		expect(stepStore.loadLatestStepSummaries).toHaveBeenCalledExactlyOnceWith('exec-9', ['B']);
++		expect(await reader.loadStepSummariesByKeys([key('x')])).toBe(rows);
++		expect(stepStore.loadStepSummariesByKeys).toHaveBeenCalledExactlyOnceWith('exec-9', [key('x')]);
++		expect(await reader.countSettledSteps()).toBe(7);
++		expect(stepStore.countSettledSteps).toHaveBeenCalledExactlyOnceWith('exec-9');
++	});
++});
++
++describe('terminalIterationsOf', () => {
++	it('keeps the loops whose latest row settled without filling the loop slot', () => {
++		expect(
++			terminalIterationsOf({
++				B: at('B', 2, 'completed', [true, false]),
++				C: at('C', 1, 'completed', [false, true]),
++				D: at('D', 0, 'running'),
++				E: at('E', 3, 'skipped'),
++			}),
++		).toEqual(
++			new Map([
++				['B', 2],
++				['E', 3],
++			]),
++		);
++	});
++});
++
++describe('StepSettledHandler with an injected policy', () => {
++	const graph = makeGraph([
++		{ from: 'trigger', to: 'a' },
++		{ from: 'a', to: 'b' },
++		{ from: 'a', to: 'c', outputIndex: 1 },
++	]);
++
++	function setup(policy: SettlementPolicy, { failed = false } = {}) {
++		const execution: ExecutionRecord = {
++			id: 'exec-1',
++			workflowId: 'wf-1',
++			status: 'running',
++			mode: 'production',
++			graph,
++			workflow: {},
++			triggerOutputs: null,
++			callerContext: { hostMode: 'trigger' },
++			responseExpectation: { kind: 'none' },
++			finishedAt: null,
++		};
++		const step: StepRecord = {
++			id: 'step-a',
++			executionId: 'exec-1',
++			nodeId: 'a',
++			iteration: 0,
++			status: 'completed',
++			outputs: null,
++			waitDeclaration: null,
++			resumeCause: null,
++		};
++		const executionStore = {
++			loadExecution: vi.fn().mockResolvedValue(execution),
++			finishExecution: vi
++				.fn()
++				.mockResolvedValue({ finishedAt: new Date('2026-10-03T08:00:00.000Z') }),
++			refreshLiveStatus: vi.fn(),
++		} as unknown as ExecutionStore;
++		const stepStore = {
++			loadStep: vi.fn().mockResolvedValue(step),
++			createSteps: vi.fn(async (_: string, records: StepKey[]) => {
++				await Promise.resolve();
++				return records.map(({ nodeId, iteration }) => ({
++					id: `step-${nodeId}`,
++					nodeId,
++					iteration,
++				}));
++			}),
++			loadLatestStepSummaries: vi.fn().mockResolvedValue({}),
++			loadStepSummariesByKeys: vi.fn().mockResolvedValue({}),
++			countSettledSteps: vi.fn().mockResolvedValue(0),
++			hasFailedSteps: vi.fn().mockResolvedValue(failed),
++			cancelPendingSteps: vi.fn(),
++		} as unknown as StepStore;
++		const stepQueue = { publish: vi.fn(), start: vi.fn(), stop: vi.fn() };
++		const orchestrationQueue = { publish: vi.fn(), start: vi.fn(), stop: vi.fn() };
++		const publisher = { publish: vi.fn(), stop: vi.fn() } as LifecycleEventPublisher;
++		const responseSender = { send: vi.fn() } as unknown as ExecutionResponseSender;
++		const handler = new StepSettledHandler(
++			executionStore,
++			stepStore,
++			stepQueue,
++			orchestrationQueue,
++			publisher,
++			responseSender,
++			policy,
++		);
++		return { handler, step, executionStore, stepStore, stepQueue, orchestrationQueue };
++	}
++
++	const event = { type: 'step:settled', executionId: 'exec-1', stepId: 'step-a' } as const;
++
++	it("writes and announces the policy's decisions, not the default's", async () => {
++		const policy: SettlementPolicy = {
++			decideSuccessors: vi.fn().mockResolvedValue({ toQueue: [key('c')], toSkip: [key('b')] }),
++			isFinished: vi.fn().mockResolvedValue(true),
++		};
++		const { handler, step, stepStore, stepQueue, orchestrationQueue, executionStore } =
++			setup(policy);
++
++		await handler.handle(event);
++
++		expect(policy.decideSuccessors).toHaveBeenCalledExactlyOnceWith(
++			graph,
++			step,
++			expect.objectContaining({ executionId: 'exec-1' }),
++		);
++		expect(stepStore.loadStepSummariesByKeys).not.toHaveBeenCalled();
++		expect(stepStore.createSteps).toHaveBeenCalledExactlyOnceWith('exec-1', [
++			{ nodeId: 'c', iteration: 0, status: 'queued' },
++			{ nodeId: 'b', iteration: 0, status: 'skipped' },
++		]);
++		expect(stepQueue.publish).toHaveBeenCalledExactlyOnceWith({
++			type: 'step:ready',
++			executionId: 'exec-1',
++			stepId: 'step-c',
++		});
++		expect(orchestrationQueue.publish).toHaveBeenCalledExactlyOnceWith({
++			type: 'step:settled',
++			executionId: 'exec-1',
++			stepId: 'step-b',
++		});
++		// it queued work, so completion is not asked
++		expect(policy.isFinished).not.toHaveBeenCalled();
++		expect(executionStore.finishExecution).not.toHaveBeenCalled();
++	});
++
++	it('finishes the execution when the policy says it is finished', async () => {
++		const policy: SettlementPolicy = {
++			decideSuccessors: vi.fn().mockResolvedValue({ toQueue: [], toSkip: [] }),
++			isFinished: vi.fn().mockResolvedValue(true),
++		};
++		const { handler, stepStore, executionStore } = setup(policy);
++
++		await handler.handle(event);
++
++		expect(policy.isFinished).toHaveBeenCalledExactlyOnceWith(
++			graph,
++			expect.objectContaining({ executionId: 'exec-1' }),
++		);
++		expect(stepStore.countSettledSteps).not.toHaveBeenCalled();
++		expect(executionStore.finishExecution).toHaveBeenCalledExactlyOnceWith('exec-1', 'completed');
++	});
++
++	it('leaves the execution running when the policy says it is not finished', async () => {
++		const policy: SettlementPolicy = {
++			decideSuccessors: vi.fn().mockResolvedValue({ toQueue: [], toSkip: [] }),
++			isFinished: vi.fn().mockResolvedValue(false),
++		};
++		const { handler, executionStore } = setup(policy);
++
++		await handler.handle(event);
++
++		expect(executionStore.finishExecution).not.toHaveBeenCalled();
++		expect(executionStore.refreshLiveStatus).toHaveBeenCalledExactlyOnceWith('exec-1');
++	});
++
++	it('keeps the failure branch in the handler: a failed execution never asks the policy', async () => {
++		const policy: SettlementPolicy = {
++			decideSuccessors: vi.fn(),
++			isFinished: vi.fn(),
++		};
++		const { handler, stepStore, executionStore } = setup(policy, { failed: true });
++
++		await handler.handle(event);
++
++		expect(policy.decideSuccessors).not.toHaveBeenCalled();
++		expect(policy.isFinished).not.toHaveBeenCalled();
++		expect(executionStore.finishExecution).toHaveBeenCalledExactlyOnceWith('exec-1', 'failed');
++		expect(stepStore.cancelPendingSteps).toHaveBeenCalledExactlyOnceWith('exec-1');
++	});
++});
+diff --git a/packages/@n8n/engine/src/execution/index.ts b/packages/@n8n/engine/src/execution/index.ts
+index fa3fc87bb9..4ee2365ad3 100644
+--- a/packages/@n8n/engine/src/execution/index.ts
++++ b/packages/@n8n/engine/src/execution/index.ts
+@@ -34,6 +34,13 @@ export { ExecutionStartHandler } from './execution-start-handler';
+ export { ExecutionQueryService } from './execution-query.service';
+ export { OrchestrationWorker } from './orchestration-worker';
+ export { StepSettledHandler } from './step-settled-handler';
++export {
++	defaultSettlementPolicy,
++	settlementReaderFor,
++	terminalIterationsOf,
++} from './settlement-policy';
++export type { SettlementPolicy, SettlementReader } from './settlement-policy';
++export type { SuccessorDecisions } from './settlement';
+ export { StepReadyHandler } from './step-ready-handler';
+ export { StepWorker } from './step-worker';
+ export {
+diff --git a/packages/@n8n/engine/src/execution/settlement-policy.ts b/packages/@n8n/engine/src/execution/settlement-policy.ts
+new file mode 100644
+index 0000000000..885d9ac35f
+--- /dev/null
++++ b/packages/@n8n/engine/src/execution/settlement-policy.ts
+@@ -0,0 +1,138 @@
++import { UnexpectedError } from '../common';
++import {
++	deriveLoops,
++	findTriggerNode,
++	getDescendantNodeIds,
++	getSuccessorNodeIds,
++	type WorkflowGraph,
++} from '../graph';
++import { countExpectedSettledSteps } from './completion';
++import type { StepKey, StepKeyId } from './execution.types';
++import { exitSourcesInto, isTerminalStep } from './loop-ledger';
++import { decideSuccessors, decisionKeys, type SuccessorDecisions } from './settlement';
++import type { StepStore, StepSummary } from './step-store';
++
++/**
++ * The planning reads of one execution's step rows, and nothing else.
++ *
++ * Bound to the execution, so a policy cannot read another one's rows, and
++ * read-only, so a policy cannot write any: deciding stays a function of the
++ * rows read. Each method is the `StepStore` method of the same name.
++ */
++export interface SettlementReader {
++	readonly executionId: string;
++	loadLatestStepSummaries(nodeIds: string[]): Promise<Record<string, StepSummary>>;
++	loadStepSummariesByKeys(keys: StepKey[]): Promise<Record<StepKeyId, StepSummary>>;
++	countSettledSteps(): Promise<number>;
++}
++
++/**
++ * The two decisions `StepSettledHandler` takes from the step rows: what a
++ * settlement decides for its direct successors, and whether the execution owes
++ * no further step.
++ *
++ * Everything else stays in the handler: the failure branch, writing and
++ * announcing the decided rows, and recording the outcome. A policy reads rows
++ * through the reader it is handed and writes nothing.
++ */
++export interface SettlementPolicy {
++	/**
++	 * The successor steps the settlement of `settled` decides, as
++	 * `decideSuccessors` returns them: in edge order, and leaving out every step
++	 * that already has a row.
++	 */
++	decideSuccessors(
++		graph: WorkflowGraph,
++		settled: StepKey,
++		reader: SettlementReader,
++	): Promise<SuccessorDecisions>;
++
++	/** Whether every step the execution owes has settled. */
++	isFinished(graph: WorkflowGraph, reader: SettlementReader): Promise<boolean>;
++}
++
++/** The planning reads of `stepStore`, bound to one execution. */
++export function settlementReaderFor(stepStore: StepStore, executionId: string): SettlementReader {
++	return {
++		executionId,
++		loadLatestStepSummaries: async (nodeIds) =>
++			await stepStore.loadLatestStepSummaries(executionId, nodeIds),
++		loadStepSummariesByKeys: async (keys) =>
++			await stepStore.loadStepSummariesByKeys(executionId, keys),
++		countSettledSteps: async () => await stepStore.countSettledSteps(executionId),
++	};
++}
++
++/**
++ * The terminal iteration of each loop whose latest batch row is given, by batch
++ * node id, leaving out the loops that have not ended. `loadTerminalIterations`
++ * without the store.
++ */
++export function terminalIterationsOf(latest: Record<string, StepSummary>): Map<string, number> {
++	const terminalIterations = new Map<string, number>();
++	for (const [batchNodeId, step] of Object.entries(latest)) {
++		if (isTerminalStep(step)) terminalIterations.set(batchNodeId, step.iteration);
++	}
++	return terminalIterations;
++}
++
++/** As `loadTerminalIterations`: no read when no loop is asked about. */
++async function loadTerminalIterations(
++	reader: SettlementReader,
++	batchNodeIds: string[],
++): Promise<Map<string, number>> {
++	if (batchNodeIds.length === 0) return new Map();
++	return terminalIterationsOf(await reader.loadLatestStepSummaries(batchNodeIds));
++}
++
++function reachableNodeIds(graph: WorkflowGraph, executionId: string): Set<string> {
++	const trigger = findTriggerNode(graph);
++	if (!trigger) {
++		// The start boundary rejects triggerless graphs, so this execution
++		// should never have been created.
++		throw new UnexpectedError(`Execution ${executionId} has no trigger node in its graph`);
++	}
++	return new Set([trigger.id, ...getDescendantNodeIds(graph, trigger.id)]);
++}
++
++/** The settlement rules of `settlement.ts` and the count of `completion.ts`. */
++export const defaultSettlementPolicy: SettlementPolicy = {
++	async decideSuccessors(graph, settled, reader) {
++		const loops = deriveLoops(graph);
++		// Only the candidates' own edges are resolved, so only the loops those
++		// edges leave need their latest row read.
++		const candidates = getSuccessorNodeIds(graph, settled.nodeId);
++		const terminalIterations = await loadTerminalIterations(
++			reader,
++			exitSourcesInto(graph, loops, candidates),
++		);
++		const steps = await reader.loadStepSummariesByKeys(
++			decisionKeys(graph, loops, settled, terminalIterations),
++		);
++		return decideSuccessors(graph, loops, settled, steps, terminalIterations);
++	},
++
++	/**
++	 * Steps are unique per `(node, iteration)`, only exist for reachable nodes,
++	 * and never unsettle, so the count comparison cannot pass early — in-flight
++	 * events and unplanned successors both leave steps outstanding.
++	 */
++	async isFinished(graph, reader) {
++		const reachable = reachableNodeIds(graph, reader.executionId);
++		const loops = deriveLoops(graph);
++		const terminalIterations = await loadTerminalIterations(
++			reader,
++			// A loop the trigger cannot reach never receives rows, and the count below
++			// leaves it out, so its tip is not worth asking for.
++			loops
++				.filter((loop) => reachable.has(loop.batchNodeId))
++				.map((loop) => loop.batchNodeId),
++		);
++		const expected = countExpectedSettledSteps(loops, reachable, terminalIterations);
++		// A loop still running owes an unknown number of steps, so there is nothing
++		// to compare against yet.
++		if (expected === undefined) return false;
++
++		return (await reader.countSettledSteps()) >= expected;
++	},
++};
+diff --git a/packages/@n8n/engine/src/execution/step-settled-handler.ts b/packages/@n8n/engine/src/execution/step-settled-handler.ts
+index 35c8c4482f..66c4bce5ef 100644
+--- a/packages/@n8n/engine/src/execution/step-settled-handler.ts
++++ b/packages/@n8n/engine/src/execution/step-settled-handler.ts
+@@ -1,15 +1,8 @@
+ import { UnexpectedError } from '../common';
+-import {
+-	deriveLoops,
+-	findTriggerNode,
+-	getDescendantNodeIds,
+-	getSuccessorNodeIds,
+-	type GraphNode,
+-} from '../graph';
++import type { GraphNode } from '../graph';
+ import type { LifecycleEventPublisher } from '../lifecycle-events';
+ import type { ExecutionResponseSender } from '../response-channel';
+ import type { OrchestrationMessage, StepMessage, StepSettledEvent, WorkQueue } from '../queue';
+-import { countExpectedSettledSteps } from './completion';
+ import type { ExecutionRecord, ExecutionStore } from './execution-store';
+ import {
+ 	isLiveExecutionStatus,
+@@ -18,8 +11,11 @@ import {
+ 	type StepKey,
+ 	type StepKeyId,
+ } from './execution.types';
+-import { exitSourcesInto, loadTerminalIterations } from './loop-ledger';
+-import { decideSuccessors, decisionKeys } from './settlement';
++import {
++	defaultSettlementPolicy,
++	settlementReaderFor,
++	type SettlementPolicy,
++} from './settlement-policy';
+ import type { StepRecord, StepStore } from './step-store';
+ import { validateStepContext } from './validate-step-context';
+ 
+@@ -34,6 +30,10 @@ import { validateStepContext } from './validate-step-context';
+  *
+  * An event whose step and execution disagree is rejected before anything is
+  * planned, leaving both executions untouched.
++ *
++ * Both decisions come from the `SettlementPolicy`: which successors the
++ * settlement decides, and whether the execution owes no further step. The
++ * default is the rules of `settlement.ts` and the count of `completion.ts`.
+  */
+ export class StepSettledHandler {
+ 	constructor(
+@@ -43,6 +43,7 @@ export class StepSettledHandler {
+ 		private readonly orchestrationQueue: WorkQueue<OrchestrationMessage>,
+ 		private readonly lifecycleEventPublisher: LifecycleEventPublisher,
+ 		private readonly responseSender: ExecutionResponseSender,
++		private readonly settlementPolicy: SettlementPolicy = defaultSettlementPolicy,
+ 	) {}
+ 
+ 	async handle(event: StepSettledEvent): Promise<void> {
+@@ -106,25 +107,10 @@ export class StepSettledHandler {
+ 
+ 	/** Plans the settled step's direct successors, returning how many were queued. */
+ 	private async planSuccessors(execution: ExecutionRecord, step: StepRecord): Promise<number> {
+-		const loops = deriveLoops(execution.graph);
+-		// Only the candidates' own edges are resolved, so only the loops those
+-		// edges leave need their latest row read.
+-		const candidates = getSuccessorNodeIds(execution.graph, step.nodeId);
+-		const terminalIterations = await loadTerminalIterations(
+-			this.stepStore,
+-			execution.id,
+-			exitSourcesInto(execution.graph, loops, candidates),
+-		);
+-		const steps = await this.stepStore.loadStepSummariesByKeys(
+-			execution.id,
+-			decisionKeys(execution.graph, loops, step, terminalIterations),
+-		);
+-		const { toQueue, toSkip } = decideSuccessors(
++		const { toQueue, toSkip } = await this.settlementPolicy.decideSuccessors(
+ 			execution.graph,
+-			loops,
+ 			step,
+-			steps,
+-			terminalIterations,
++			settlementReaderFor(this.stepStore, execution.id),
+ 		);
+ 		if (toQueue.length === 0 && toSkip.length === 0) return 0;
+ 
+@@ -165,35 +151,19 @@ export class StepSettledHandler {
+ 	}
+ 
+ 	/**
+-	 * Records the execution's outcome once every step it owes has settled: `failed`
+-	 * if any step failed, `completed` otherwise. Steps are unique per
+-	 * `(node, iteration)`, only exist for reachable nodes, and never unsettle, so
+-	 * the count comparison cannot pass early — in-flight events and unplanned
+-	 * successors both leave steps outstanding.
++	 * Records the execution's outcome once every step it owes has settled, as the
++	 * policy decides that: `failed` if any step failed, `completed` otherwise.
+ 	 */
+ 	private async finishExecutionIfDone(
+ 		execution: ExecutionRecord,
+ 		step: StepRecord,
+ 		node: GraphNode,
+ 	): Promise<void> {
+-		const reachable = this.reachableNodeIds(execution);
+-		const loops = deriveLoops(execution.graph);
+-		const terminalIterations = await loadTerminalIterations(
+-			this.stepStore,
+-			execution.id,
+-			// A loop the trigger cannot reach never receives rows, and the count below
+-			// leaves it out, so its tip is not worth asking for.
+-			loops
+-				.filter((loop) => reachable.has(loop.batchNodeId))
+-				.map((loop) => loop.batchNodeId),
++		const done = await this.settlementPolicy.isFinished(
++			execution.graph,
++			settlementReaderFor(this.stepStore, execution.id),
+ 		);
+-		const expected = countExpectedSettledSteps(loops, reachable, terminalIterations);
+-		// A loop still running owes an unknown number of steps, so there is nothing
+-		// to compare against yet.
+-		if (expected === undefined) return;
+-
+-		const settled = await this.stepStore.countSettledSteps(execution.id);
+-		if (settled < expected) return;
++		if (!done) return;
+ 
+ 		const failed = await this.stepStore.hasFailedSteps(execution.id);
+ 		const finished = await this.executionStore.finishExecution(
+@@ -255,14 +225,4 @@ export class StepSettledHandler {
+ 			},
+ 		});
+ 	}
+-
+-	private reachableNodeIds(execution: ExecutionRecord): Set<string> {
+-		const trigger = findTriggerNode(execution.graph);
+-		if (!trigger) {
+-			// The start boundary rejects triggerless graphs, so this execution
+-			// should never have been created.
+-			throw new UnexpectedError(`Execution ${execution.id} has no trigger node in its graph`);
+-		}
+-		return new Set([trigger.id, ...getDescendantNodeIds(execution.graph, trigger.id)]);
+-	}
+ }
+diff --git a/packages/@n8n/engine/src/index.ts b/packages/@n8n/engine/src/index.ts
+index b36f4aa301..3d4433fe36 100644
+--- a/packages/@n8n/engine/src/index.ts
++++ b/packages/@n8n/engine/src/index.ts
+@@ -99,7 +99,13 @@ export type {
+ 	WorkQueue,
+ } from './queue';
+ 
+-export { ExecutionNotFoundError, StepNotFoundError } from './execution';
++export {
++	defaultSettlementPolicy,
++	ExecutionNotFoundError,
++	settlementReaderFor,
++	StepNotFoundError,
++	terminalIterationsOf,
++} from './execution';
+ export type {
+ 	CallerContext,
+ 	ExecutionMode,
+@@ -118,10 +124,14 @@ export type {
+ 	StepKeyId,
+ 	StepRecord,
+ 	ResumeCause,
++	SettlementPolicy,
++	SettlementReader,
+ 	StepSlots,
+ 	StepStatus,
+ 	StepStore,
++	StepSummary,
+ 	StepView,
++	SuccessorDecisions,
+ 	TriggerOutputs,
+ 	WaitDeclaration,
+ 	WorkflowDocument,
+-- 
+2.50.1 (Apple Git-155)
+

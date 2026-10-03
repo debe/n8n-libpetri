@@ -9,6 +9,7 @@ export default defineConfig({
     'verify/main': 'src/verify/main.ts',
     'conformance/index': 'src/conformance/index.ts',
     codec: 'src/codec.ts',
+    'n8n-v2': 'src/n8n-v2.ts',
     'n8n-vitest-setup': 'src/n8n-vitest-setup.ts',
   },
   format: ['esm'],

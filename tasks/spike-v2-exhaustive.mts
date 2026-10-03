@@ -22,6 +22,19 @@
  * it checks that decoding the rows in reverse order gives the same plan. The reference is n8n's
  * compiled code, loaded from the pinned checkout's `dist`.
  *
+ * Two legs of `tasks/v2-seam-plan.md` decision 13 run beside it:
+ * - (a″) key-scoped decision: at every explored state, for each pending `step:settled` of a
+ *   completed or skipped row s (the reached (S, s), deduplicated by row set and s),
+ *   `scopePlan(R(S), candidateKeys(s))` against what `StepSettledHandler` decides there (∅ after a
+ *   failure, else `decideSuccessors(s)`), as ordered sequences (`compareScoped`). The same
+ *   comparison over every completed or skipped row of every distinct row set, reached by the
+ *   handler or not, is reported apart as `scopedAll*`.
+ * - (a‴) completion (decision 7 as amended after F3 fired at step 2): at every distinct row set
+ *   without a failed row, the net's `isFinished` against `countSettledSteps ≥
+ *   countExpectedSettledSteps` (`compareFinished`). A row set with a failed row is F3's named race:
+ *   `isFinished` is false there, and it is counted (`finishedRaces`, with `finishedRacesCountTrue`
+ *   where n8n's count test says finished), not compared.
+ *
  * Graphs: the committed golden's graphs, plus every corpus entry n8n accepts with at most
  * MAX_NODES nodes and output arity at most 3.
  *
@@ -40,7 +53,8 @@ const { graphToDescription } = await import(`${root}/typescript/src/conformance/
 const { referenceAnswer } = await import(`${root}/typescript/src/conformance/v2/reference.ts`);
 const { decodeStepRows } = await import(`${root}/typescript/src/codec/v2/step-rows.ts`);
 const { planFromMarking } = await import(`${root}/typescript/src/codec/v2/plan.ts`);
-const { planKeys } = await import(`${root}/typescript/src/conformance/v2/differential.ts`);
+const { planKeys, compareScoped, compareFinished, netPlanAt } = await import(`${root}/typescript/src/conformance/v2/differential.ts`);
+const { reachableOf } = await import(`${root}/typescript/src/conformance/v2/reference.ts`);
 const pkg = resolve(root, '.n8n/packages/@n8n');
 const req = createRequire(`${pkg}/node-engine-compatibility/package.json`);
 const { decideSuccessors, decisionKeys } = req(`${pkg}/engine/dist/execution/settlement.js`);
@@ -73,6 +87,23 @@ const keyStr = (p: any) => `Q{${p.toQueue.join(' ')}} S{${p.toSkip.join(' ')}}`;
 function explore(tag: string, graph: any, total: any) {
   const compiled = compile(graphToDescription(graph).description, { profile: 'engineV2' });
   const loops = deriveLoops(graph);
+  const reachable = reachableOf(ref, graph);
+  const rowKey = (rows: Row[]) => rows.map((r) => `${kid(r)}=${r.status}${r.filledOutputSlots.map(Number).join('')}`).sort().join(' ');
+  const example = (text: string) => { if (total.examples.length < 15) total.examples.push(`${tag}: ${text}`); };
+  const seqStr = (p: any) => (p === null ? 'n/a' : `Q[${p.toQueue.join(' ')}] S[${p.toSkip.join(' ')}]`);
+  /** (a″) at one (S, s): `scope` names the counter family. */
+  const scoped = (rows: Row[], settled: Row, net: any, scope: 'scoped' | 'scopedAll') => {
+    const v = compareScoped(compiled, ref, graph, loops, rows, { nodeId: settled.nodeId, iteration: settled.iteration }, net);
+    total[`${scope}Pairs`]++;
+    if (v.halted) { total[`${scope}Halted`]++; if (v.unguarded.toQueue.length + v.unguarded.toSkip.length > 0) total[`${scope}Races`]++; }
+    if (v.reference.toQueue.length > 1 || v.reference.toSkip.length > 1) total[`${scope}Ordered`]++;
+    if (v.agree) return;
+    total[`${scope}Dis`]++;
+    example(`(a″ ${scope}) rows ${rowKey(rows)} settled ${kid(settled)}\n   net ${v.error ?? seqStr(v.net)}\n   handler ${seqStr(v.reference)}`);
+  };
+  const handlerPairs = new Set<string>();
+  /** R(S) from the net per distinct row set, decoded once by `check` and read by the (a″) pairs. */
+  const netByRows = new Map<string, any>();
   const trig = findTriggerNode(graph).id;
   const arity = new Map<string, number>();
   for (const n of graph.nodes) arity.set(n.id, 1);
@@ -108,6 +139,8 @@ function explore(tag: string, graph: any, total: any) {
     if (rows.some((r) => r.status === 'waiting')) waitingSets.add(rk);
     if (rows.some((r) => r.cancelledFrom === 'waiting')) cancelledWaitingSets.add(rows.map((r) => `${kid(r)}=${r.status}${r.cancelledFrom ?? ''}`).sort().join(' '));
     if (checked.has(rk)) return; checked.add(rk);
+    const net = netPlanAt(compiled, rows);
+    netByRows.set(rk, net);
     const R = keyStr(planKeys(referenceAnswer(ref, graph, loops, rows)));
     let P: string;
     try { P = keyStr(planKeys(planFromMarking(compiled, decodeStepRows(compiled, rows)))); }
@@ -116,6 +149,26 @@ function explore(tag: string, graph: any, total: any) {
     try { P2 = keyStr(planKeys(planFromMarking(compiled, decodeStepRows(compiled, [...rows].reverse())))); } catch (e) { P2 = `THROW ${(e as Error).message}`; }
     if (R !== 'Q{} S{}') nonEmpty++;
     if (P !== R || P2 !== P) { dis++; if (total.examples.length < 15) total.examples.push(`${tag}: rows ${rk}\n   net ${P}\n   net(rev) ${P2}\n   R   ${R}`); }
+    // (a‴) completion, and (a″) over every completed or skipped row of this row set
+    total.finishedSets++;
+    const fin = compareFinished(compiled, ref, loops, reachable, rows, net);
+    if (fin.failed) { total.finishedRaces++; if (fin.reference) total.finishedRacesCountTrue++; }
+    else total.finishedCompared++;
+    if (fin.net === true && fin.reference) total.finishedBoth++;
+    if (fin.error !== null) total.finishedCodecErrors++;
+    if (fin.agree === false) {
+      total.finishedDis++;
+      if (fin.net === true) total.finishedNetOnly++;
+      if (fin.reference) total.finishedReferenceOnly++;
+      if (fin.expected === undefined) total.finishedLoopRunning++;
+      else if (fin.settled < fin.expected) total.finishedRowsOwed++;
+      const loopRunning = fin.expected === undefined;
+      // Examples: the first three, then one with a loop not ended.
+      if (total.finishedExamples.length < 3 || (loopRunning && !total.finishedExamples.some((x: string) => x.includes('undefined')))) {
+        total.finishedExamples.push(`${tag}: rows ${rk}: isFinished ${fin.error ?? fin.net}, countSettled ${fin.settled} >= countExpected ${fin.expected}: ${fin.reference}`);
+      }
+    }
+    for (const r of rows) if (r.status === 'completed' || r.status === 'skipped') scoped(rows, r, net, 'scopedAll');
   };
   while (stack.length > 0) {
     const s = stack.pop()!;
@@ -126,6 +179,17 @@ function explore(tag: string, graph: any, total: any) {
     check(s.rows);
     const failed = s.rows.some((r) => r.status === 'failed');
     const byK = new Map(s.rows.map((r) => [kid(r), r]));
+    // (a″) every (S, s) the handler can reach from here: a pending settled event of a completed or skipped row
+    let rk: string | undefined;
+    for (const k of s.settle) {
+      const r = byK.get(k)!;
+      if (r.status !== 'completed' && r.status !== 'skipped') continue;
+      rk ??= rowKey(s.rows);
+      const pair = `${rk}|${k}`;
+      if (handlerPairs.has(pair)) continue;
+      handlerPairs.add(pair);
+      scoped(s.rows, r, netByRows.get(rk), 'scoped');
+    }
     const clone = (): St => ({ rows: s.rows.map((r) => ({ ...r, filledOutputSlots: [...r.filledOutputSlots] })), settle: [...s.settle], ready: [...s.ready] });
     // ready events: claim, then outcome
     for (const k of s.ready) {
@@ -181,7 +245,16 @@ function explore(tag: string, graph: any, total: any) {
   if (loops.length) total.loopGraphs++;
 }
 
-const total = { graphs: 0, loopGraphs: 0, states: 0, rowSets: 0, nonEmpty: 0, dis: 0, truncated: [] as string[], examples: [] as string[], waitingRowSets: 0, cancelledWaitingRowSets: 0 };
+const total: any = {
+  graphs: 0, loopGraphs: 0, states: 0, rowSets: 0, nonEmpty: 0, dis: 0, truncated: [] as string[], examples: [] as string[], waitingRowSets: 0, cancelledWaitingRowSets: 0,
+  // (a″): reached (S, s), and every (S, s) of a distinct row set
+  scopedPairs: 0, scopedHalted: 0, scopedRaces: 0, scopedOrdered: 0, scopedDis: 0,
+  scopedAllPairs: 0, scopedAllHalted: 0, scopedAllRaces: 0, scopedAllOrdered: 0, scopedAllDis: 0,
+  // (a‴): every distinct row set; compared without a failed row, the race counted with one
+  finishedSets: 0, finishedCompared: 0, finishedBoth: 0, finishedDis: 0, finishedNetOnly: 0, finishedReferenceOnly: 0, finishedLoopRunning: 0, finishedRowsOwed: 0, finishedCodecErrors: 0,
+  finishedRaces: 0, finishedRacesCountTrue: 0,
+  finishedExamples: [] as string[],
+};
 const golden = JSON.parse(readFileSync(`${root}/typescript/tests/fixtures/v2/settlement-golden.json`, 'utf8'));
 for (const e of golden.entries) if (e.graph.nodes.length <= MAX_NODES + 3) explore(e.id, e.graph, total);
 const conv = new V1WorkflowConverter();
@@ -200,5 +273,6 @@ for (const file of files) {
   }
 }
 // The wait counts are printed only with `--wait`, so a run without it prints what it printed before.
-console.log(JSON.stringify({ ...total, examples: undefined, ...(WAIT ? { wait: true } : { waitingRowSets: undefined, cancelledWaitingRowSets: undefined }) }, null, 1));
+console.log(JSON.stringify({ ...total, examples: undefined, finishedExamples: undefined, ...(WAIT ? { wait: true } : { waitingRowSets: undefined, cancelledWaitingRowSets: undefined }) }, null, 1));
 console.log(total.examples.join('\n'));
+console.log(total.finishedExamples.join('\n'));

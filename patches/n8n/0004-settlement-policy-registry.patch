@@ -1,0 +1,255 @@
+From aee1644f50fd6ba847e2343913f701258bac15af Mon Sep 17 00:00:00 2001
+From: Dennis Berger <theabyssinspace@gmail.com>
+Date: Sat, 3 Oct 2026 00:37:57 +0200
+Subject: [PATCH] refactor(engine): Let a host choose the settlement policy
+ (no-changelog)
+
+`createEngineRuntime` built its `StepSettledHandler` without a policy, so
+the handler always used `defaultSettlementPolicy`. It now takes an optional
+`settlementPolicy` and hands the handler `settlementPolicy ??
+getSettlementPolicy()`.
+
+`settlement-policy-registry.ts` holds the process-wide policy:
+`setSettlementPolicy()`, `getSettlementPolicy()` and
+`resetSettlementPolicy()`. Its default is `defaultSettlementPolicy`. A host
+can register a policy without changing a composition root: the in-process
+module, the `n8n engine` command and `serve.ts` all build their engine
+through `createEngineRuntime`.
+
+The registry is read only in `createEngineRuntime`, once per runtime. It is
+not the handler's constructor default, so a handler built directly, as the
+handler tests build it, keeps `defaultSettlementPolicy`.
+
+Nothing registers a policy and no caller passes one, so the behaviour does
+not change. The existing tests are not edited. Four cases in
+`create-engine-runtime.test.ts` check that the handler gets the default
+while nothing is registered, the option, the registered policy, and the
+option over the registered policy.
+---
+ packages/@n8n/engine/src/execution/index.ts   |  5 ++
+ .../execution/settlement-policy-registry.ts   | 24 +++++
+ packages/@n8n/engine/src/index.ts             |  3 +
+ .../__tests__/create-engine-runtime.test.ts   | 90 +++++++++++++++++++
+ .../src/runtime/create-engine-runtime.ts      | 12 +++
+ 5 files changed, 134 insertions(+)
+ create mode 100644 packages/@n8n/engine/src/execution/settlement-policy-registry.ts
+
+diff --git a/packages/@n8n/engine/src/execution/index.ts b/packages/@n8n/engine/src/execution/index.ts
+index 4ee2365ad3..f783558066 100644
+--- a/packages/@n8n/engine/src/execution/index.ts
++++ b/packages/@n8n/engine/src/execution/index.ts
+@@ -40,6 +40,11 @@ export {
+ 	terminalIterationsOf,
+ } from './settlement-policy';
+ export type { SettlementPolicy, SettlementReader } from './settlement-policy';
++export {
++	getSettlementPolicy,
++	resetSettlementPolicy,
++	setSettlementPolicy,
++} from './settlement-policy-registry';
+ export type { SuccessorDecisions } from './settlement';
+ export { StepReadyHandler } from './step-ready-handler';
+ export { StepWorker } from './step-worker';
+diff --git a/packages/@n8n/engine/src/execution/settlement-policy-registry.ts b/packages/@n8n/engine/src/execution/settlement-policy-registry.ts
+new file mode 100644
+index 0000000000..036db5a56c
+--- /dev/null
++++ b/packages/@n8n/engine/src/execution/settlement-policy-registry.ts
+@@ -0,0 +1,24 @@
++import { defaultSettlementPolicy, type SettlementPolicy } from './settlement-policy';
++
++let policy: SettlementPolicy = defaultSettlementPolicy;
++
++/**
++ * Replace the settlement policy of every engine runtime built from now on.
++ * `createEngineRuntime` reads it when its options name no policy, so a policy
++ * can be plugged in process-wide without touching a composition root. A
++ * runtime already built keeps the policy it was built with. The default is
++ * `defaultSettlementPolicy`.
++ */
++export function setSettlementPolicy(next: SettlementPolicy): void {
++	policy = next;
++}
++
++/** The policy `createEngineRuntime` hands its `StepSettledHandler` when its options name none. */
++export function getSettlementPolicy(): SettlementPolicy {
++	return policy;
++}
++
++/** Restore the default, `defaultSettlementPolicy`. */
++export function resetSettlementPolicy(): void {
++	policy = defaultSettlementPolicy;
++}
+diff --git a/packages/@n8n/engine/src/index.ts b/packages/@n8n/engine/src/index.ts
+index 3d4433fe36..71d20e6866 100644
+--- a/packages/@n8n/engine/src/index.ts
++++ b/packages/@n8n/engine/src/index.ts
+@@ -102,6 +102,9 @@ export type {
+ export {
+ 	defaultSettlementPolicy,
+ 	ExecutionNotFoundError,
++	getSettlementPolicy,
++	resetSettlementPolicy,
++	setSettlementPolicy,
+ 	settlementReaderFor,
+ 	StepNotFoundError,
+ 	terminalIterationsOf,
+diff --git a/packages/@n8n/engine/src/runtime/__tests__/create-engine-runtime.test.ts b/packages/@n8n/engine/src/runtime/__tests__/create-engine-runtime.test.ts
+index ddf2d2c0bd..aa9b5b5e4c 100644
+--- a/packages/@n8n/engine/src/runtime/__tests__/create-engine-runtime.test.ts
++++ b/packages/@n8n/engine/src/runtime/__tests__/create-engine-runtime.test.ts
+@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
+ import { AllowAllAdmittance } from '../../admittance';
+ import { mintIdentityToken, SharedSecretIdentityVerifier } from '../../auth';
+ import type { EngineStores } from '../../database';
++import type * as Execution from '../../execution';
+ import { BatchingLifecycleEventPublisher } from '../../lifecycle-events';
+ import { noopExecutionResponseSender } from '../../response-channel';
+ import { createEngineRuntime } from '../create-engine-runtime';
+@@ -119,3 +120,92 @@ describe('createEngineRuntime', () => {
+ 		await expect(engine.stop()).resolves.toBeUndefined();
+ 	});
+ });
++
++describe('createEngineRuntime settlement policy', () => {
++	const policy = (): Execution.SettlementPolicy => ({
++		decideSuccessors: vi.fn(),
++		isFinished: vi.fn(),
++	});
++
++	/**
++	 * A fresh module graph whose `StepSettledHandler` records the policy it is
++	 * built with. The registry is that graph's own, so registering on it is
++	 * what the runtime reads.
++	 */
++	async function load() {
++		const given: unknown[] = [];
++		vi.resetModules();
++		vi.doMock('../../execution', async (importOriginal) => {
++			const actual = await importOriginal<typeof Execution>();
++			class RecordingStepSettledHandler extends actual.StepSettledHandler {
++				constructor(...args: ConstructorParameters<typeof actual.StepSettledHandler>) {
++					super(...args);
++					given.push(args[6]);
++				}
++			}
++			return { ...actual, StepSettledHandler: RecordingStepSettledHandler };
++		});
++		const execution = await import('../../execution/index.js');
++		const { createEngineRuntime: build } = await import('../create-engine-runtime.js');
++		const create = (settlementPolicy?: Execution.SettlementPolicy) =>
++			build({
++				dataSource: fakeDataSource(),
++				admittance: new AllowAllAdmittance(),
++				identityVerifier,
++				responseSender,
++				settlementPolicy,
++			});
++		return { execution, create, given };
++	}
++
++	afterEach(() => {
++		vi.doUnmock('../../execution');
++		vi.resetModules();
++	});
++
++	it('hands the settled-step handler the default policy while none is registered', async () => {
++		const { execution, create, given } = await load();
++
++		create();
++
++		expect(given).toEqual([execution.defaultSettlementPolicy]);
++		expect(execution.getSettlementPolicy()).toBe(execution.defaultSettlementPolicy);
++	});
++
++	it('hands the settled-step handler the settlementPolicy option', async () => {
++		const { create, given } = await load();
++		const option = policy();
++
++		create(option);
++
++		expect(given).toHaveLength(1);
++		expect(given[0]).toBe(option);
++	});
++
++	it('hands the settled-step handler the registered policy when the options name none', async () => {
++		const { execution, create, given } = await load();
++		const registered = policy();
++
++		execution.setSettlementPolicy(registered);
++		create();
++		execution.resetSettlementPolicy();
++		create();
++
++		expect(given).toHaveLength(2);
++		expect(given[0]).toBe(registered);
++		expect(given[1]).toBe(execution.defaultSettlementPolicy);
++	});
++
++	it('prefers the settlementPolicy option over the registered policy', async () => {
++		const { execution, create, given } = await load();
++		const registered = policy();
++		const option = policy();
++
++		execution.setSettlementPolicy(registered);
++		create(option);
++		execution.resetSettlementPolicy();
++
++		expect(given).toHaveLength(1);
++		expect(given[0]).toBe(option);
++	});
++});
+diff --git a/packages/@n8n/engine/src/runtime/create-engine-runtime.ts b/packages/@n8n/engine/src/runtime/create-engine-runtime.ts
+index 84e7d6c68f..d23cda4123 100644
+--- a/packages/@n8n/engine/src/runtime/create-engine-runtime.ts
++++ b/packages/@n8n/engine/src/runtime/create-engine-runtime.ts
+@@ -10,6 +10,7 @@ import {
+ 	CancelExecutionService,
+ 	ExecutionQueryService,
+ 	ExecutionStartHandler,
++	getSettlementPolicy,
+ 	OrchestrationWorker,
+ 	StartExecutionService,
+ 	StepReadyHandler,
+@@ -17,6 +18,7 @@ import {
+ 	StepWorker,
+ 	WaitSweeper,
+ } from '../execution';
++import type { SettlementPolicy } from '../execution';
+ import { BatchingLifecycleEventPublisher, noopLifecycleEventPublisher } from '../lifecycle-events';
+ import type { LifecycleEventPublisher } from '../lifecycle-events';
+ import { createConsoleLogger, type EngineLogger } from '../logging';
+@@ -50,6 +52,12 @@ export interface EngineRuntimeOptions {
+ 	externalDependencies?: (stores: EngineStores) => ExternalDependencies;
+ 	/** How often to fire waits whose deadline has passed. Defaults to a minute. */
+ 	waitSweepIntervalMs?: number;
++	/**
++	 * Decides a settled step's successors and whether the execution is done.
++	 * Defaults to the policy registered with `setSettlementPolicy`, which is
++	 * `defaultSettlementPolicy` until another one is registered.
++	 */
++	settlementPolicy?: SettlementPolicy;
+ }
+ 
+ /** A built engine, ready for a host to serve. */
+@@ -78,6 +86,7 @@ export function createEngineRuntime({
+ 	responseSender,
+ 	externalDependencies,
+ 	waitSweepIntervalMs,
++	settlementPolicy,
+ }: EngineRuntimeOptions): EngineRuntime {
+ 	const orchestrationQueue = new InMemoryWorkQueue<OrchestrationMessage>(logger);
+ 	const stepQueue = new InMemoryWorkQueue<StepMessage>(logger);
+@@ -104,6 +113,9 @@ export function createEngineRuntime({
+ 			orchestrationQueue,
+ 			lifecycleEventPublisher,
+ 			responseSender,
++			// Read here, once per runtime, and nowhere else: a handler built
++			// directly keeps its own default.
++			settlementPolicy ?? getSettlementPolicy(),
+ 		),
+ 	);
+ 	const waitSweeper = new WaitSweeper(stepStore, stepQueue, logger, waitSweepIntervalMs);
+-- 
+2.50.1 (Apple Git-155)
+

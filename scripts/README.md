@@ -43,14 +43,14 @@ Options:
 | `--skip-test` | Do not create a baseline. |
 | `--full-install` | Install the whole n8n monorepo. |
 | `--allow-dirty` | Permit tracked changes in `.n8n/`; the result is not a clean baseline. |
-| `--scope=NAME` | Select `execution-engine`, `core`, `workflow` or `cli`. |
+| `--scope=NAME` | Select `execution-engine`, `core`, `workflow`, `cli`, `engine`, `compat` or `cli-v2`. |
 
 Environment variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `N8N_DIR` | `<repo>/.n8n` | Reference checkout path. |
-| `N8N_TEST_FILTER` | Scope-specific | Override the vitest path filter. |
+| `N8N_TEST_FILTER` | Scope-specific | Override the vitest path filters (space-separated). |
 | `COREPACK_VERSION` | `0.36.0` | Fallback corepack package when no binary is on `PATH`. |
 | `COREPACK_HOME` | Corepack default | Corepack cache. |
 
@@ -62,9 +62,20 @@ Scopes and baselines:
 | `core` | all of `n8n-core` | `baseline-core.junit.xml` |
 | `workflow` | all of `n8n-workflow` | `baseline-workflow.junit.xml` |
 | `cli` | all of `n8n` | `baseline-cli.junit.xml` |
+| `engine` | `@n8n/engine`, unit config | `baseline-engine.junit.xml` |
+| `compat` | `@n8n/node-engine-compatibility`, unit config | `baseline-compat.junit.xml` |
+| `cli-v2` | `n8n`, `src/modules/engine-v2` and `src/services/__tests__/engine-v2-dispatcher` | `baseline-cli-v2.junit.xml` |
 
 The CLI scope needs a wider install and build because its vitest setup resolves workspace
 packages from built `dist` output.
+
+`engine`, `compat` and `cli-v2` are the engine v2 scopes that need no Postgres. They run each
+package's own `test` script, whose `vitest.config.ts` already excludes
+`**/*.integration.test.ts`. That leaves out the engine's 6 integration files (5 start Postgres
+through testcontainers, one needs none but shares the config) and compat's
+`m1-acceptance.integration.test.ts` (16 cases, Postgres). `bootstrap-n8n.sh --help` lists them.
+None of the three constructs a `WorkflowExecute`, so their `libpetri` leg is not applicable and
+their `legacy` leg is a neutrality leg.
 
 Common reruns:
 
@@ -96,23 +107,26 @@ patches as `patches/n8n/README.md` describes, then bootstrap and run the conform
 
 ```bash
 scripts/verify-patch.sh
-scripts/verify-patch.sh --typecheck --build
+scripts/verify-patch.sh --typecheck --build --lint
 scripts/verify-patch.sh --restore
 ```
 
-The script checks that `.n8n/` is exactly at the pinned commit, resets
-`packages/core/src`, removes untracked files inside that scope, then applies
-`patches/n8n/*.patch` in lexical order. Files outside the patch scope are left alone.
+The script checks that `.n8n/` is exactly at the pinned commit, resets the patch scope
+(`packages/core/src` and `packages/@n8n/engine/src`), removes untracked files inside that
+scope, then applies `patches/n8n/*.patch` in lexical order. Files outside the patch scope are
+left alone.
 
-This reset is destructive to manual edits under `.n8n/packages/core/src`. Keep patch work in
-commits or exported patch files before running it.
+This reset is destructive to manual edits under `.n8n/packages/core/src` and
+`.n8n/packages/@n8n/engine/src`. Keep patch work in commits or exported patch files before
+running it.
 
 Options:
 
 | Option | Effect |
 |---|---|
-| `--typecheck` | Run `pnpm --filter n8n-core typecheck`. |
-| `--build` | Build `n8n-core` after applying the patches. |
+| `--typecheck` | Run `pnpm --filter <pkg> typecheck` for `n8n-core`, `@n8n/engine` and `@n8n/node-engine-compatibility`. |
+| `--build` | Build the same three packages, in that order, after applying the patches. |
+| `--lint` | Run `@n8n/engine`'s own `lint` (oxlint) and `format:check` (`biome ci src`). |
 | `--restore` | Return the patch scope to the pristine commit after checking. |
 
 By default the tree remains patched because the conformance runner needs it.
@@ -136,7 +150,7 @@ Options:
 |---|---|
 | `--engines=legacy,libpetri` | Comma-separated scheduler selection. |
 | `--budget=N` | Requested Petri concurrency budget. Default 1. |
-| `--scope=NAME` | `execution-engine`, `core`, `workflow`, `cli` or `all`. |
+| `--scope=NAME` | `execution-engine`, `core`, `workflow`, `cli`, `engine`, `compat`, `cli-v2` or `all`. |
 | `--skip-patch` | Use the existing patched tree. |
 | `--typecheck` | Typecheck and build the patch before running. |
 

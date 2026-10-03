@@ -16,9 +16,11 @@ import { compile } from '../../../src/compiler/index.js';
 import type { V2Graph } from '../../../src/conformance/v2/graph.js';
 import { graphToDescription } from '../../../src/conformance/v2/graph.js';
 import {
-  hash, latestTerminal, MAX_EVENTS, outcome, referenceAnswer, rng, simulate, terminalIterations,
+  handlerPlan, hash, latestTerminal, MAX_EVENTS, outcome, reachableOf, referenceAnswer, referenceFinished, rng, settledCount,
+  simulate, terminalIterations,
   type Behaviour, type ReferencePlan, type ReferenceRow, type SettlementReference,
 } from '../../../src/conformance/v2/reference.js';
+import type { StepKey } from '../../../src/codec/v2/step-rows.js';
 import { batch, branchDiamond, chain, edge, loop, SETTLEMENT_SHAPES, trigger, v1 } from '../../fixtures/v2-graphs.js';
 import { stub, stubKeyId } from '../../fixtures/v2-stub-reference.js';
 
@@ -290,6 +292,102 @@ describe('simulate', () => {
     };
     expect(MAX_EVENTS).toBe(20_000);
     expect(() => simulate(endless, chain, calm(1), 0, { maxEvents: 500 })).toThrow('no termination within 500 events');
+  });
+});
+
+// ---- the handler's view of one settlement (tasks/v2-seam-plan.md decision 13) ----
+
+describe('onSettled', () => {
+  it('reports each completed or skipped settlement the handler takes, with the rows onState last reported', () => {
+    for (let seed = 0; seed < 12; seed++) {
+      let last: readonly ReferenceRow[] = [];
+      const pairs: { rows: readonly ReferenceRow[]; settled: StepKey }[] = [];
+      const r = simulate(stub, branchDiamond, calm(seed, seed % 3 === 0 ? 0.3 : 0), seed, {
+        onState: (rows) => { last = rows; },
+        onSettled: (rows, settled) => {
+          expect(rows).toEqual(last);
+          pairs.push({ rows, settled });
+        },
+      });
+      for (const { rows, settled } of pairs) {
+        expect(['completed', 'skipped']).toContain(rows.find((x) => id(x) === id(settled))!.status);
+      }
+      // Each settlement at most once, and only of a completed or skipped row: the run stops at its
+      // end, so a settlement still pending then (a last skip, say) is never taken.
+      const deciders = new Set(r.rows.filter((x) => x.status === 'completed' || x.status === 'skipped').map(id));
+      const taken = pairs.map((p) => id(p.settled));
+      expect(new Set(taken).size).toBe(taken.length);
+      for (const k of taken) expect(deciders.has(k)).toBe(true);
+      expect(taken[0]).toBe('T:0');
+    }
+  });
+
+  it('changes no run: rows, events and end are those of a run without it', () => {
+    for (let seed = 0; seed < 12; seed++) {
+      const b: Behaviour = { seed, pFail: 0.2, emptyTerminal: 0, pWait: 0.3 };
+      expect(simulate(stub, branchDiamond, b, seed, { onSettled: () => {} })).toEqual(simulate(stub, branchDiamond, b, seed));
+    }
+  });
+});
+
+describe('handlerPlan', () => {
+  const S = [row('T', 0, 'completed', [true]), row('If', 0, 'completed', [true, false])];
+
+  it('is decideSuccessors(settled) over the rows decisionKeys names, with no failure check', () => {
+    expect(keys(handlerPlan(stub, branchDiamond, [], S, { nodeId: 'If', iteration: 0 }))).toEqual({ toQueue: ['P:0'], toSkip: ['Q:0'] });
+    expect(keys(handlerPlan(stub, branchDiamond, [], S, { nodeId: 'T', iteration: 0 }))).toEqual({ toQueue: [], toSkip: [] });
+    const failed = [...S, row('P', 0, 'failed')];
+    expect(keys(handlerPlan(stub, branchDiamond, [], failed, { nodeId: 'If', iteration: 0 }))).toEqual({ toQueue: [], toSkip: ['Q:0'] });
+  });
+
+  it('hands decideSuccessors only the rows decisionKeys names', () => {
+    let seen: string[] = [];
+    const spy: SettlementReference = {
+      ...stub,
+      decideSuccessors: (graph, loops, settled, steps, terminal) => {
+        seen = Object.keys(steps).sort();
+        return stub.decideSuccessors(graph, loops, settled, steps, terminal);
+      },
+    };
+    const rows = [...S, row('P', 0, 'completed', [true]), row('Q', 0, 'skipped'), row('M', 0, 'queued')];
+    handlerPlan(spy, branchDiamond, [], rows, { nodeId: 'P', iteration: 0 });
+    expect(seen).toEqual(['M:0', 'P:0', 'Q:0']);
+  });
+});
+
+describe('referenceFinished and settledCount', () => {
+  const reachable = reachableOf(stub, chain);
+
+  it('compare the settled rows with countExpectedSettledSteps', () => {
+    expect([...reachable].sort()).toEqual(['A', 'B', 'T']);
+    const all = [row('T', 0, 'completed', [true]), row('A', 0, 'completed', [true]), row('B', 0, 'skipped')];
+    expect(settledCount(stub, [], reachable, all)).toEqual({ settled: 3, expected: 3 });
+    expect(referenceFinished(stub, [], reachable, all)).toBe(true);
+    const inFlight = [...all.slice(0, 2), row('B', 0, 'waiting')];
+    expect(settledCount(stub, [], reachable, inFlight)).toEqual({ settled: 2, expected: 3 });
+    expect(referenceFinished(stub, [], reachable, inFlight)).toBe(false);
+  });
+
+  it('owe the steps a failure stopped the planner from deciding', () => {
+    const halted = [row('T', 0, 'completed', [true]), row('A', 0, 'failed')];
+    expect(settledCount(stub, [], reachable, halted)).toEqual({ settled: 2, expected: 3 });
+    expect(referenceFinished(stub, [], reachable, halted)).toBe(false);
+  });
+
+  it('are false while countExpectedSettledSteps is undefined', () => {
+    const running: SettlementReference = { ...stub, countExpectedSettledSteps: () => undefined };
+    expect(referenceFinished(running, [], reachable, [row('T', 0, 'completed', [true])])).toBe(false);
+  });
+
+  it('end every completed simulate run, and no failure-free run before its end', () => {
+    for (let seed = 0; seed < 12; seed++) {
+      const states: (readonly ReferenceRow[])[] = [];
+      const r = simulate(stub, branchDiamond, calm(seed), seed, { onState: (rows) => states.push(rows) });
+      expect(r.end).toBe('completed');
+      const finished = states.map((rows) => referenceFinished(stub, [], reachableOf(stub, branchDiamond), rows));
+      expect(finished[finished.length - 1]).toBe(true);
+      expect(finished.slice(0, -1).every((f) => !f)).toBe(true);
+    }
   });
 });
 

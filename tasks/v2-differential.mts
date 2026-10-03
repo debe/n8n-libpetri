@@ -19,6 +19,17 @@
  *      `countExpectedSettledSteps` rows; with a failure, both agree on every step both decided;
  *  (c) firing: at every row-set point of the net run, the rows decode to the executor's marking and
  *      the planner equals libpetri's enabled starts and skips there (`StateClassGraph`).
+ *  (a″) key-scoped decision (`tasks/v2-seam-plan.md` decisions 6 and 13): each time the reference's
+ *      `StepSettledHandler` takes a completed or skipped step s at rows S (`onSettled`),
+ *      `scopePlan(R(S), candidateKeys(s))` equals what the handler decides there — ∅ once a row
+ *      has failed, `decideSuccessors(s)` loaded as `planSuccessors` loads it otherwise — as ordered
+ *      queue and skip sequences. On a failed S a non-empty unguarded `decideSuccessors(s)` is
+ *      F2's named race (a failure after `hasFailedSteps`), counted and not compared.
+ *  (a‴) completion (decision 7 as amended after F3 fired at step 2): at every row set S the
+ *      reference reports without a failed row, the net's `isFinished` (every row settled, R(S)
+ *      empty) equals `countSettledSteps ≥ countExpectedSettledSteps`. A row set with a failed row
+ *      is F3's named race (a failure between the planning read and `hasFailedSteps`): `isFinished`
+ *      is false there, and it is counted, with how n8n's count test answered, not compared.
  *
  * A disagreement is a finding: it is printed with a reproduction (entry, trigger, b, o and the
  * row set), never smoothed over. Results are settlement-level evidence, not conformance numbers
@@ -48,13 +59,13 @@ import { fileURLToPath } from 'node:url';
 import { compile } from '../typescript/src/compiler/index.ts';
 import type { CompiledWorkflow } from '../typescript/src/compiler/index.ts';
 import { v2Actions } from '../typescript/src/conformance/v2/binder.ts';
-import { compareLockstep, comparePoint, compareState } from '../typescript/src/conformance/v2/differential.ts';
-import type { PlanKeys } from '../typescript/src/conformance/v2/differential.ts';
+import { compareFinished, compareLockstep, comparePoint, compareScoped, compareState, netPlanAt } from '../typescript/src/conformance/v2/differential.ts';
+import type { PlanKeys, PlanSequence } from '../typescript/src/conformance/v2/differential.ts';
 import { graphToDescription } from '../typescript/src/conformance/v2/graph.ts';
 import type { V2Graph } from '../typescript/src/conformance/v2/graph.ts';
 import { GOLDEN_STAMPED_DIST } from '../typescript/src/conformance/v2/golden.ts';
 import { runV2 } from '../typescript/src/conformance/v2/net-run.ts';
-import { hash, simulate } from '../typescript/src/conformance/v2/reference.ts';
+import { hash, reachableOf, simulate } from '../typescript/src/conformance/v2/reference.ts';
 import type { ReferenceRow, RunResult, SettlementReference, V2Loop } from '../typescript/src/conformance/v2/reference.ts';
 import type { StepRow } from '../typescript/src/codec/v2/step-rows.ts';
 
@@ -112,7 +123,7 @@ const files = [
 const converter = new V1WorkflowConverter();
 
 interface Finding {
-  readonly leg: 'a' | 'b' | 'c';
+  readonly leg: 'a' | 'b' | 'c' | 'a″' | 'a‴';
   readonly entry: string;
   readonly behaviour: number;
   readonly order: number;
@@ -129,6 +140,23 @@ const count = {
   pairs: 0, pairsFailureFree: 0, pairsFailed: 0, pairDisagreements: 0, keysCompared: 0, keysFailedCompared: 0, onlyNet: 0, onlyReference: 0,
   // leg (c)
   netFirings: 0, points: 0, pointDisagreements: 0, pointCodecErrors: 0, pointMarkingDiffs: 0,
+  // leg (a″): reached (S, s) pairs
+  scopedPairs: 0, scopedHalted: 0, scopedRaces: 0, scopedNonEmpty: 0, scopedOrdered: 0, scopedWaiting: 0, scopedDisagreements: 0, scopedCodecErrors: 0,
+  // leg (a‴): every reported S; compared on failure-free S, a failed S counted as F3's named race
+  finishedStates: 0, finishedCompared: 0, finishedBoth: 0, finishedNetOnly: 0, finishedReferenceOnly: 0,
+  finishedDisagreements: 0, finishedCodecErrors: 0,
+  /** Disagreements by n8n's count: `countExpectedSettledSteps` undefined (a loop had not ended), or more steps owed than rows settled. */
+  finishedLoopRunning: 0, finishedRowsOwed: 0,
+  /** Failed S (the race), and those where n8n's count test says finished (the failed step was the last owed). */
+  finishedRaces: 0, finishedRacesCountTrue: 0,
+};
+/** Findings kept per leg; the rest are counted, not stored. */
+const KEEP_FINDINGS = 200;
+const kept = new Map<string, number>();
+const addFinding = (f: Finding) => {
+  const n = kept.get(f.leg) ?? 0;
+  kept.set(f.leg, n + 1);
+  if (n < KEEP_FINDINGS) findings.push(f);
 };
 /**
  * Leg (b) on failed pairs: each row the reference cancelled, as `<status before>-><net's status>`
@@ -141,6 +169,7 @@ const started = performance.now();
 const rowsText = (rows: readonly (StepRow | ReferenceRow)[]) =>
   rows.map((r) => `${r.nodeId}@${r.iteration}=${r.status}${r.status === 'completed' ? `[${r.filledOutputSlots.map(Number).join('')}]` : ''}`).join(' ');
 const planText = (p: PlanKeys | null) => (p === null ? 'n/a' : `queue {${p.toQueue.join(', ')}} skip {${p.toSkip.join(', ')}}`);
+const seqText = (p: PlanSequence | null) => (p === null ? 'n/a' : `queue [${p.toQueue.join(', ')}] skip [${p.toSkip.join(', ')}]`);
 
 for (const file of files) {
   const wf = JSON.parse(readFileSync(file, 'utf8'));
@@ -169,11 +198,12 @@ for (const file of files) {
       compiled = compile(graphToDescription(graph).description, { profile: 'engineV2' });
     } catch (e) {
       count.compileErrors++;
-      findings.push({ leg: 'a', entry: tag, behaviour: -1, order: -1, detail: `compile error: ${(e as Error).message}` });
+      addFinding({ leg: 'a', entry: tag, behaviour: -1, order: -1, detail: `compile error: ${(e as Error).message}` });
       continue;
     }
     count.compiled++;
     const loops: V2Loop[] = deriveLoops(graph);
+    const reachable = reachableOf(reference, graph);
     if (loops.length > 0) count.loopEntries++;
     const batchIds = new Set(graph.nodes.filter((n) => n.type === 'batch').map((n) => n.id));
 
@@ -205,14 +235,54 @@ for (const file of files) {
             if (rows.some((r) => r.status === 'cancelled')) count.statesCancelled++;
             if (rows.some((r) => r.status === 'failed')) count.statesFailed++;
             if (rows.some((r) => batchIds.has(r.nodeId) && r.status === 'completed' && !r.filledOutputSlots.some(Boolean))) count.statesEmptyTerminal++;
+            // (a‴) completion at every S: compared without a failed row, the race counted with one
+            count.finishedStates++;
+            const fin = compareFinished(compiled, reference, loops, reachable, rows);
+            if (fin.failed) {
+              count.finishedRaces++;
+              if (fin.reference) count.finishedRacesCountTrue++;
+            } else count.finishedCompared++;
+            if (fin.net === true && fin.reference) count.finishedBoth++;
+            if (fin.error !== null) count.finishedCodecErrors++;
+            if (fin.agree === false) {
+              count.finishedDisagreements++;
+              if (fin.net === true) count.finishedNetOnly++;
+              if (fin.reference) count.finishedReferenceOnly++;
+              if (fin.expected === undefined) count.finishedLoopRunning++;
+              else if (fin.settled < fin.expected) count.finishedRowsOwed++;
+              addFinding({
+                leg: 'a‴', entry: tag, behaviour: b, order: o, rows,
+                detail: `isFinished ${fin.error !== null ? `threw: ${fin.error}` : String(fin.net)}, countSettled ${fin.settled} >= countExpected ${String(fin.expected)} ${String(fin.reference)}${fin.failed ? ' (a failed row)' : ''}`,
+              });
+            }
+            // (a) R(S)
             const v = compareState(compiled, reference, graph, loops, rows);
             if (v.agree) return;
             count.stateDisagreements++;
             if (v.error !== null) count.stateCodecErrors++;
-            findings.push({
+            addFinding({
               leg: 'a', entry: tag, behaviour: b, order: o, rows: v.rows,
               detail: v.error !== null ? `decode threw: ${v.error}\n      R(S): ${planText(v.reference)}`
                 : `planner ${planText(v.net)}\n      R(S)    ${planText(v.reference)}`,
+            });
+          },
+          // (a″) every (S, s) the handler reaches
+          onSettled: (rows, settled) => {
+            count.scopedPairs++;
+            if (rows.some((r) => r.status === 'waiting')) count.scopedWaiting++;
+            const v = compareScoped(compiled, reference, graph, loops, rows, settled, netPlanAt(compiled, rows));
+            if (v.halted) {
+              count.scopedHalted++;
+              if (v.unguarded.toQueue.length + v.unguarded.toSkip.length > 0) count.scopedRaces++;
+            }
+            if (v.reference.toQueue.length + v.reference.toSkip.length > 0) count.scopedNonEmpty++;
+            if (v.reference.toQueue.length > 1 || v.reference.toSkip.length > 1) count.scopedOrdered++;
+            if (v.agree) return;
+            count.scopedDisagreements++;
+            if (v.error !== null) count.scopedCodecErrors++;
+            addFinding({
+              leg: 'a″', entry: tag, behaviour: b, order: o, rows,
+              detail: `settled ${settled.nodeId}@${settled.iteration}${v.halted ? ' (a failed row)' : ''}: ${v.error !== null ? `decode threw: ${v.error}` : `scoped net ${seqText(v.net)}`}\n      handler     ${seqText(v.reference)}`,
             });
           },
         });
@@ -238,7 +308,7 @@ for (const file of files) {
         else { count.pairsFailureFree++; count.keysCompared += lock.compared; }
         if (!lock.agree) {
           count.pairDisagreements++;
-          findings.push({ leg: 'b', entry: tag, behaviour: b, order: o, rows: net.rows, detail: lock.problems.join('\n      ') });
+          addFinding({ leg: 'b', entry: tag, behaviour: b, order: o, rows: net.rows, detail: lock.problems.join('\n      ') });
         }
 
         // (c) every row-set point of the net run
@@ -250,7 +320,7 @@ for (const file of files) {
           count.pointDisagreements++;
           if (v.error !== null) count.pointCodecErrors++;
           if (v.markingDiff.length > 0) count.pointMarkingDiffs++;
-          findings.push({
+          addFinding({
             leg: 'c', entry: tag, behaviour: b, order: o, rows: v.rows,
             detail: `after firing ${point.firings}: ${v.error !== null ? `decode threw: ${v.error}` : `planner ${planText(v.net)}`}\n      executor ${planText(v.executor)}${v.markingDiff.length > 0 ? `\n      marking ${v.markingDiff.join(', ')}` : ''}`,
           });
@@ -272,11 +342,14 @@ console.log(`(b) lockstep: pairs ${count.pairs} (failure-free ${count.pairsFailu
 const fateText = [...cancelledFates].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([f, n]) => `${f} ${n}`).join(', ');
 console.log(`(b) cancelled on failed pairs, reference status before -> the net's status for the step: ${fateText === '' ? 'none' : fateText}`);
 console.log(`(c) firing:   net firings ${count.netFirings}, row-set points ${count.points}; disagreements ${count.pointDisagreements} (CodecError ${count.pointCodecErrors}, marking differs ${count.pointMarkingDiffs})`);
-console.log(`wall clock ${wall.toFixed(1)} s: leg (a) ${s(time.a)}, net runs ${s(time.net)}, leg (c) ${s(time.c)}`);
-console.log(`findings ${findings.length}`);
+console.log(`(a″) scoped:  reached (S, s) ${count.scopedPairs} (${count.scopedNonEmpty} with a non-empty decision, ${count.scopedOrdered} with two or more keys in one list, ${count.scopedWaiting} beside a waiting row, ${count.scopedHalted} on a failed S, of which ${count.scopedRaces} where unguarded decideSuccessors is non-empty: F2's named race, not compared); disagreements ${count.scopedDisagreements} (CodecError ${count.scopedCodecErrors})`);
+console.log(`(a‴) finished: states ${count.finishedStates}: compared (no failed row) ${count.finishedCompared}, finished by both ${count.finishedBoth}; disagreements ${count.finishedDisagreements} (net only ${count.finishedNetOnly}, count test only ${count.finishedReferenceOnly}; by n8n's count: ${count.finishedLoopRunning} with a loop not ended (expected undefined), ${count.finishedRowsOwed} with fewer rows settled than expected; CodecError ${count.finishedCodecErrors}); with a failed row ${count.finishedRaces}: F3's named race, isFinished false, not compared (n8n's count test true on ${count.finishedRacesCountTrue})`);
+console.log(`wall clock ${wall.toFixed(1)} s (legs (a), (a″) and (a‴) together ${s(time.a)}): net runs ${s(time.net)}, leg (c) ${s(time.c)}`);
+const totalFindings = [...kept.values()].reduce((a, n) => a + n, 0);
+console.log(`findings ${totalFindings}${totalFindings > findings.length ? ` (${findings.length} kept, at most ${KEEP_FINDINGS} per leg: ${[...kept].map(([l, n]) => `(${l}) ${n}`).join(', ')})` : ''}`);
 for (const f of findings) {
   console.log(`  (${f.leg}) ${f.entry} b${f.behaviour} o${f.order}: ${f.detail}`);
   if (f.rows !== undefined) console.log(`      rows ${rowsText(f.rows)}`);
 }
-if (JSON_OUT !== '') writeFileSync(JSON_OUT, JSON.stringify({ count, cancelledFates: Object.fromEntries(cancelledFates), findings }, null, 2));
-process.exitCode = findings.length > 0 ? 1 : 0;
+if (JSON_OUT !== '') writeFileSync(JSON_OUT, JSON.stringify({ count, cancelledFates: Object.fromEntries(cancelledFates), findingsByLeg: Object.fromEntries(kept), findings }, null, 2));
+process.exitCode = totalFindings > 0 ? 1 : 0;

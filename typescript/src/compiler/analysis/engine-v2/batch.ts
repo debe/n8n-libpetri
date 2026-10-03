@@ -2,7 +2,7 @@
  * What makes a node engine v2's `batch` step, and the slots such a step has
  * (`tasks/v2-profile-plan.md` decision 5). The compiler owns these names because the analysis
  * (loops, shape refusals) and the settlement gadget both read them; the stage-1 graph input
- * (`conformance/v2/graph.ts`) builds its batch nodes from the same constants.
+ * (`n8n/v2-graph.ts`) builds its batch nodes from the same constants.
  */
 import type { NodeDescription } from '../../types.js';
 

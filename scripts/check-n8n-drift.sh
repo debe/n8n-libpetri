@@ -7,7 +7,8 @@
 #      patches, in name order, to a throwaway index read from that ref (GIT_INDEX_FILE in a temp
 #      dir). A patch that does not apply is drift a re-pin has to resolve by rebasing.
 #   3. Lists the commits since the pin that touch what the patches rest on
-#      (`workflow-execute.ts`, the scheduler seam files) and n8n's engine v2 (`packages/@n8n/engine`,
+#      (`workflow-execute.ts`, the scheduler seam files, `step-settled-handler.ts` and the engine v2
+#      decision core) and n8n's engine v2 (`packages/@n8n/engine`,
 #      `packages/@n8n/node-engine-compatibility`), each measured to the newest release and to master.
 #
 # Read-only for the checkout: no checkout, no reset, no commit. Exit 0 when every ref applies
@@ -85,8 +86,18 @@ since() {
   g log --oneline --no-merges "$N8N_COMMIT..$to" -- "$@" 2>/dev/null || true
 }
 
+# What the patches rest on: 0001/0002's loop, 0003's handler and the decision core its default
+# policy calls (byte-identical by design; a commit here moves the golden's dist stamp, F8), and
+# 0004's one injection point, createEngineRuntime.
 SEAM=(packages/core/src/execution-engine/workflow-execute.ts
-      packages/core/src/execution-engine/index.ts)
+      packages/core/src/execution-engine/index.ts
+      packages/@n8n/engine/src/execution/step-settled-handler.ts
+      packages/@n8n/engine/src/execution/settlement.ts
+      packages/@n8n/engine/src/execution/completion.ts
+      packages/@n8n/engine/src/execution/loop-ledger.ts
+      packages/@n8n/engine/src/execution/iteration-mapping.ts
+      packages/@n8n/engine/src/graph/loops.ts
+      packages/@n8n/engine/src/runtime/create-engine-runtime.ts)
 ENGINE=(packages/@n8n/engine packages/@n8n/node-engine-compatibility packages/cli/src/modules/engine-v2)
 
 for to in "$newest" origin/master; do

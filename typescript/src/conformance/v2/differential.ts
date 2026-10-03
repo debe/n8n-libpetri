@@ -13,10 +13,19 @@
  * - **(c) firing**, {@link comparePoint}: at every row-set point of a net run, the rows decode to
  *   the executor's marking, and the planner's answer is the set of starts and skips libpetri's
  *   own state-class graph finds enabled at the executor's marking.
+ * - **(a″) key-scoped decision**, {@link compareScoped} (`tasks/v2-seam-plan.md` decisions 6 and
+ *   13): at a reached (S, settled s), the net's R(S) narrowed to s's candidates
+ *   (`settlement/scope.ts`) is what `StepSettledHandler` decides for s — ∅ once a row has failed,
+ *   `decideSuccessors(s)` otherwise — as **ordered** queue and skip sequences.
+ * - **(a‴) completion**, {@link compareFinished} (decision 7 as amended after F3 fired at step 2):
+ *   at a reached S without a failed row, the net's `isFinished` (every row settled, R(S) empty) is
+ *   `finishExecutionIfDone`'s count test. An S with a failed row is F3's named race (a failure
+ *   landing between the planning read and `hasFailedSteps`): counted, not compared.
  *
- * **Nothing is loosened to agree.** Answers are compared as sets of `(node, iteration)` in both
- * lists, because the net answers in declaration order and `decideSuccessors` in edge order; that
- * is the only normalisation. A `CodecError` is a disagreement, not a skip.
+ * **Nothing is loosened to agree.** Legs (a), (b) and (c) compare answers as sets of
+ * `(node, iteration)` in both lists, because the net answers in declaration order and
+ * `decideSuccessors` in edge order; that is the only normalisation. Leg (a″) compares order as
+ * well, because the scoped answer is in edge order. A `CodecError` is a disagreement, not a skip.
  */
 import type { Place } from 'libpetri';
 import { MarkingState, StateClassGraph } from 'libpetri/verification';
@@ -26,7 +35,8 @@ import type { CompiledWorkflow } from '../../compiler/index.js';
 import { messageOf } from '../../internal/errors.js';
 import type { V2Graph } from './graph.js';
 import type { NetPoint, NetRun, PlaceCounts } from './net-run.js';
-import { latestTerminal, referenceAnswer } from './reference.js';
+import { candidateKeys, isFinished, scopePlan } from '../../settlement/scope.js';
+import { handlerPlan, latestTerminal, referenceAnswer, settledCount } from './reference.js';
 import type { ReferencePlan, ReferenceRow, RunResult, SettlementReference, V2Loop } from './reference.js';
 
 /** A plan as two sorted lists of `nodeId@iteration`. */
@@ -47,11 +57,8 @@ const sameKeys = (a: PlanKeys, b: PlanKeys): boolean =>
 
 /** The planner's answer at a row set, or the `CodecError` (any throw) the decoder raised. */
 function netAnswer(compiled: CompiledWorkflow, rows: readonly StepRow[]): { plan: PlanKeys } | { error: string } {
-  try {
-    return { plan: planKeys(planFromMarking(compiled, decodeStepRows(compiled, rows))) };
-  } catch (e) {
-    return { error: messageOf(e) };
-  }
+  const net = netPlanAt(compiled, rows);
+  return 'plan' in net ? { plan: planKeys(net.plan) } : net;
 }
 
 // ---- (a) state ----
@@ -277,4 +284,119 @@ export function comparePoint(compiled: CompiledWorkflow, point: NetPoint): Point
   }
   if (net !== null && markingDiff.length === 0 && sameKeys(net, executor)) return { agree: true };
   return { agree: false, rows: point.rows, executor, net, error, markingDiff: markingDiff.sort() };
+}
+
+// ---- (a″) key-scoped decision and (a‴) completion ----
+
+/** A plan as two lists of `nodeId@iteration` in the plan's own order: order is compared too. */
+export interface PlanSequence {
+  readonly toQueue: readonly string[];
+  readonly toSkip: readonly string[];
+}
+
+/** `plan` as ordered keys. */
+export function planSequence(plan: StepPlan | ReferencePlan): PlanSequence {
+  return { toQueue: plan.toQueue.map(keyOf), toSkip: plan.toSkip.map(keyOf) };
+}
+
+const sameSequence = (a: PlanSequence, b: PlanSequence): boolean =>
+  a.toQueue.join(' ') === b.toQueue.join(' ') && a.toSkip.join(' ') === b.toSkip.join(' ');
+
+/** R(S) from the net at `rows`, or the decoder's refusal. Shared by the legs at one S. */
+export type NetPlanAt = { readonly plan: StepPlan } | { readonly error: string };
+
+/** `planFromMarking(decodeStepRows(rows))`, or the error it threw. */
+export function netPlanAt(compiled: CompiledWorkflow, rows: readonly StepRow[]): NetPlanAt {
+  try {
+    return { plan: planFromMarking(compiled, decodeStepRows(compiled, rows)) };
+  } catch (e) {
+    return { error: messageOf(e) };
+  }
+}
+
+/** Leg (a″) at one (S, s). */
+export interface ScopedVerdict {
+  readonly agree: boolean;
+  /**
+   * S has a failed row. `StepSettledHandler` then fails the execution (`hasFailedSteps`) and plans
+   * nothing, so n8n's answer is ∅; the net's is ∅ too, `_halt` inhibiting every start and skip.
+   */
+  readonly halted: boolean;
+  /** What the handler decides for s at S: ∅ when halted, `decideSuccessors(s)` otherwise. */
+  readonly reference: PlanSequence;
+  /**
+   * `decideSuccessors(s)` with no failure check. On a halted S a non-empty answer is
+   * `tasks/v2-seam-plan.md` F2's named race (a failure landing after `hasFailedSteps`, where
+   * `createSteps` refuses n8n's rows): counted, never compared.
+   */
+  readonly unguarded: PlanSequence;
+  /** `scopePlan(R(S), candidateKeys(s))`, or `null` when decoding threw. */
+  readonly net: PlanSequence | null;
+  readonly error: string | null;
+}
+
+/**
+ * Leg (a″): at the rows `rows` and the settled step `settled` (completed or skipped), the net's
+ * R(S) scoped to `settled`'s candidates against `StepSettledHandler`'s decision, keys and order
+ * both. `net` is R(S) when the caller has it already.
+ */
+export function compareScoped(
+  compiled: CompiledWorkflow,
+  ref: SettlementReference,
+  graph: V2Graph,
+  loops: readonly V2Loop[],
+  rows: readonly ReferenceRow[],
+  settled: StepKey,
+  net: NetPlanAt = netPlanAt(compiled, rows),
+): ScopedVerdict {
+  const halted = rows.some((r) => r.status === 'failed');
+  const unguarded = planSequence(handlerPlan(ref, graph, loops, rows, settled));
+  const reference = halted ? { toQueue: [], toSkip: [] } : unguarded;
+  if ('error' in net) return { agree: false, halted, reference, unguarded, net: null, error: net.error };
+  const scoped = planSequence(scopePlan(net.plan, candidateKeys(graph, settled, rows)));
+  return { agree: sameSequence(scoped, reference), halted, reference, unguarded, net: scoped, error: null };
+}
+
+/** Leg (a‴) at one S. */
+export interface FinishedVerdict {
+  /**
+   * `isFinished` equals the count test; `null` when S has a failed row and decoded, because that
+   * S is F3's named race and is not compared. A decoder throw is `false`, failed S or not.
+   */
+  readonly agree: boolean | null;
+  /**
+   * S has a failed row. n8n reaches `finishExecutionIfDone` on it only in F3's named race, and
+   * `isFinished` is false on it by decision 7 as amended, leaving the end to the failure's own
+   * settlement (`failExecution`).
+   */
+  readonly failed: boolean;
+  /** `finishExecutionIfDone`'s test: `countSettledSteps ≥ countExpectedSettledSteps`, false while a loop runs. */
+  readonly reference: boolean;
+  /** The two numbers the test compares. */
+  readonly settled: number;
+  readonly expected: number | undefined;
+  /** Decision 7's `isFinished` (false on a failed S); `null` when decoding threw. */
+  readonly net: boolean | null;
+  readonly error: string | null;
+}
+
+/**
+ * Leg (a‴): at the rows `rows`, the net's `isFinished` against n8n's count test, compared only
+ * where no row has failed. `reachable` is the trigger and its descendants (`reachableOf`); `net`
+ * is R(S) when the caller has it already.
+ */
+export function compareFinished(
+  compiled: CompiledWorkflow,
+  ref: SettlementReference,
+  loops: readonly V2Loop[],
+  reachable: ReadonlySet<string>,
+  rows: readonly ReferenceRow[],
+  net: NetPlanAt = netPlanAt(compiled, rows),
+): FinishedVerdict {
+  const failed = rows.some((r) => r.status === 'failed');
+  const { settled, expected } = settledCount(ref, loops, reachable, rows);
+  const reference = expected !== undefined && settled >= expected;
+  if ('error' in net) return { agree: false, failed, reference, settled, expected, net: null, error: net.error };
+  const finished = isFinished(rows, net.plan);
+  return { agree: failed ? null : finished === reference, failed, reference, settled, expected, net: finished, error: null };
 }

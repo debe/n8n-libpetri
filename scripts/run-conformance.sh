@@ -11,7 +11,19 @@
 #   core              n8n-core      whole package          baseline-core.junit.xml, legacy-core, libpetri-core
 #   workflow          n8n-workflow  whole package          baseline-workflow.junit.xml, legacy-workflow, …
 #   cli               n8n           whole package          baseline-cli.junit.xml, legacy-cli, …
+#   engine            @n8n/engine   unit config            baseline-engine.junit.xml, legacy-engine
+#   compat            @n8n/node-engine-compatibility, unit config
+#                                                          baseline-compat.junit.xml, legacy-compat
+#   cli-v2            n8n           src/modules/engine-v2, src/services/__tests__/engine-v2-dispatcher
+#                                                          baseline-cli-v2.junit.xml, legacy-cli-v2
 #   all               execution-engine, then core, then workflow, in one run
+#
+# engine, compat and cli-v2 are the engine v2 scopes that need no Postgres; what their unit
+# configs leave out, and why, is listed in bootstrap-n8n.sh's header. They carry no v1
+# scheduler seam (none of them constructs a WorkflowExecute), so their libpetri leg is **not
+# applicable**; their legacy leg is a neutrality leg: the patched tree with nothing registered
+# against the unpatched baseline. compat and cli-v2 load n8n-core and @n8n/engine from dist,
+# so like `cli` they rebuild their chain first and the legs run against the patched dists.
 #
 # `cli` needs its own install and build (see bootstrap-n8n.sh --scope=cli): its vitest loads
 # every workspace package from dist and its globalSetup dies without them. It is not in
@@ -36,9 +48,10 @@
 #
 # Not applicable and skipped do not set the exit status; they are printed, not hidden.
 #
-#   1. scripts/verify-patch.sh puts the two patches onto the pinned commit in .n8n/
+#   1. scripts/verify-patch.sh puts the patches onto the pinned commit in .n8n/
 #      (skipped with --skip-patch; the tree must then already be patched). With --typecheck
-#      it also typechecks and builds packages/core on the patched tree first.
+#      it also typechecks and builds n8n-core, @n8n/engine and the compat package on the
+#      patched tree first.
 #   2. For each engine, the suite runs with CI=true (junit reporter on) and
 #      N8N_EXECUTION_ENGINE=<engine>; the junit lands in conformance-results/<label>.junit.xml.
 #        legacy    StackScheduler, i.e. n8n's own loop behind the seam. Must be identical to
@@ -86,7 +99,8 @@
 # junit.
 #
 # Flags: --skip-patch --typecheck --engines=legacy,libpetri --budget=N --scope=NAME -h|--help
-# Env:   N8N_DIR (default <repo>/.n8n), N8N_TEST_FILTER (overrides the scope's path filter),
+# Env:   N8N_DIR (default <repo>/.n8n), N8N_TEST_FILTER (overrides the scope's path filters;
+#        space-separated, each one a vitest path filter),
 #        LIBPETRI_HOOK (default <repo>/typescript/dist/n8n-vitest-setup.js)
 set -euo pipefail
 
@@ -130,16 +144,21 @@ for arg in "$@"; do
   esac
 done
 
-# scope_table <name> — sets SCOPE_PKG / SCOPE_DIR / SCOPE_FILTER / SCOPE_SUFFIX / SCOPE_SEAM.
+# scope_table <name> — sets SCOPE_PKG / SCOPE_DIR / SCOPE_FILTER / SCOPE_SUFFIX / SCOPE_SEAM /
+# SCOPE_BUILD (the turbo target to rebuild before the legs, empty for none) and FILTER_ARGS.
 # Kept identical to the one in bootstrap-n8n.sh: a leg and the baseline it is compared to
 # must be the same package and the same filter, or the matrix compares two case sets.
 scope_table() {
   case "$1" in
-    execution-engine) SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=src/execution-engine; SCOPE_SUFFIX=;           SCOPE_SEAM=alias ;;
-    core)             SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=;                     SCOPE_SUFFIX=-core;      SCOPE_SEAM=alias ;;
-    workflow)         SCOPE_PKG=n8n-workflow; SCOPE_DIR=packages/workflow; SCOPE_FILTER=;                     SCOPE_SUFFIX=-workflow;  SCOPE_SEAM=none ;;
-    cli)              SCOPE_PKG=n8n;          SCOPE_DIR=packages/cli;      SCOPE_FILTER=;                     SCOPE_SUFFIX=-cli;       SCOPE_SEAM=package ;;
-    *) echo "unknown --scope: $1 (execution-engine, core, workflow, cli, all)" >&2; exit 2 ;;
+    execution-engine) SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=src/execution-engine; SCOPE_SUFFIX=;           SCOPE_SEAM=alias;   SCOPE_BUILD= ;;
+    core)             SCOPE_PKG=n8n-core;     SCOPE_DIR=packages/core;     SCOPE_FILTER=;                     SCOPE_SUFFIX=-core;      SCOPE_SEAM=alias;   SCOPE_BUILD= ;;
+    workflow)         SCOPE_PKG=n8n-workflow; SCOPE_DIR=packages/workflow; SCOPE_FILTER=;                     SCOPE_SUFFIX=-workflow;  SCOPE_SEAM=none;    SCOPE_BUILD= ;;
+    cli)              SCOPE_PKG=n8n;          SCOPE_DIR=packages/cli;      SCOPE_FILTER=;                     SCOPE_SUFFIX=-cli;       SCOPE_SEAM=package; SCOPE_BUILD=n8n ;;
+    engine)           SCOPE_PKG=@n8n/engine;  SCOPE_DIR=packages/@n8n/engine; SCOPE_FILTER=;                  SCOPE_SUFFIX=-engine;    SCOPE_SEAM=none;    SCOPE_BUILD=@n8n/engine ;;
+    compat)           SCOPE_PKG=@n8n/node-engine-compatibility; SCOPE_DIR=packages/@n8n/node-engine-compatibility; SCOPE_FILTER=; SCOPE_SUFFIX=-compat; SCOPE_SEAM=none; SCOPE_BUILD=@n8n/node-engine-compatibility ;;
+    # vitest path filters are substrings of the file path; the dispatcher's test is under __tests__.
+    cli-v2)           SCOPE_PKG=n8n;          SCOPE_DIR=packages/cli;      SCOPE_FILTER="src/modules/engine-v2 src/services/__tests__/engine-v2-dispatcher"; SCOPE_SUFFIX=-cli-v2; SCOPE_SEAM=none; SCOPE_BUILD=n8n ;;
+    *) echo "unknown --scope: $1 (execution-engine, core, workflow, cli, engine, compat, cli-v2, all)" >&2; exit 2 ;;
   esac
   # Where the generated shim and the generated vitest config live, and which config they
   # extend: n8n-core's is `./vite.config`, packages/cli's is `./vitest.config`.
@@ -147,6 +166,8 @@ scope_table() {
   LIBPETRI_CFG_REL="$SCOPE_DIR/vitest.libpetri.config.mts"
   [ "$SCOPE_DIR" = packages/cli ] && LIBPETRI_BASE_CFG=./vitest.config || LIBPETRI_BASE_CFG=./vite.config
   SCOPE_FILTER="${N8N_TEST_FILTER:-$SCOPE_FILTER}"
+  # One vitest positional argument per filter; none at all is the package's whole suite.
+  read -r -a FILTER_ARGS <<< "$SCOPE_FILTER"
 }
 case "$SCOPE" in
   all) SCOPES=(execution-engine core workflow) ;;
@@ -190,7 +211,7 @@ run_suite() {
   # N8N_LIBPETRI_BUDGET is read by setupN8nVitest() in the shim; the legacy leg ignores it.
   (cd "$N8N_DIR" && CI=true N8N_EXECUTION_ENGINE="$engine" N8N_LIBPETRI_BUDGET="$BUDGET" \
       N8N_LIBPETRI_DIAGNOSTICS="$diagnostics" \
-      pnpm --filter "$SCOPE_PKG" run test ${SCOPE_FILTER:+"$SCOPE_FILTER"} "$@") \
+      pnpm --filter "$SCOPE_PKG" run test ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} "$@") \
     > "$RESULTS/$label.test.log" 2>&1 || rc=$?
   [ -f "$junit" ] || die "$label: vitest produced no junit.xml (rc=$rc); see $RESULTS/$label.test.log"
   mv "$junit" "$RESULTS/$label.junit.xml"
@@ -310,15 +331,17 @@ run_scope() {
   log "===== scope $scope ($SCOPE_PKG, filter '${SCOPE_FILTER:-<whole package>}')"
   [ -f "$baseline" ] \
     || die "no $baseline; run scripts/bootstrap-n8n.sh --scope=$scope on the unpatched tree first"
-  # packages/cli loads every workspace package from its built dist, so the dist has to match
-  # the patch state the legs run under — otherwise the run silently compares the wrong tree.
-  # turbo caches on content, so this is a replay (seconds) when nothing changed.
-  if [ "$SCOPE_SEAM" = package ]; then
-    log "$scope: building the $SCOPE_PKG chain so its dists match the patched tree"
+  # packages/cli, compat and engine load workspace packages from their built dist, so the
+  # dist has to match the patch state the legs run under — otherwise the run silently
+  # compares the wrong tree. turbo caches on content, so this is a replay (seconds) when
+  # nothing changed.
+  if [ -n "$SCOPE_BUILD" ]; then
+    local build_log="$RESULTS/${SCOPE_BUILD//\//_}$SCOPE_SUFFIX.build.log"
+    log "$scope: building the $SCOPE_BUILD chain so its dists match the patched tree"
     (cd "$N8N_DIR" && DO_NOT_TRACK=1 TURBO_TELEMETRY_DISABLED=1 \
-        pnpm exec turbo run build --filter="$SCOPE_PKG" --output-logs=errors-only) \
-      > "$RESULTS/$SCOPE_PKG$SCOPE_SUFFIX.build.log" 2>&1 \
-      || die "$scope: turbo build failed; see $RESULTS/$SCOPE_PKG$SCOPE_SUFFIX.build.log"
+        pnpm exec turbo run build --filter="$SCOPE_BUILD" --output-logs=errors-only) \
+      > "$build_log" 2>&1 \
+      || die "$scope: turbo build failed; see $build_log"
   fi
 
   for engine in "${engines[@]}"; do
@@ -396,7 +419,9 @@ run_scope() {
   for engine in "${engines[@]}"; do
     label="$engine$SCOPE_SUFFIX"
     [ "$engine" = libpetri ] && label=$libpetri_label
-    [ -f "$RESULTS/$label.matrix.md" ] && { log "$label: $(sed -n '3p' "$RESULTS/$label.matrix.md")"; }
+    # An `if`, not `[ … ] && …`: a leg that wrote no matrix (not applicable, skipped) would
+    # otherwise end the function with status 1, and errexit turns that into the run's exit.
+    if [ -f "$RESULTS/$label.matrix.md" ]; then log "$label: $(sed -n '3p' "$RESULTS/$label.matrix.md")"; fi
   done
 }
 

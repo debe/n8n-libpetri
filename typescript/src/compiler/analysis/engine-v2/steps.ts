@@ -4,7 +4,7 @@
  * runs `v1-node` steps and throws `UnimplementedError` for anything else but `batch`, before the
  * step's `try`, so such a step is never settled: it stays `running`. The compiler owns their node
  * types because the `engineV2` analysis refuses them by these types (`v2-unsupported-step`,
- * `nodes.ts`); the stage-1 graph input (`conformance/v2/graph.ts`) gives the steps these types.
+ * `nodes.ts`); the stage-1 graph input (`n8n/v2-graph.ts`) gives the steps these types.
  */
 import type { NodeDescription } from '../../types.js';
 

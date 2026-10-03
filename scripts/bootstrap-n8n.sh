@@ -22,6 +22,35 @@
 #   core              n8n-core in full (102 test files)            baseline-core.junit.xml
 #   workflow          n8n-workflow in full (85 test files)         baseline-workflow.junit.xml
 #   cli               n8n (packages/cli, 1501 test files)          baseline-cli.junit.xml
+#   engine            @n8n/engine, unit config                     baseline-engine.junit.xml
+#   compat            @n8n/node-engine-compatibility, unit config  baseline-compat.junit.xml
+#   cli-v2            n8n, filters src/modules/engine-v2 and       baseline-cli-v2.junit.xml
+#                     src/services/__tests__/engine-v2-dispatcher
+#
+# engine, compat and cli-v2 are the engine v2 scopes that need no Postgres
+# (tasks/v2-seam-plan.md step 3). They run each package's own `test` script, i.e. its
+# vitest.config.ts, which already excludes `**/*.integration.test.ts`; nothing is excluded
+# on top of that. What that leaves out, and why:
+#
+#   engine   6 integration files (vitest.integration.config.ts). Five start a Postgres through
+#            `new PostgreSqlContainer(...)` (testcontainers, i.e. Docker):
+#              src/database/__tests__/workflow-execution.integration.test.ts
+#              src/database/__tests__/workflow-step-execution.integration.test.ts
+#              src/execution/__tests__/execution-start.integration.test.ts
+#              src/execution/__tests__/step-execution.integration.test.ts
+#              src/server/__tests__/workflow-executions.integration.test.ts
+#            and one needs none but is in the same config, so it waits for the engine-int scope:
+#              src/testing/__tests__/start-engine-server.integration.test.ts (1 case)
+#   compat   1 integration file, src/__tests__/m1-acceptance.integration.test.ts (16 cases),
+#            which starts a Postgres through testcontainers.
+#   cli-v2   the unit config (vitest.config.ts) already excludes `**/*.integration.test.ts`
+#            and test/integration/; the filters select 21 + 1 unit files (365 cases at
+#            944afe5). The v2 tests outside the two filters (src/executions, src/webhooks,
+#            src/workflows/triggers and test/integration/engine-v2-*) are not in this scope;
+#            the whole-package `cli` scope runs the unit ones.
+#
+# The integration scopes (engine-int, compat-int) are plan step 9 and need a Postgres
+# provider; they are not here.
 #
 # `cli` needs its own install and its own build: the default install is the workspace closure
 # of n8n-nodes-base, which does not contain packages/cli (`pnpm install --frozen-lockfile
@@ -34,7 +63,8 @@
 # conformance-results/bootstrap.log if your shell has a wall-clock cap.
 #
 # Flags: --skip-install --skip-build --skip-test --full-install --allow-dirty --scope=NAME -h|--help
-# Env:   N8N_DIR (default <repo>/.n8n), N8N_TEST_FILTER (overrides the scope's path filter),
+# Env:   N8N_DIR (default <repo>/.n8n), N8N_TEST_FILTER (overrides the scope's path filters;
+#        space-separated, each one a vitest path filter),
 #        COREPACK_VERSION (fallback corepack used through npx when none is on PATH; Node ≥ 25 no
 #        longer ships one), COREPACK_HOME (corepack's own cache, default ~/.cache/node/corepack).
 #
@@ -81,9 +111,20 @@ case "$SCOPE" in
   # n8n-nodes-base chain — has to be built, or globalSetup dies while vite inlines TypeORM
   # entity sources. Building n8n covers it.
   cli)              SCOPE_PKG=n8n;          SCOPE_DIR=packages/cli;      SCOPE_FILTER=;                     SCOPE_SUFFIX=-cli; BUILD_TARGET=n8n ;;
-  *) echo "unknown --scope: $SCOPE (execution-engine, core, workflow, cli)" >&2; exit 2 ;;
+  # The engine v2 scopes (see the header). @n8n/engine's tests load its own src and the
+  # @n8n/* packages it depends on from dist; compat loads @n8n/engine, n8n-core and
+  # n8n-nodes-base from dist, so its build target is itself (turbo's `^build` follows devDeps
+  # too); cli-v2 is packages/cli, which needs the whole n8n chain like `cli`.
+  engine)           SCOPE_PKG=@n8n/engine;  SCOPE_DIR=packages/@n8n/engine; SCOPE_FILTER=;                SCOPE_SUFFIX=-engine; BUILD_TARGET=@n8n/engine ;;
+  compat)           SCOPE_PKG=@n8n/node-engine-compatibility; SCOPE_DIR=packages/@n8n/node-engine-compatibility; SCOPE_FILTER=; SCOPE_SUFFIX=-compat; BUILD_TARGET=@n8n/node-engine-compatibility ;;
+  # vitest path filters are substrings of the file path, and the dispatcher's test lives in
+  # src/services/__tests__/, so `src/services/engine-v2-dispatcher` would match nothing.
+  cli-v2)           SCOPE_PKG=n8n;          SCOPE_DIR=packages/cli;      SCOPE_FILTER="src/modules/engine-v2 src/services/__tests__/engine-v2-dispatcher"; SCOPE_SUFFIX=-cli-v2; BUILD_TARGET=n8n ;;
+  *) echo "unknown --scope: $SCOPE (execution-engine, core, workflow, cli, engine, compat, cli-v2)" >&2; exit 2 ;;
 esac
 N8N_TEST_FILTER="${N8N_TEST_FILTER:-$SCOPE_FILTER}"
+# One vitest positional argument per filter; none at all is the package's whole suite.
+read -r -a FILTER_ARGS <<< "$N8N_TEST_FILTER"
 
 # --- helpers ---------------------------------------------------------------------------------
 log() { printf '[bootstrap %s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
@@ -225,10 +266,20 @@ build_chain() {
   # TypeScript 7 (tsgo) per the `typescript` catalog, so the type-checked build is already fast.
   export DO_NOT_TRACK=1 TURBO_TELEMETRY_DISABLED=1
   pnpm exec turbo run build --filter="$BUILD_TARGET" --output-logs=new-only
-  local f
-  for f in packages/workflow/dist/cjs/index.js packages/@n8n/vitest-config/dist/node-decorators.js \
-           packages/core/dist/index.js packages/nodes-base/dist/known/nodes.json \
-           packages/nodes-base/dist/nodes/If/If.node.js; do
+  local f expect
+  # What the scope's tests load from dist. @n8n/engine depends on neither n8n-workflow nor
+  # n8n-core, so its target builds neither and only its own chain is checked.
+  case "$BUILD_TARGET" in
+    @n8n/engine) expect=(packages/@n8n/vitest-config/dist/node.js packages/@n8n/engine/dist/index.js) ;;
+    *)           expect=(packages/workflow/dist/cjs/index.js packages/@n8n/vitest-config/dist/node-decorators.js
+                         packages/core/dist/index.js packages/nodes-base/dist/known/nodes.json
+                         packages/nodes-base/dist/nodes/If/If.node.js) ;;
+  esac
+  case "$BUILD_TARGET" in
+    @n8n/node-engine-compatibility|n8n)
+      expect+=(packages/@n8n/engine/dist/index.js packages/@n8n/node-engine-compatibility/dist/index.js) ;;
+  esac
+  for f in "${expect[@]}"; do
     [ -f "$N8N_DIR/$f" ] || die "$f missing after build"
   done
   log "build ok"
@@ -243,7 +294,7 @@ run_baseline() {
   # CI=true makes @n8n/vitest-config add the junit reporter (outputFile ./junit.xml, relative to
   # the package root) and cap the fork pool at 50 % of the cores. Positional arg = path filter;
   # an empty filter is passed as no argument at all, which is the package's whole suite.
-  CI=true pnpm --filter "$SCOPE_PKG" run test ${N8N_TEST_FILTER:+"$N8N_TEST_FILTER"} || rc=$?
+  CI=true pnpm --filter "$SCOPE_PKG" run test ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} || rc=$?
   [ -f "$junit" ] || die "vitest produced no junit.xml (rc=$rc)"
   mv "$junit" "$out.junit.xml"
   node - "$out.junit.xml" "${N8N_TEST_FILTER:-<whole package>} ($SCOPE_PKG, scope $SCOPE)" > "$out.summary.txt" <<'NODE'

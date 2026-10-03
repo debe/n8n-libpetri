@@ -45,6 +45,10 @@
       "import": "./dist/codec.js",
       "types": "./dist/codec.d.ts"
     },
+    "./n8n-v2": {
+      "import": "./dist/n8n-v2.js",
+      "types": "./dist/n8n-v2.d.ts"
+    },
     "./n8n-vitest-setup": {
       "import": "./dist/n8n-vitest-setup.js",
       "types": "./dist/n8n-vitest-setup.d.ts"

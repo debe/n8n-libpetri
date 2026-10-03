@@ -47,7 +47,7 @@
  *   have been the last to settle. Rows v2 created before it saw the failure then replay.
  *
  * Rows use n8n's graph node ids. A description built by `graphToDescription`
- * (`conformance/v2/graph.ts`) keeps them as node ids, so a row's `nodeId` is its
+ * (`n8n/v2-graph.ts`) keeps them as node ids, so a row's `nodeId` is its
  * {@link SettlementGadget}`.id`.
  *
  * The decoder is exact and refuses rather than guesses: every refusal is a {@link CodecError}

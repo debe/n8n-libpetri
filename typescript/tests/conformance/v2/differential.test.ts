@@ -7,19 +7,25 @@
  * (rules 2–4 without loops), so legs (a) and (b) run on the shapes without a loop. Leg (c) needs no
  * reference and runs on every graph, loops included. Each comparison is also shown to *catch* a
  * disagreement: a doctored reference, run or point must not compare equal.
+ *
+ * Legs (a″) and (a‴) (`tasks/v2-seam-plan.md` decision 13) run the same way on the stub. Leg (a‴)
+ * follows decision 7 as amended after F3 fired at step 2: `isFinished` is false on a row set with a
+ * failed row, and such a row set is F3's named race, counted (`agree: null`) and not compared.
  */
 import { describe, expect, it } from 'vitest';
 import { compile, DONE_SLOT, LOOP_SLOT } from '../../../src/compiler/index.js';
 import type { CompiledWorkflow } from '../../../src/compiler/index.js';
 import { outcomePolicy, v2Actions } from '../../../src/conformance/v2/binder.js';
-import { compareLockstep, comparePoint, compareState, executorPlan } from '../../../src/conformance/v2/differential.js';
+import {
+  compareFinished, compareLockstep, comparePoint, compareScoped, compareState, executorPlan, netPlanAt,
+} from '../../../src/conformance/v2/differential.js';
 import { graphToDescription } from '../../../src/conformance/v2/graph.js';
 import type { V2Graph } from '../../../src/conformance/v2/graph.js';
 import { runV2 } from '../../../src/conformance/v2/net-run.js';
 import type { NetRun } from '../../../src/conformance/v2/net-run.js';
-import { outcome, simulate } from '../../../src/conformance/v2/reference.js';
+import { outcome, reachableOf, simulate } from '../../../src/conformance/v2/reference.js';
 import type { Behaviour, ReferenceRow, SettlementReference } from '../../../src/conformance/v2/reference.js';
-import { ACCEPTED, branchDiamond, chain, loop, SETTLEMENT_SHAPES, switchFanOut } from '../../fixtures/v2-graphs.js';
+import { ACCEPTED, branchDiamond, chain, loop, SETTLEMENT_SHAPES, switchFanOut, threeInputMerge } from '../../fixtures/v2-graphs.js';
 import { stub } from '../../fixtures/v2-stub-reference.js';
 
 const compileV2 = (graph: V2Graph): CompiledWorkflow => compile(graphToDescription(graph).description, { profile: 'engineV2' });
@@ -251,5 +257,134 @@ describe('compareLockstep catches a disagreement', () => {
     const flipped = net.rows.map((r, j) => (j === i ? { ...r, filledOutputSlots: r.filledOutputSlots.map((x) => !x) } : r));
     const v = compareLockstep(stub, branchDiamond, [], c, ref, { ...net, rows: flipped });
     expect(v.problems.some((p) => p.startsWith('If#0=completed filled slots'))).toBe(true);
+  });
+});
+
+// ---- (a″) and (a‴), stub reference ----
+
+describe.each(NO_LOOP)('legs (a″) and (a‴) on %s (stub reference)', (_name, graph) => {
+  const c = compileV2(graph);
+  const reachable = reachableOf(stub, graph);
+  const behaviours = (seed: number): Behaviour[] => [behaviourOf(seed), { ...behaviourOf(seed), pWait: 0.5 }];
+
+  it('(a″) at every (S, s) the handler takes, the scoped net plan is its decision, in order', () => {
+    let pairs = 0;
+    let halted = 0;
+    for (const seed of SEEDS) {
+      for (const b of behaviours(seed)) {
+        for (let order = 0; order < 4; order++) {
+          simulate(stub, graph, b, order, {
+            onSettled: (rows, settled) => {
+              pairs++;
+              const v = compareScoped(c, stub, graph, [], rows, settled);
+              if (v.halted) halted++;
+              expect(v, `seed ${seed} order ${order} settled ${settled.nodeId}`).toMatchObject({ agree: true, error: null });
+            },
+          });
+        }
+      }
+    }
+    expect(pairs).toBeGreaterThan(SEEDS.length * 8);
+    expect(halted).toBeGreaterThanOrEqual(0);
+  });
+
+  it('(a‴) at every S without a failed row, isFinished is the count test; one with a failed row is the race, not compared', () => {
+    let finished = 0;
+    for (const seed of SEEDS) {
+      for (const b of behaviours(seed)) {
+        for (let order = 0; order < 4; order++) {
+          simulate(stub, graph, b, order, {
+            onState: (rows) => {
+              const v = compareFinished(c, stub, [], reachable, rows);
+              expect(v.error).toBeNull();
+              if (v.reference && !v.failed) finished++;
+              if (!v.failed) expect(v.agree, `seed ${seed} order ${order}`).toBe(true);
+              else expect(v).toMatchObject({ agree: null, net: false });
+            },
+          });
+        }
+      }
+    }
+    expect(finished).toBeGreaterThan(0);
+  });
+});
+
+describe('compareScoped', () => {
+  const row = (nodeId: string, iteration: number, status: ReferenceRow['status'], filledOutputSlots: boolean[] = []): ReferenceRow =>
+    ({ nodeId, iteration, id: `${nodeId}:${iteration}`, status, filledOutputSlots });
+  const c = compileV2(threeInputMerge);
+  const S = [row('T', 0, 'completed', [true])];
+  const T = { nodeId: 'T', iteration: 0 };
+
+  it('compares order: three queued keys in edge order agree, the same keys reversed do not', () => {
+    expect(compareScoped(c, stub, threeInputMerge, [], S, T)).toEqual({
+      agree: true, halted: false, error: null,
+      reference: { toQueue: ['A@0', 'B@0', 'C@0'], toSkip: [] },
+      unguarded: { toQueue: ['A@0', 'B@0', 'C@0'], toSkip: [] },
+      net: { toQueue: ['A@0', 'B@0', 'C@0'], toSkip: [] },
+    });
+    const reversed: SettlementReference = {
+      ...stub,
+      decideSuccessors: (...args) => { const p = stub.decideSuccessors(...args); return { toQueue: [...p.toQueue].reverse(), toSkip: p.toSkip }; },
+    };
+    const v = compareScoped(c, reversed, threeInputMerge, [], S, T);
+    expect(v.agree).toBe(false);
+    expect(v.reference.toQueue).toEqual(['C@0', 'B@0', 'A@0']);
+    expect(v.net!.toQueue).toEqual(['A@0', 'B@0', 'C@0']);
+  });
+
+  it('on a failed S takes the handler\'s answer, ∅, and keeps the unguarded decideSuccessors apart', () => {
+    const failed = [...S, row('A', 0, 'completed', [true]), row('B', 0, 'failed'), row('C', 0, 'completed', [true])];
+    const v = compareScoped(c, stub, threeInputMerge, [], failed, { nodeId: 'C', iteration: 0 });
+    expect(v).toMatchObject({ agree: true, halted: true, reference: { toQueue: [], toSkip: [] }, net: { toQueue: [], toSkip: [] } });
+    expect(v.unguarded).toEqual({ toQueue: ['M@0'], toSkip: [] });
+  });
+
+  it('reports a row set that does not decode, and uses an R(S) handed in', () => {
+    const v = compareScoped(c, stub, threeInputMerge, [], [...S, row('A', 0, 'cancelled')], T);
+    expect(v.agree).toBe(false);
+    expect(v.net).toBeNull();
+    expect(v.error).toMatch(/cancelled but no row failed/);
+    const none = compareScoped(c, stub, threeInputMerge, [], S, T, { plan: { toQueue: [], toSkip: [] } });
+    expect(none.agree).toBe(false);
+    expect(none.net).toEqual({ toQueue: [], toSkip: [] });
+  });
+});
+
+describe('compareFinished', () => {
+  const row = (nodeId: string, iteration: number, status: ReferenceRow['status'], filledOutputSlots: boolean[] = []): ReferenceRow =>
+    ({ nodeId, iteration, id: `${nodeId}:${iteration}`, status, filledOutputSlots });
+  const c = compileV2(chain);
+  const reachable = reachableOf(stub, chain);
+
+  it('agrees on a finished run and on one still in flight', () => {
+    const done = [row('T', 0, 'completed', [true]), row('A', 0, 'completed', [false]), row('B', 0, 'skipped')];
+    expect(compareFinished(c, stub, [], reachable, done)).toEqual({ agree: true, failed: false, reference: true, settled: 3, expected: 3, net: true, error: null });
+    const waiting = [done[0]!, row('A', 0, 'completed', [true]), row('B', 0, 'waiting')];
+    expect(compareFinished(c, stub, [], reachable, waiting)).toMatchObject({ agree: true, reference: false, net: false });
+  });
+
+  it('counts the smallest failed S, T -> A -> B with A failed, as the race: isFinished false, not compared', () => {
+    const early = [row('T', 0, 'completed', [true]), row('A', 0, 'failed')];
+    expect(compareFinished(c, stub, [], reachable, early)).toEqual({
+      agree: null, failed: true, reference: false, settled: 2, expected: 3, net: false, error: null,
+    });
+    expect(compareFinished(c, stub, [], reachable, early, netPlanAt(c, early)).agree).toBeNull();
+  });
+
+  it('counts a failed S with nothing left owed as the race too, though the count test says finished there', () => {
+    const last = [row('T', 0, 'completed', [true]), row('A', 0, 'completed', [true]), row('B', 0, 'failed')];
+    expect(compareFinished(c, stub, [], reachable, last)).toMatchObject({ agree: null, failed: true, reference: true, net: false });
+  });
+
+  it('reports a disagreement on a failure-free S, and a decoder throw as one whether or not S failed', () => {
+    const done = [row('T', 0, 'completed', [true]), row('A', 0, 'completed', [true]), row('B', 0, 'completed', [true])];
+    // An R(S) handed in that still plans B: isFinished false, the count test true.
+    const v = compareFinished(c, stub, [], reachable, done, { plan: { toQueue: [{ nodeId: 'B', iteration: 0 }], toSkip: [] } });
+    expect(v).toMatchObject({ agree: false, failed: false, reference: true, net: false });
+    const cancelled = [row('T', 0, 'completed', [true]), row('A', 0, 'cancelled')];
+    expect(compareFinished(c, stub, [], reachable, cancelled)).toMatchObject({ agree: false, net: null });
+    const threw = compareFinished(c, stub, [], reachable, [row('T', 0, 'completed', [true]), row('A', 0, 'failed')], { error: 'doctored' });
+    expect(threw).toMatchObject({ agree: false, failed: true, net: null, error: 'doctored' });
   });
 });

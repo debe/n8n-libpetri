@@ -18,6 +18,11 @@
  *   and `step:settled`, which is the nondeterminism concurrent workers produce. Every row set it
  *   passes through is reported to `onState`.
  * - {@link referenceAnswer}: R(S), what v2 plans next from a row set S.
+ * - {@link handlerPlan} and {@link referenceFinished}: what `StepSettledHandler` decides for one
+ *   settled step s at S (`decideSuccessors(s)`, loaded as `planSuccessors` loads it) and whether
+ *   `finishExecutionIfDone` would end the run there (`countSettledSteps ≥
+ *   countExpectedSettledSteps`): n8n's side of `tasks/v2-seam-plan.md` decision 13's legs (a″)
+ *   and (a‴).
  *
  * Moved from `tasks/spike-v2-settlement.mts`, which imports it and reprints its first report with
  * `--baseline`. Four additions over the spike:
@@ -251,6 +256,78 @@ export function referenceAnswer(
   return { toQueue: [...toQueue.values()], toSkip: [...toSkip.values()] };
 }
 
+const SETTLED: ReadonlySet<string> = new Set(['completed', 'failed', 'skipped', 'cancelled']);
+
+/** The trigger and every node it reaches (`StepSettledHandler.reachableNodeIds`). */
+export function reachableOf(ref: SettlementReference, graph: V2Graph): Set<string> {
+  const trigger = ref.findTriggerNode(graph);
+  if (trigger === undefined) throw new Error('reachableOf: the graph has no trigger node');
+  return new Set<string>([trigger.id, ...ref.getDescendantNodeIds(graph, trigger.id)]);
+}
+
+/**
+ * `decideSuccessors(settled)` at the rows `rows`, loaded as `StepSettledHandler.planSuccessors`
+ * loads it: the terminal iterations of the loops whose exit edges reach the settled node's direct
+ * successors (`exitSourcesInto`, `loadTerminalIterations`), then the rows `decisionKeys` names
+ * (`loadStepSummariesByKeys`; a key without a row is absent). No failure check: the handler makes
+ * that before it plans (`hasFailedSteps`), and the caller decides whether to.
+ */
+export function handlerPlan(
+  ref: SettlementReference,
+  graph: V2Graph,
+  loops: readonly V2Loop[],
+  rows: Iterable<ReferenceRow>,
+  settled: StepKey,
+): ReferencePlan {
+  const byId = new Map<string, ReferenceRow>();
+  for (const r of rows) byId.set(ref.stepKeyId(r), r);
+  const candidates = ref.getSuccessorNodeIds(graph, settled.nodeId);
+  const terminal = latestTerminal(ref, byId.values(), ref.exitSourcesInto(graph, loops, candidates));
+  const steps: Record<string, ReferenceRow> = {};
+  for (const k of ref.decisionKeys(graph, loops, settled, terminal)) {
+    const id = ref.stepKeyId(k);
+    const r = byId.get(id);
+    if (r !== undefined) steps[id] = r;
+  }
+  return ref.decideSuccessors(graph, loops, settled, steps, terminal);
+}
+
+/** The two numbers `finishExecutionIfDone` compares. */
+export interface SettledCount {
+  /** `countSettledSteps`: rows completed, failed, skipped or cancelled. */
+  readonly settled: number;
+  /** `countExpectedSettledSteps` over the reachable loops' terminal iterations; `undefined` while a loop runs. */
+  readonly expected: number | undefined;
+}
+
+/** {@link SettledCount} at the rows `rows`. `reachable` is {@link reachableOf}. */
+export function settledCount(
+  ref: SettlementReference,
+  loops: readonly V2Loop[],
+  reachable: ReadonlySet<string>,
+  rows: readonly ReferenceRow[],
+): SettledCount {
+  const batchIds = loops.filter((l) => reachable.has(l.batchNodeId)).map((l) => l.batchNodeId);
+  return {
+    settled: rows.filter((r) => SETTLED.has(r.status)).length,
+    expected: ref.countExpectedSettledSteps(loops, reachable, latestTerminal(ref, rows, batchIds)),
+  };
+}
+
+/**
+ * `finishExecutionIfDone`'s test at the rows `rows`: `countExpectedSettledSteps` is defined and the
+ * settled rows (`countSettledSteps`) reach it.
+ */
+export function referenceFinished(
+  ref: SettlementReference,
+  loops: readonly V2Loop[],
+  reachable: ReadonlySet<string>,
+  rows: readonly ReferenceRow[],
+): boolean {
+  const { settled, expected } = settledCount(ref, loops, reachable, rows);
+  return expected !== undefined && settled >= expected;
+}
+
 /** How a run ended: as the handlers record it, or drained with rows still owed. */
 export type RunEnd = 'completed' | 'failed' | 'drained-unfinished';
 
@@ -279,14 +356,18 @@ export interface SimulateOptions {
    * keep it.
    */
   readonly onState?: (rows: readonly ReferenceRow[]) => void;
+  /**
+   * Called each time `StepSettledHandler` takes a `step:settled` event for a completed or skipped
+   * row, before its failure check: `rows` as they are then (the row set `onState` last reported)
+   * and the settled step's key. These are the reached (S, s) of decision 13's leg (a″).
+   */
+  readonly onSettled?: (rows: readonly ReferenceRow[], settled: StepKey) => void;
   /** Events after which the run throws, as not terminating. Default {@link MAX_EVENTS}. */
   readonly maxEvents?: number;
 }
 
 /** A run stops with a throw after this many events: the loop did not terminate. */
 export const MAX_EVENTS = 20_000;
-
-const SETTLED: ReadonlySet<string> = new Set(['completed', 'failed', 'skipped', 'cancelled']);
 
 /**
  * One run of engine v2's event loop over `graph` under `behaviour`, with event order `order`.
@@ -321,12 +402,11 @@ export function simulate(
   const trigger = ref.findTriggerNode(graph);
   if (trigger === undefined) throw new Error('simulate: the graph has no trigger node');
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
-  const reachable = new Set<string>([trigger.id, ...ref.getDescendantNodeIds(graph, trigger.id)]);
+  const reachable = reachableOf(ref, graph);
   const rows = new Map<string, { -readonly [K in keyof ReferenceRow]: ReferenceRow[K] }>();
-  const { onState, maxEvents = MAX_EVENTS } = options;
-  const report = onState === undefined
-    ? () => {}
-    : () => onState([...rows.values()].map((r) => ({ ...r, filledOutputSlots: [...r.filledOutputSlots] })));
+  const { onState, onSettled, maxEvents = MAX_EVENTS } = options;
+  const snapshot = () => [...rows.values()].map((r) => ({ ...r, filledOutputSlots: [...r.filledOutputSlots] }));
+  const report = onState === undefined ? () => {} : () => onState(snapshot());
   let nextId = 0;
   const create = (k: StepKey, status: V2StepStatus, filled: boolean[] = []): boolean => {
     const id = ref.stepKeyId(k);
@@ -386,23 +466,17 @@ export function simulate(
     if (row.status === 'failed') { fail(); break; }
     let queued = 0;
     if (row.status === 'completed' || row.status === 'skipped') {
+      onSettled?.(snapshot(), { nodeId: ev.key.nodeId, iteration: ev.key.iteration });
       if ([...rows.values()].some((r) => r.status === 'failed')) { fail(); break; }
-      const candidates = ref.getSuccessorNodeIds(graph, row.nodeId);
-      const terminal = latestTerminal(ref, rows.values(), ref.exitSourcesInto(graph, loops, candidates));
-      const keys = ref.decisionKeys(graph, loops, ev.key, terminal);
-      const steps: Record<string, ReferenceRow> = {};
-      for (const k of keys) { const r = rows.get(ref.stepKeyId(k)); if (r) steps[ref.stepKeyId(k)] = r; }
-      const { toQueue, toSkip } = ref.decideSuccessors(graph, loops, ev.key, steps, terminal);
+      const { toQueue, toSkip } = handlerPlan(ref, graph, loops, rows.values(), ev.key);
       let created = false;
       for (const k of toQueue) if (create(k, 'queued')) { created = true; queued++; pending.push({ kind: 'ready', key: k }); }
       for (const k of toSkip) if (create(k, 'skipped')) { created = true; pending.push({ kind: 'settled', key: k }); }
       if (created) report();
     }
     if (queued > 0) continue;
-    const expected = ref.countExpectedSettledSteps(loops, reachable, latestTerminal(ref, rows.values(), batchIds));
-    if (expected === undefined) continue;
-    const settled = [...rows.values()].filter((r) => SETTLED.has(r.status)).length;
-    if (settled >= expected) end = [...rows.values()].some((r) => r.status === 'failed') ? 'failed' : 'completed';
+    const now = [...rows.values()];
+    if (referenceFinished(ref, loops, reachable, now)) end = now.some((r) => r.status === 'failed') ? 'failed' : 'completed';
   }
 
   const all = [...rows.values()];
