@@ -70,7 +70,8 @@ there, and it freezes the only path that runs n8n's default agent.
   the bare default: `compileCached` names `'v1'`, `src/settlement/` names `'engineV2'`, and
   `verify()` passes the profile through. The v1 fingerprint and the v2 golden did not move.
 - The install step ships patches that contain n8n's own code, under the Sustainable Use License.
-  The patches stay minimal and are applied on the user's machine. This needs a licensing note
+  The patches stay minimal and are applied on the user's machine. The owner decided on 2026-10-04 that
+  n8n-derived files stay under n8n's licence and the rest is Apache-2.0. This needs a licensing note
   before the package or image is published.
 - Supported n8n versions become a maintained list, and each entry needs a passing neutrality run.
   Implemented for the v1 path (`tasks/inject-plan.md` steps 2-11): `n8n-libpetri install`,

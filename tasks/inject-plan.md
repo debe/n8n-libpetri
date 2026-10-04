@@ -229,6 +229,8 @@ Repository HEAD is e2f9fbe (the ADR 0015 amendment). Nothing was committed or pu
 
 ## Licensing and publishing preconditions (the owner decides; nothing is published in this work)
 
+**Owner's decision, 2026-10-04:** n8n-derived files stay under n8n's Sustainable Use License, and the owner's own code is Apache-2.0. Precondition 1's licensing part is settled. Publishing itself remains an explicit step.
+
 - The deltas, maps and source patches are derived from n8n-core code under the Sustainable Use License (`LICENSE.md`, `LICENSE_EE.md`). The package carries about 1.5 KB of inserted text, and the rest is copied out of the user's own file on their machine.
 - `seams/` and `patches/` carry a NOTICE that states this origin and includes the text of n8n's license.
 - The package's `license` field has to express both licenses (for example `Apache-2.0 AND LicenseRef-n8n-SUL`). That is the owner's call.

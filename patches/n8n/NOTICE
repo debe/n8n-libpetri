@@ -11,9 +11,8 @@ its name or ".ee" in its directory name. The full text of n8n's LICENSE.md follo
 of the n8n commits these files were built against (master 944afe5, and the tags n8n@2.41.6 and
 n8n@2.42.2, where the file is identical).
 
-Whether and how these files may be redistributed is an open question for the project owner and
-a legal review (tasks/inject-plan.md, "Licensing and publishing preconditions"). Nothing here
-is published.
+The project owner's decision (2026-10-04): files derived from n8n stay under n8n's Sustainable
+Use License, as n8n licenses them; everything else in n8n-libpetri is Apache-2.0.
 
 -------------------------------------------------------------------------------------------------
 

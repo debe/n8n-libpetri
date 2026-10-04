@@ -218,10 +218,13 @@ exit 3 ("no solver resolved") belongs to a different command.
 
 ## Licensing
 
-The package's own code is Apache-2.0. The seams under `typescript/seams/` (deltas and maps) and
-the source patches under `patches/n8n/` derive from `n8n-core`, which is under n8n's Sustainable
-Use License. The install applies about 1.5 KB of inserted text to the user's own `n8n-core` on
-their machine. The rest is copied from the user's files. The Docker image contains all of n8n's
-layers. Redistributing it falls under the Sustainable Use License's terms. These are open
-questions for the owner and a legal review before anything is published (NOTICE files, the
-package's `license` field, trademark wording). Until then the image stays local.
+n8n-libpetri's own code is Apache-2.0. The files derived from n8n stay under n8n's own licence,
+the Sustainable Use License, as n8n licenses them:
+- the seams under `typescript/seams/` (deltas and maps);
+- the source patches under `patches/n8n/`;
+- n8n's own layers in the Docker image.
+
+The install applies about 1.5 KB of inserted text to the user's own `n8n-core`, on their machine.
+The rest is copied from the user's files. The `NOTICE` files in those directories say so and
+carry the licence text, and `package.json` declares `Apache-2.0 AND LicenseRef-n8n-sustainable-use`.
+Nothing is published yet: no npm package, and the image stays local.

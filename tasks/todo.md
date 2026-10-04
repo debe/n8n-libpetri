@@ -1106,12 +1106,11 @@ Model first, seam second, upstream alongside both.
 `n8n-libpetri install` and the image are built and measured (`tasks/inject-plan.md`, step
 records; `docs/install.md`). Nothing is published. Open:
 
-- [ ] **Licensing review (owner).** The patches and seams derive from n8n-core under the
-      Sustainable Use License; `NOTICE` files in `patches/n8n/` and `typescript/seams/` say so
-      and carry its text, and `package.json` now declares
-      `Apache-2.0 AND LicenseRef-n8n-sustainable-use`. Whether that expression, the NOTICE
-      wording and redistributing the image are right is the owner's call with a legal review,
-      before `"private": true` is lifted
+- [x] **Licensing (owner's decision, 2026-10-04).** Files derived from n8n (`patches/n8n/`,
+      `typescript/seams/`, n8n's layers in the Docker image) stay under n8n's Sustainable Use
+      License. Everything of the owner's is Apache-2.0. `package.json` declares
+      `Apache-2.0 AND LicenseRef-n8n-sustainable-use`, and the NOTICE files say so. Publishing
+      itself (lifting `"private": true`, pushing the image) is still a separate, explicit step
 - [ ] **Upstream: hook files before the `WaitTracker`.** Divergence row 40: in regular mode n8n
       starts its `WaitTracker` before it loads `EXTERNAL_HOOK_FILES`, so an execution that became
       overdue while n8n was down may resume on n8n's own loop. Smoke leg 5 measured the safe order
