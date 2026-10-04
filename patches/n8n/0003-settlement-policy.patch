@@ -1,5 +1,5 @@
 From 62871da65945e4a987996dd978c7fb8b68380e9a Mon Sep 17 00:00:00 2001
-From: Dennis Berger <theabyssinspace@gmail.com>
+From: Dennis Berger <dbgh@knownhosts.org>
 Date: Sat, 3 Oct 2026 00:25:26 +0200
 Subject: [PATCH] refactor(engine): Extract the settlement decisions into a
  SettlementPolicy (no-changelog)

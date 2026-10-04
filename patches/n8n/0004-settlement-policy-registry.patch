@@ -1,5 +1,5 @@
 From aee1644f50fd6ba847e2343913f701258bac15af Mon Sep 17 00:00:00 2001
-From: Dennis Berger <theabyssinspace@gmail.com>
+From: Dennis Berger <dbgh@knownhosts.org>
 Date: Sat, 3 Oct 2026 00:37:57 +0200
 Subject: [PATCH] refactor(engine): Let a host choose the settlement policy
  (no-changelog)

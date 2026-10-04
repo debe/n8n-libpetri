@@ -41,10 +41,9 @@ Approval for one item covers that item only.
    were written by an AI agent. The owner rewrites them and decides whether to disclose AI
    assistance, which `CONTRIBUTING.md` encourages. `AGENTS.md` asks for ASD-STE100 Simplified
    Technical English. The drafts are plain English and were not checked against STE100.
-3. **Identity.** Choose the GitHub account that signs the CLA. Every commit author on a PR must
-   sign. The test patch is authored `dbgh@knownhosts.org`, but patches 0003 and 0004 are
-   authored `theabyssinspace@gmail.com`. Choose one address that the signing account owns, and
-   re-author the other patches to it.
+3. **Identity.** Every commit author on a PR must sign the CLA. The owner chose
+   `dbgh@knownhosts.org` (2026-10-04); the test patch and patches 0001-0004 are authored with it.
+   The GitHub account that signs must own that address.
 4. **Links to this project.** The RFCs link only to n8n's repository. Decide whether to link
    `github.com/debe/n8n-libpetri` and libpetri, and whether the repository is ready to be read.
 5. **Licence.** `patches/n8n/` is a distributed modification of n8n under the Sustainable Use

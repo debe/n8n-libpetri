@@ -1,5 +1,5 @@
 From d69debd3b91ec4a27453f188ed3df13795fb32ce Mon Sep 17 00:00:00 2001
-From: Dennis Berger <theabyssinspace@gmail.com>
+From: Dennis Berger <dbgh@knownhosts.org>
 Date: Tue, 8 Sep 2026 09:45:08 +0200
 Subject: [PATCH 1/2] refactor(core): Extract the execution loop into
  StackScheduler (no-changelog)

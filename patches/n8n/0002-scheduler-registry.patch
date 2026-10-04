@@ -1,5 +1,5 @@
 From 27b27c12fc079a1c192cd7f191abb83df1bd4b72 Mon Sep 17 00:00:00 2001
-From: Dennis Berger <theabyssinspace@gmail.com>
+From: Dennis Berger <dbgh@knownhosts.org>
 Date: Tue, 8 Sep 2026 09:45:15 +0200
 Subject: [PATCH 2/2] refactor(core): Make the workflow scheduler pluggable
  (no-changelog)
