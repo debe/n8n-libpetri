@@ -178,7 +178,7 @@ node scripts/release/build-seams.mjs [--check] n8n@2.41.5 n8n@2.41.6 n8n@2.42.2 
 scripts/release/neutrality.sh n8n@<version>          # release neutrality, one tag; docs/conformance-release.md
 scripts/release/e2e-npm.sh <work-dir> <tarball.tgz>  # a real npm i -g n8n, end to end (local)
 scripts/docker/build.sh [n8n-version]                # local image from npm pack; nothing pushed
-scripts/docker/smoke.sh <version>                    # seven legs, one container at a time
+scripts/docker/smoke.sh <version>                    # eight legs, one container at a time
 ```
 
 The installer patches the `n8n-core` an installed n8n loads with patches 0001/0002, rebuilt per

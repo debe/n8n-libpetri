@@ -15,24 +15,29 @@
  *    the CLI's `require('n8n-core')` are one and the same CJS module.
  * 2. **`--import`, not `NODE_OPTIONS`.** `packages/cli/bin/n8n` never re-execs, so a preload on
  *    the command line covers the whole process. `NODE_OPTIONS` would additionally leak this file
- *    into the internal task-runner child, which never constructs a `WorkflowExecute`.
+ *    into every Node process the server spawns with its environment.
  * 3. **No fallback.** If anything here fails the preload throws and n8n does not start. A testbed
  *    that quietly falls back to n8n's stack loop while claiming to run the net is worse than one
  *    that refuses to boot.
  */
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+// `--import` runs in every worker thread too (they inherit `execArgv`), and n8n starts some after
+// boot. A worker thread has its own module graph, so a registration there lands on a second
+// n8n-core (or `@n8n/engine`) instance nothing reads, and its `registered` line would be a false
+// second claim. Both branches below register on the main thread only.
+import { isMainThread } from 'node:worker_threads';
 
 const ENGINE_ENV = 'N8N_EXECUTION_ENGINE';
 
-if (process.env[ENGINE_ENV] === 'libpetri') {
+if (process.env[ENGINE_ENV] === 'libpetri' && isMainThread) {
   const resolveFrom = process.env.N8N_LIBPETRI_RESOLVE_FROM;
   const hook = process.env.N8N_LIBPETRI_HOOK;
   if (!resolveFrom) throw new Error('N8N_LIBPETRI_RESOLVE_FROM is not set (expected .n8n/packages/cli/package.json)');
   if (!hook) throw new Error('N8N_LIBPETRI_HOOK is not set (expected typescript/dist/index.js)');
 
-  // The installed product's boot path (`src/n8n/boot.ts`, which `hook/n8n-hook.cjs` calls too),
-  // so the env parsing, the seam check and the two log lines cannot drift between the loaders.
+  // The installed product's boot path (`src/n8n/boot.ts`, which the installed preload
+  // `hook/n8n-preload.mjs` registers through too; `hook/n8n-hook.cjs` only confirms), so the env parsing, the seam check and the two log lines cannot drift between the loaders.
   // It throws when `.n8n/packages/core/dist` predates patch 0002 (run scripts/verify-patch.sh,
   // then rebuild packages/core) — the one failure that would otherwise look like a working
   // legacy run. The two claims stay two lines: `scheduler registered` here, at boot, and
@@ -68,11 +73,8 @@ if (process.env[ENGINE_ENV] === 'libpetri') {
  */
 const SETTLEMENT_ENV = 'N8N_LIBPETRI_SETTLEMENT';
 const settlement = process.env[SETTLEMENT_ENV];
-// `--import` runs in every worker thread too (they inherit `execArgv`), and n8n starts some after
-// boot. A worker thread has its own module graph, so a registration there lands on a second
-// `@n8n/engine` instance no runtime reads, and its `registered` line would be a false second
-// claim. Engine v2's runtime is built on the main thread (`EngineV2Runtime.initEngine`).
-const { isMainThread } = await import('node:worker_threads');
+// Main thread only (see the import above): engine v2's runtime is built there
+// (`EngineV2Runtime.initEngine`).
 
 if (settlement !== undefined && settlement !== '' && isMainThread) {
   const { appendFileSync } = await import('node:fs');

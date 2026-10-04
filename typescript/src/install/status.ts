@@ -18,7 +18,7 @@
  * The first three exit 0, the last three 3 (inconsistent state).
  */
 import { existsSync, realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { preloadFor } from './package-root.js';
 import { interruptedRun, seamWithoutRecord } from './apply.js';
@@ -46,7 +46,10 @@ export interface EnvironmentReport {
   readonly preload: string;
 }
 
-/** The words of a `NODE_OPTIONS` value, split the way Node splits it (double quotes, backslash escapes inside them). */
+/**
+ * The words of a `NODE_OPTIONS` value, split the way Node's `ParseNodeOptionsEnvVar` splits it:
+ * on spaces only (a tab is part of a word), double quotes, backslash escapes inside them.
+ */
 export function nodeOptionWords(value: string): string[] {
   const words: string[] = [];
   let word: string | null = null;
@@ -57,7 +60,7 @@ export function nodeOptionWords(value: string): string[] {
       if (c === '\\' && i + 1 < value.length) word += value[++i]!;
       else if (c === '"') quoted = false;
       else word += c;
-    } else if (/\s/.test(c)) {
+    } else if (c === ' ') {
       if (word !== null) words.push(word);
       word = null;
     } else if (c === '"') {
@@ -109,7 +112,7 @@ export interface StatusReport {
 
 export function environmentReport(env: NodeJS.ProcessEnv, hook: string): EnvironmentReport {
   const engine = env.N8N_EXECUTION_ENGINE;
-  const active = engine === undefined || engine === '' ? false : engine === 'libpetri' ? true : `N8N_EXECUTION_ENGINE='${engine}' is not 'libpetri'; the hook refuses to start n8n`;
+  const active = engine === undefined || engine === '' ? false : engine === 'libpetri' ? true : `N8N_EXECUTION_ENGINE='${engine}' is not 'libpetri'; the preload refuses to start n8n`;
   const separator = env.EXTERNAL_HOOK_FILES_SEPARATOR || ':';
   const hookFiles = (env.EXTERNAL_HOOK_FILES ?? '').split(separator).map((s) => s.trim()).filter((s) => s !== '');
   const real = (p: string): string => {
@@ -122,7 +125,9 @@ export function environmentReport(env: NodeJS.ProcessEnv, hook: string): Environ
   const ours = real(hook);
   const preload = preloadFor(hook);
   const preloadReal = real(preload);
-  const preloadListed = importedModules(env.NODE_OPTIONS ?? '').some((m) => real(resolve(m)) === preloadReal);
+  // Only a path specifier can name the file: Node reads a bare one (`p.mjs`) as a package name.
+  const isPath = (m: string): boolean => isAbsolute(m) || m.startsWith('./') || m.startsWith('../');
+  const preloadListed = importedModules(env.NODE_OPTIONS ?? '').some((m) => isPath(m) && real(resolve(m)) === preloadReal);
   return { engine: engine ?? null, active, hookFiles, hookListed: hookFiles.some((f) => real(f) === ours), hook, preloadListed, preload };
 }
 

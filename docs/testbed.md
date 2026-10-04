@@ -43,8 +43,9 @@ ESM-only, so the preload resolves `n8n-core` and `n8n-workflow` through a `requi
 the preload writes to is the same CJS module instance `WorkflowExecute` later reads from.
 
 **`--import`, not `NODE_OPTIONS`.** `bin/n8n` never re-execs, so a command-line preload covers
-the process. `NODE_OPTIONS` would also load it into the internal task-runner child, which never
-constructs a scheduler.
+the process without entering the environment every child process inherits. (n8n's task runners would not get
+`NODE_OPTIONS` either: n8n passes them an allowlisted environment.) The preload registers on the
+main thread only, since worker threads inherit `--import` through `execArgv`.
 
 **No fallback.** If any of that fails the preload throws and n8n does not start. A testbed that
 quietly runs n8n's stack loop while reporting on the net is worse than one that refuses to boot.

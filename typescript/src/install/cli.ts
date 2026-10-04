@@ -28,7 +28,7 @@ uninstall  restores the stock files byte for byte from the backups install kept
 status     stock | stock-unsupported | installed | modified | orphaned | interrupted, and
            whether this shell's environment activates the engine
            (interrupted: a run stopped midway; uninstall finishes the way back to stock)
-env        prints the two variables that activate it:  eval "$(n8n-libpetri env)"
+env        prints the three variables that activate it:  eval "$(n8n-libpetri env)"
 
 --n8n <path>        n8n's package directory, a prefix above it, or its bin/n8n
                     (default: n8n on PATH, then $(npm root -g)/n8n)

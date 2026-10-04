@@ -202,7 +202,7 @@ either stock or as written. Install writes the files it creates before the files
 them, and uninstall restores the required-by files before it deletes the created ones, so
 `n8n-core` stays loadable wherever a run stops. Both runs keep a journal in `.n8n-libpetri/`
 while they change files. If one is killed or fails midway (an I/O error, a full disk, a closed
-container), `status` reports `interrupted` and the hook refuses to start n8n with the engine
+container), `status` reports `interrupted` and the preload refuses to start n8n with the engine
 activated. Run `n8n-libpetri uninstall`: it finishes the way back to stock from the backups,
 removes any temp files the run left beside the patched files, and then `install` works again.
 A killed run also leaves its lock behind. The lock names the run's pid and host. The next

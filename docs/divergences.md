@@ -8,8 +8,7 @@ Nothing is skipped silently.
 differential harness (`docs/differential.md`) or by a test that fails without the behaviour —
 and `proposed` while it is still only reasoned from the code. Row 18 is `proposed`: the flags
 it names are written inside n8n's credential layer, which `FakeHost` does not mirror, so no
-harness here can measure the violation. Row 40 is too: its race is read from n8n's `start.ts`,
-and the runs that measured it took the other order. Rows 41–43 are too: they rest on a
+harness here can measure the violation. Rows 41–43 are too: they rest on a
 419-scenario comparison (2026-10-03) whose harness and scenario list are not in the repository,
 so nothing here reproduces them yet.
 
@@ -17,7 +16,9 @@ Rows 22–25 are agent tool dispatch (ADR 0008). Row 22 is the one n8n case the 
 fails; rows 23–25 are behaviour the model changes deliberately.
 
 Row 40 is the install path (`docs/install.md`): a released n8n with the seam installed and the
-engine activated through `EXTERNAL_HOOK_FILES`, not the pinned master the other rows measure.
+engine activated through the `NODE_OPTIONS` preload, with the `EXTERNAL_HOOK_FILES` hook
+confirming, not the pinned master the other rows measure. Its race was read from n8n's
+`start.ts`; the preload closed it on 2026-10-04, and smoke leg 5 asserts the order.
 
 Rows 26–29 are the execution policy (ADR 0009). Like rows 24 and 25 they are **additions**: a
 node that declares no `executionPolicy` reaches none of them, and its net is byte-identical to

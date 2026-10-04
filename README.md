@@ -3,7 +3,7 @@
 [![CI](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/debe/n8n-libpetri/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2024-5fa04e)](typescript/package.json)
 [![libpetri](https://img.shields.io/badge/libpetri-%5E7.0.0-1f6feb)](https://github.com/debe/libpetri)
-[![License](https://img.shields.io/badge/license-Apache--2.0-1f6feb)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20%2B%20n8n%20SUL%20parts-1f6feb)](#license)
 
 **n8n-libpetri is a compiler and a scheduling kernel.** The compiler turns an n8n workflow into
 a Coloured Time Petri Net. The kernel runs that net to quiescence, and the net itself decides
@@ -18,6 +18,26 @@ per n8n engine:
   ([ADR 0014](docs/adr/0014-settlement-policy-seam.md)).
 
 With nothing registered, n8n runs its own loop and its own planner exactly as before.
+
+**At a glance.** An alternative intra-workflow scheduler for n8n's default engine (v1). What it
+gives:
+- **verifiable scheduling**: the net that runs an execution is the net `n8n-libpetri verify`
+  checks, for joins that can never complete, dead nodes, double activation and more;
+- **a concurrency budget**: `N8N_LIBPETRI_BUDGET` nodes of one execution may run at once, 1 by
+  default, which keeps n8n's sequential order;
+- **failure policies** declared in the workflow JSON: retries on their own delay and deadlines
+  that abandon a branch ([ADR 0009](docs/adr/0009-execution-policy.md));
+- **agent tool rounds as net rounds**: an agent's `ai_tool` calls are dispatched by the net, with
+  declared call budgets ([ADR 0008](docs/adr/0008-agent-tool-dispatch.md)).
+
+To try it, [install](#install) it into a released n8n (`n8n-libpetri install`, then
+`eval "$(n8n-libpetri env)"`, which sets `N8N_EXECUTION_ENGINE=libpetri`, the preload in
+`NODE_OPTIONS` and the hook in `EXTERNAL_HOOK_FILES`), or run the local Docker image with
+`-e N8N_EXECUTION_ENGINE=libpetri`. Supported: n8n 2.41.5, 2.41.6 and 2.42.2 (beta). **Nothing is
+published yet**: build the tarball or the image from this checkout. Engine v2 support is
+maintained in this repository but not shipped
+([ADR 0015](docs/adr/0015-both-engines-injectable.md)). Licensing is Apache-2.0 plus n8n's
+Sustainable Use License for the n8n-derived parts; see [License](#license).
 
 <img alt="The Agent Nested Agents workflow running in the n8n editor. An agent calls a second
 agent wired as its tool, that second agent calls a tool of its own, and every node turns green."
@@ -47,19 +67,128 @@ transition that calls `runNode()`.*
 
 ## Contents
 
-1. [The scheduler in n8n today](#the-scheduler-in-n8n-today)
-2. [What compiling provides](#what-compiling-provides)
-3. [Principles](#principles)
-4. [Scope](#scope)
-5. [Execution model](#execution-model)
-6. [Verification](#verification)
-7. [Evidence](#evidence)
-8. [In a real n8n](#in-a-real-n8n)
-9. [Engine v2: the net as the settlement policy](#engine-v2-the-net-as-the-settlement-policy)
-10. [Known limits](#known-limits)
-11. [Installing into a released n8n](#installing-into-a-released-n8n)
+1. [Install](#install)
+2. [The scheduler in n8n today](#the-scheduler-in-n8n-today)
+3. [What compiling provides](#what-compiling-provides)
+4. [Principles](#principles)
+5. [Scope](#scope)
+6. [Execution model](#execution-model)
+7. [Verification](#verification)
+8. [Evidence](#evidence)
+9. [In a real n8n](#in-a-real-n8n)
+10. [Engine v2: the net as the settlement policy](#engine-v2-the-net-as-the-settlement-policy)
+11. [Known limits](#known-limits)
 12. [Building and testing](#building-and-testing)
 13. [Repository map](#repository-map)
+14. [License](#license)
+
+## Install
+
+> **Not published yet.** n8n-libpetri is not on npm or Docker Hub, and the package stays
+> `"private": true`. Until it is, build the tarball and the image from this checkout:
+>
+> ```bash
+> cd typescript && npm ci && npm run build && npm pack    # writes n8n-libpetri-0.1.0.tgz
+> npm install --global ./n8n-libpetri-0.1.0.tgz
+> scripts/docker/build.sh 2.41.6                           # from the repository root; local image n8n-libpetri:0.1.0-n8n2.41.6
+> ```
+>
+> Every step below then works with the local tarball in place of the registry package. The
+> commands marked *once published* do not work today.
+
+n8n-libpetri adds an optional alternative scheduler to the default engine (v1) of an n8n you
+already run. The install path covers v1 only; the engine v2 seam stays in this repository and its
+tests and is not installed ([ADR 0015](docs/adr/0015-both-engines-injectable.md), scope
+amendment). [`docs/install.md`](docs/install.md) is the full guide.
+
+**Requirements.**
+- n8n installed globally with npm (`npm install --global n8n`), at a [supported
+  version](#supported-versions).
+- Node 24 or newer, and the version your n8n requires. The npm path was exercised on Node
+  24.21.0.
+- Write access to n8n's `node_modules`: run `install` and `uninstall` as the user who owns it, or
+  with `sudo`.
+
+**Install and activate.**
+
+```bash
+npm install --global n8n-libpetri    # once published; today, the local tarball above
+n8n-libpetri status                  # expect: state: stock
+n8n-libpetri install                 # adds patches 0001/0002, rebuilt for this release, to n8n-core
+eval "$(n8n-libpetri env)"           # N8N_EXECUTION_ENGINE=libpetri, the preload in NODE_OPTIONS, the hook in EXTERNAL_HOOK_FILES
+n8n start
+```
+
+`install` checks every file it replaces against the stock release's sha256 before it writes,
+keeps backups and records what it changed. The seam alone changes nothing: n8n keeps running its
+own loop until the engine is activated. `n8n-libpetri env` prints three variables:
+- `N8N_EXECUTION_ENGINE=libpetri` selects the net. Unset, n8n runs its own loop; any other value
+  stops n8n at boot, so a typo cannot quietly run stock n8n.
+- `NODE_OPTIONS` gets `--import` of the preload, which registers `PetriScheduler` before n8n runs
+  anything, so an overdue Wait resume at boot cannot start on n8n's own loop (divergence #40).
+- `EXTERNAL_HOOK_FILES` gets the hook, which confirms the registration and refuses to start n8n
+  without the preload.
+
+`env` appends to values you already set. A process manager that runs no shell (systemd, pm2)
+needs all three in its own environment settings.
+
+**What to look for in the log.** On stderr, `[n8n-libpetri] scheduler registered: …` before
+n8n's first line, then `[n8n-libpetri] hook confirmed the preload registration …` when n8n loads
+its hook files, then `[n8n-libpetri] engine entered: …` the first time n8n constructs a
+scheduler. The net runs only workflows whose settings say `"executionOrder": "v1"` (n8n's default
+for new workflows). Any other workflow logs a `legacy route` line and runs on n8n's own loop.
+
+**Turn it off, or remove it.** Unset `N8N_EXECUTION_ENGINE` to go back to n8n's own loop without
+uninstalling; the preload and the hook then do nothing. `n8n-libpetri uninstall` restores every
+`n8n-core` file the install touched, byte for byte, and removes the install record.
+
+**Upgrading n8n.** `npm install --global n8n@<new>` replaces `n8n-core` together with the install
+record. `n8n-libpetri status` then reports `stock` (or `stock-unsupported`), and a patched tree
+that no longer matches what the installer wrote reports `modified`. For a supported version, run
+`n8n-libpetri install` again. n8n refuses to start with the engine activated while the seam is
+missing or modified, and its message names the fix.
+
+### Docker
+
+Build the image locally now; it is tagged locally and never pushed. `scripts/docker/build.sh
+[n8n-version]` (default 2.41.6) runs `npm run build` and `npm pack`, then builds
+`docker/Dockerfile` on the official `n8nio/n8n:<version>` image, which installs the seam and
+fails the build unless `status` reports `installed`.
+
+```bash
+scripts/docker/build.sh 2.41.6
+docker run --rm -p 5678:5678 -v n8n_data:/home/node/.n8n -e N8N_EXECUTION_ENGINE=libpetri n8n-libpetri:0.1.0-n8n2.41.6
+```
+
+The image sets `NODE_OPTIONS` and `EXTERNAL_HOOK_FILES` itself, and its wrapper entrypoint appends
+the preload and the hook to values of your own, so `N8N_EXECUTION_ENGINE` is the only variable to
+set. Without it the container is stock n8n.
+
+### Queue mode
+
+Set the variables on **every** main, worker and webhook process: workers construct the scheduler
+for queued executions, and the main process runs manual ones. On an npm install that means
+`eval "$(n8n-libpetri env)"` in each process's environment; with the image, the one variable on
+each container. A process without them runs n8n's own loop, so check each log for
+`scheduler registered`.
+
+### Supported versions
+
+Support is keyed on the `n8n-core` version and the hashes of the files the seam touches; the
+installer refuses any other version.
+
+| n8n | n8n-core | Release-neutrality record |
+|---|---|---|
+| 2.41.5, 2.41.6 | 2.41.4 | passed 2026-10-03, at `n8n@2.41.6` |
+| 2.42.2 (beta) | 2.42.2 | passed 2026-10-03, at `n8n@2.42.2` |
+
+Each record is a patch-neutrality leg: at that release, with 0001/0002 applied and nothing
+registered, n8n-core's execution-engine suite is identical to the unpatched baseline and the
+patched tree typechecks ([`docs/conformance-release.md`](docs/conformance-release.md)).
+
+Run `n8n-libpetri verify <workflow.json>` before activating the engine for a workflow, and read
+[`docs/divergences.md`](docs/divergences.md) for what it runs differently. Exit codes, interrupted
+runs and the known gaps are in [`docs/install.md`](docs/install.md).
 
 ## The scheduler in n8n today
 
@@ -113,7 +242,7 @@ Petri nets are a standard formalism for concurrent and distributed systems, with
 body of analysis to draw on. What ships today is one process with a configurable k. Raising k, or
 moving an execution between workers, is a change to the budget and the marking.
 
-The costs: about 16 µs of scheduler overhead per node; 4 of the 44 cases that drive the scheduler
+The costs: about 16 µs of scheduler overhead per node; 4 of the 45 cases that drive the scheduler
 regressed, all classified; cyclic and multi-producer-input workflows pinned to k = 1; `unknown`
 on large parallel shapes, and `bounded` on cycles where the SMT fallback does not close them
 (it proves the Loop Over Items fixture in half a second).
@@ -289,7 +418,8 @@ with an unmodified `IRunExecutionData`, and the patches never touch persistence.
 
 ## Verification
 
-The CLI compiles workflow JSON to the same net `PetriScheduler` executes. The compiler has two
+The CLI compiles workflow JSON with the same `compile()` the runtime uses: for a v1 workflow
+that is the net `PetriScheduler` executes. The compiler has two
 targets: `v1`, n8n's default engine and the net `PetriScheduler` runs, and `engineV2`, n8n's
 durable step engine. Since [ADR 0015](docs/adr/0015-both-engines-injectable.md) the profile
 follows the engine. `compile()` and `verify()` compile for `v1` unless `profile: 'engineV2'` is
@@ -333,23 +463,27 @@ measurements, and [ADR 0007](docs/adr/0007-verification.md) for the decision.
 
 ## Evidence
 
+Measured at n8n master `944afe5` ([`docs/conformance-master.md`](docs/conformance-master.md)):
+
 | Surface | Result |
 |---|---|
-| Execution-engine suite, loop-driving | Legacy 44/44. Petri k=1: 40/44 — no restatement, agent dispatch is in scope. |
-| Execution-engine suite, helpers | Legacy 1,613/1,613. Petri k=1: 1,613/1,613. |
-| Core suite | The same 44 loop-driving cases at 40/44, with 2,080/2,080 helpers, across 2,124 cases. |
-| n8n workflow package | 9,603 cases, identical to the unpatched baseline; the scheduler never runs there. |
-| n8n CLI package | 20,328 cases pass; the scheduler is registered but never runs there. |
+| Execution-engine suite, loop-driving | Legacy 45/45. Petri k=1: 41/45 — no restatement, agent dispatch is in scope. |
+| Execution-engine suite, helpers | Legacy 1,711/1,711. Petri k=1: 1,711/1,711. |
+| Core suite | The same 45 loop-driving cases at 41/45, with 2,213/2,213 helpers, across 2,258 cases (2,254/2,258). |
+| n8n workflow package | 10,662 cases, identical to the unpatched baseline apart from one documented `caseKeys` pairing artefact; the scheduler never runs there. |
+| n8n CLI package | 25,297 cases, identical to the unpatched baseline; the scheduler is registered but never runs there. |
+| Release neutrality (patch-neutrality legs, not engine results) | `n8n@2.41.6` and `n8n@2.42.2`, patched with nothing registered: execution-engine suite identical to the baseline, 45/45 loop-driving ([`docs/conformance-release.md`](docs/conformance-release.md)). |
 | Differential sweep | 25 fixtures at k=1,2,4: 55 pass, 20 registered divergences, 0 failures. |
 
-The classifier marks 44 of the suite's 1,657 cases as loop-driving, so those 44 measure the
-engine and the remaining 1,613 guard the seam against perturbation. All four regressions are
+The classifier marks 45 of the suite's 1,756 cases as loop-driving, so those 45 measure the
+engine and the remaining 1,711 guard the seam against perturbation. All four regressions are
 loop-driving and every one is a registered divergence: three are semantic differences in
 stuck-join handling and OR/join ordering (#2, #11, #12); the fourth is an `EngineRequest` naming a
 node the workflow never wired to its agent (#22), a shape a real agent cannot emit because its
 actions come from those same connections. M7 took this from 35/44 with an eight-case restatement
-to 40/44 with none. Widening to `packages/workflow` and `packages/cli` added 29,931 cases and no
-new failure class. See [`docs/conformance-final.md`](docs/conformance-final.md).
+to 40/44 with none, at an earlier pin. Widening to `packages/workflow` and `packages/cli` adds
+35,959 cases and no new failure class. The earlier pin's full report is
+[`docs/conformance-final.md`](docs/conformance-final.md).
 
 The benchmark is a cost check, not an architectural argument. A warm 100-node zero-work chain
 adds about 16 µs per node over n8n's loop on the measured machine. A 185-node workflow compiles to
@@ -526,28 +660,6 @@ comparison, and [`tasks/v2-seam-plan.md`](tasks/v2-seam-plan.md) has every step'
 [`docs/divergences.md`](docs/divergences.md) and
 [`docs/state-of-the-project.md`](docs/state-of-the-project.md) track these constraints.
 
-## Installing into a released n8n
-
-n8n-libpetri can be added to an n8n you already run, as an optional alternative scheduler for
-its default engine (v1). [`docs/install.md`](docs/install.md) is the full guide. In short:
-
-- `n8n-libpetri install` adds patches 0001/0002, rebuilt for the installed release, to the
-  `n8n-core` your n8n loads. It checks every file it replaces against the stock release's
-  sha256, keeps backups, and `uninstall` restores the touched files byte for byte. The seam
-  alone changes nothing: n8n keeps running its own loop.
-- `N8N_EXECUTION_ENGINE=libpetri` (plus the hook in `EXTERNAL_HOOK_FILES`; `eval "$(n8n-libpetri
-  env)"` sets both) activates the net. Unset, n8n runs its own loop; any other value stops n8n
-  at boot. Workflows that are not `executionOrder: "v1"` keep running on n8n's own loop.
-- `docker/Dockerfile` builds the same on top of the official `n8nio/n8n` image, where the one
-  variable is enough.
-
-Supported: n8n 2.41.5 and 2.41.6 (n8n-core 2.41.4) and n8n 2.42.2 (n8n-core 2.42.2). The install
-path covers engine v1 only; the engine v2 seam stays in this repository and its tests and is not
-installed ([ADR 0015](docs/adr/0015-both-engines-injectable.md), scope amendment). **Nothing is
-published:** the package is `"private": true`, the image is built locally, and both build from
-this checkout. Run `n8n-libpetri verify <workflow.json>` before activating the engine for a
-workflow, and read [`docs/divergences.md`](docs/divergences.md) for what it runs differently.
-
 ## Building and testing
 
 The integration targets n8n master `944afe5` (commit
@@ -582,7 +694,7 @@ script records cases whose workflow shape forced the effective budget back to on
 To run the actual n8n editor on the net rather than a test suite:
 
 ```bash
-scripts/testbed/n8n-testbed.sh          # http://127.0.0.1:5678, two seeded demo workflows
+scripts/testbed/n8n-testbed.sh          # http://127.0.0.1:5678, the seeded testbed workflows
 scripts/testbed/diff-engines.sh         # both engines in a live server, compared
 ```
 
@@ -608,8 +720,8 @@ scripts/run-conformance.sh --engines=libpetri --scope=engine-int   # policy-ente
 | `typescript/src/settlement/` | The net-backed engine v2 `SettlementPolicy`, its snapshot read and shadow mode |
 | `typescript/src/codec/v2/` | Engine v2 step rows to a marking (the frontier decode), and the plan from it |
 | `patches/n8n/` | Four rebasable n8n integration patches: 0001/0002 for v1, 0003/0004 for engine v2 |
-| `typescript/src/install/`, `typescript/seams/`, `typescript/hook/` | The installer, the per-release seams it applies (derived from n8n-core, see NOTICE) and the `EXTERNAL_HOOK_FILES` entry |
-| `docker/`, `scripts/docker/`, `scripts/release/` | The image on top of `n8nio/n8n`, its smoke test, and the seam generator, npm end-to-end and release-neutrality scripts |
+| `typescript/src/install/`, `typescript/seams/`, `typescript/hook/` | The installer, the per-release seams it applies (derived from n8n-core, see NOTICE), and the `NODE_OPTIONS` preload that registers the scheduler plus the `EXTERNAL_HOOK_FILES` hook that confirms it |
+| `docker/`, `scripts/docker/`, `scripts/release/` | The image on top of `n8nio/n8n`, its build script and smoke test, and the seam generator, npm end-to-end and release-neutrality scripts |
 | `spec/` | Executable requirements and traceability |
 | `docs/adr/` | Architectural decisions and amendments |
 | `docs/conformance-*.md` | Recorded n8n suite evidence |
@@ -623,7 +735,12 @@ Milestone history belongs in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 
-Apache-2.0. See [`LICENSE`](LICENSE). The exceptions are the files derived from n8n's own code:
-the patches under `patches/n8n/` and the seams under `typescript/seams/` derive from `n8n-core`,
-which is under n8n's Sustainable Use License. The `NOTICE` files in those directories say so and
-carry that license's text.
+n8n-libpetri's own code is Apache-2.0. See [`LICENSE`](LICENSE). The exceptions are the parts
+derived from n8n, which stay under n8n's Sustainable Use License, as n8n licenses them:
+- the patches under `patches/n8n/`, diffs against n8n's own source;
+- the seams under `typescript/seams/`, derived from `n8n-core`;
+- n8n's own layers in the locally built Docker image.
+
+The `NOTICE` files in [`patches/n8n/`](patches/n8n/NOTICE) and
+[`typescript/seams/`](typescript/seams/NOTICE) say so and carry that license's text. The package
+declares `Apache-2.0 AND LicenseRef-n8n-sustainable-use`.

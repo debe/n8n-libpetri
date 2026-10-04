@@ -50,7 +50,7 @@ longer exist.
 | n8n integration | `patches/n8n/` | Adds a scheduler seam and registry to the pinned n8n commit. |
 | Node-type catalogue | `scripts/node-types/` | Reads port counts and `canWait` from n8n's own generated types, so the verify CLI does not guess them. |
 | Live testbed | `scripts/testbed/` | Boots the real n8n server with the scheduler installed, seeds demo workflows, and compares both engines on data and order. |
-| Installer | `typescript/src/install/`, `typescript/seams/`, `typescript/hook/`, `docker/` | Adds the v1 seam to a released n8n's `n8n-core` and removes it again; the hook registers `PetriScheduler` when `N8N_EXECUTION_ENGINE=libpetri`. |
+| Installer | `typescript/src/install/`, `typescript/seams/`, `typescript/hook/`, `docker/` | Adds the v1 seam to a released n8n's `n8n-core` and removes it again; the `NODE_OPTIONS` preload (`hook/n8n-preload.mjs`) registers `PetriScheduler` when `N8N_EXECUTION_ENGINE=libpetri`, before n8n runs, and the `EXTERNAL_HOOK_FILES` hook confirms the registration and refuses to start n8n without it (divergence row 40). |
 
 ## Evidence
 

@@ -1,12 +1,12 @@
 /**
- * `bootFromEnv` (`src/n8n/boot.ts`), the boot path the `EXTERNAL_HOOK_FILES` shim and the
- * testbed preload share, against a fake n8n whose n8n-core is a CommonJS module with or
+ * `bootFromEnv` (`src/n8n/boot.ts`), the boot path the installed preload and the testbed
+ * preload share, with the hook file's `confirmBooted`, against a fake n8n whose n8n-core is a CommonJS module with or
  * without patch 0002's seam. Each case names one row of `tasks/inject-plan.md` decision 8.
  */
 import { createRequire } from 'node:module';
 import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BootError, bootFromEnv, confirmBooted, CONFIRMED_LINE, ENGINE_ENV, n8nEntry, preloadFromEnv, readKnobs, REGISTERED_LINE } from '../../src/n8n/boot.js';
+import { BootError, bootFromEnv, confirmBooted, CONFIRMED_LINE, ENGINE_ENV, n8nEntry, preloadFromEnv, readKnobs, REGISTERED_LINE, RESOLVE_FROM_ENV } from '../../src/n8n/boot.js';
 import { JOURNAL_FILE, RECORD_FILE, STATE_DIR, sha256 } from '../../src/install/record.js';
 import { ENGINE_ENTERED_DIAGNOSTIC, PetriScheduler } from '../../src/scheduler/index.js';
 import { cleanupTrees, tempDir } from '../install/support.js';
@@ -191,8 +191,28 @@ describe('preloadFromEnv (divergence row 40: registered before n8n runs anything
     expect(n8n.registered()).toBeNull();
   });
 
-  it('refuses a typo even outside n8n, since the variable is read first', () => {
-    expect(() => preloadFromEnv({ env: { [ENGINE_ENV]: 'libpetrx' }, entry: '/x', isMainThread: true })).toThrow(BootError);
+  it('refuses a typo in n8n\'s own command and leaves any other process running (n8n-libpetri status, npm)', () => {
+    const n8n = fakeN8n();
+    const other = tempDir();
+    writeFileSync(join(other, 'script.js'), '');
+    const typo = { [ENGINE_ENV]: 'libpetrx' };
+    expect(preloadFromEnv({ env: typo, entry: join(other, 'script.js'), isMainThread: true })).toEqual({ status: 'not-n8n' });
+    expect(preloadFromEnv({ env: typo, entry: '/x', isMainThread: true })).toEqual({ status: 'not-n8n' });
+    expect(preloadFromEnv({ env: typo, entry: join(n8n.n8nDir, 'bin', 'n8n'), isMainThread: false })).toEqual({ status: 'not-n8n' });
+    expect(() => preloadFromEnv({ env: typo, entry: join(n8n.n8nDir, 'bin', 'n8n'), isMainThread: true })).toThrow(BootError);
+    expect(n8n.registered()).toBeNull();
+  });
+
+  it('takes N8N_LIBPETRI_RESOLVE_FROM over the entry check, for a launcher whose argv[1] is not n8n\'s bin', () => {
+    const n8n = fakeN8n();
+    const wrapper = tempDir();
+    writeFileSync(join(wrapper, 'fork-container.js'), '');
+    const env = { [ENGINE_ENV]: 'libpetri', [RESOLVE_FROM_ENV]: join(n8n.n8nDir, 'bin', 'n8n') };
+    expect(preloadFromEnv({ env, entry: join(wrapper, 'fork-container.js'), isMainThread: false })).toEqual({ status: 'not-n8n' });
+    expect(n8n.registered()).toBeNull();
+    const result = preloadFromEnv({ env, entry: join(wrapper, 'fork-container.js'), isMainThread: true, onDiagnostic: () => {} });
+    expect(result.status).toBe('registered');
+    expect(n8n.registered()).not.toBeNull();
   });
 });
 

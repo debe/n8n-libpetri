@@ -232,7 +232,8 @@ an upstream ask, or work that was specified and deliberately not built.
 
 ### 0. Closing the four conformance regressions
 
-The engine passes **40 of 44** loop-driving cases in n8n's own execution-engine suite. All four
+The engine passes **41 of 45** loop-driving cases in n8n's own execution-engine suite (pin
+`944afe5`, `docs/conformance-master.md`). All four
 failures are registered divergences, and each was traced to a root cause rather than to a
 symptom, so the list below is a plan and not a wish. It is ordered by what unblocks what.
 
@@ -273,7 +274,7 @@ symptom, so the list below is a plan and not a wish. It is ordered by what unblo
       arc**, already §4 below. This is the one piece that cannot be closed in this repo
 - [ ] **Phase 3 — decide #22, do not fix it.** An `EngineRequest` naming a node the workflow
       never wired to its agent. A real agent cannot emit it — its actions come from the same
-      connections the compiler built the tool arcs from — so the honest outcome is 43/44 plus one
+      connections the compiler built the tool arcs from — so the honest outcome is 44/45 plus one
       declared non-goal, stated wherever the number is
 - [ ] **Phase 4 — re-measure, then publish.** Corpus and conformance re-run on real shapes.
       No number leaves the repo before this
@@ -992,7 +993,8 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
 - [ ] **Engine v2 follow-ups (ADR 0014, Open):** webhook `runEnd` responses, concurrent
       executions and the live cancel race are not exercised by the testbed's manual runs; the
       Postgres legs ran without file parallelism (Docker VM about 0.95 GB); rerun
-      `tasks/v2-policy-cost.mts` after the scoped read; decide the upstream shape of 0004
+      `tasks/v2-policy-cost.mts` after the scoped read; run Playwright `engine-v2:e2e` with the
+      policy registered (the 0003/0004 gate in §8, never recorded); decide the upstream shape of 0004
       (process-global registry or a cli DI registry); then the upstream offer in ADR 0012 §4's
       order
 
@@ -1097,8 +1099,10 @@ Model first, seam second, upstream alongside both.
       into `routing/smt.ts` `verifierFor` and `collect-invariants.ts`. Measure it on the
       forced-fallback testbed run (279 checks, about 890 s), not on the survey, which runs with
       the fallback off
-- [ ] **Patches 0003/0004** (`SettlementPolicy` extract, then runtime option), only after the
-      above is green. The gate is the engine tests, `m1-acceptance`, and Playwright `engine-v2:e2e`
+- [x] **Patches 0003/0004** (`SettlementPolicy` extract, then runtime option), only after the
+      above is green. The gate is the engine tests, `m1-acceptance`, and Playwright `engine-v2:e2e`.
+      Done: §9 (c), ADR 0014. The Playwright gate is not recorded as run; it moved to the
+      engine v2 follow-ups in §9
 - [ ] **Upstream, in this order**: read the contribution terms (CLA, Sustainable Use License);
       offer the property test for `settlement.ts`; then the seam RFC; restate the §4b asks for
       v2 (`onFailure` as v2's missing retry model)
@@ -1117,9 +1121,10 @@ records; `docs/install.md`). Nothing is published. Open:
       registers before n8n runs anything and the hook refuses without it (`tasks/inject-plan.md`
       decision 7, amended). What follows stays only as a possible upstream simplification.
 - [ ] **Upstream (optional): hook files before the `WaitTracker`.** Divergence row 40: in regular mode n8n
-      starts its `WaitTracker` before it loads `EXTERNAL_HOOK_FILES`, so an execution that became
-      overdue while n8n was down may resume on n8n's own loop. Smoke leg 5 measured the safe order
-      in every run; nothing guarantees it. The fix is an ordering change in n8n's `start.ts`
+      starts its `WaitTracker` before it loads `EXTERNAL_HOOK_FILES`, so with only the hook file an
+      execution that became overdue while n8n was down could resume on n8n's own loop. The
+      preload closed that here, and smoke leg 5 now asserts the order. An ordering change in
+      n8n's `start.ts` would only let the preload be dropped
 - [ ] **n8n-core 2.40.3 (n8n 2.40.5/2.40.6).** `n8n@2.40.3` and `2.40.4` pin n8n-core 2.40.2,
       not 2.40.3. Checked 2026-10-04 against the npm tarball: n8n-core 2.40.3's
       `workflow-execute.js`, `index.js` and their maps hash to the same `before` values as the

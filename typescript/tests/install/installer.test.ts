@@ -8,7 +8,7 @@ import { hostname } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { install } from '../../src/install/apply.js';
 import { importOption, runInstallCli, renderEnv, type InstallCliDeps } from '../../src/install/cli.js';
-import { importedModules } from '../../src/install/status.js';
+import { environmentReport, importedModules } from '../../src/install/status.js';
 import { EXIT } from '../../src/install/errors.js';
 import { nodeFileOps, type FileOps } from '../../src/install/fs-ops.js';
 import { locate } from '../../src/install/locate.js';
@@ -641,6 +641,19 @@ describe('status environment and env', () => {
     const odd = '/opt/my n8n/"x"\\/n8n-preload.mjs';
     expect(importedModules(`--inspect ${importOption(odd)}`)).toEqual([odd]);
     expect(importOption(PRELOAD)).toBe(`--import=${PRELOAD}`);
+    // Node splits on spaces only: a tab stays inside the word, so this imports no file Node can load.
+    expect(importedModules(`--import=${PRELOAD}\t--max-old-space-size=256`)).toEqual([`${PRELOAD}\t--max-old-space-size=256`]);
+  });
+
+  it('counts the preload as imported only through a specifier Node loads as a file', () => {
+    // The package's own hook and preload, named relative to the test's cwd (the package root).
+    const hook = join(process.cwd(), 'hook', 'n8n-hook.cjs');
+    const listed = (nodeOptions: string): boolean => environmentReport({ NODE_OPTIONS: nodeOptions }, hook).preloadListed;
+    expect(listed('--import ./hook/n8n-preload.mjs')).toBe(true);
+    expect(listed(`--import=${join(process.cwd(), 'hook', 'n8n-preload.mjs')}`)).toBe(true);
+    // A bare specifier is a package name to Node (ERR_MODULE_NOT_FOUND), and a tab does not split.
+    expect(listed('--import hook/n8n-preload.mjs')).toBe(false);
+    expect(listed('--import=./hook/n8n-preload.mjs\t--max-old-space-size=256')).toBe(false);
   });
 
   it('refuses to print a hook path inside npm\'s npx cache unless --allow-npx, and install warns about it', () => {

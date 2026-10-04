@@ -41,8 +41,9 @@ All notable changes to this project are documented here. The format follows
   descendant join's flush, and a `null` return by the last activation skips R6.
 - **`n8n-libpetri install | uninstall | status | env`: the v1 seam in a released n8n (ADR 0015).**
   The installer adds patches 0001/0002, rebuilt per release (`typescript/seams/`), to the
-  `n8n-core` an installed n8n loads; the hook (`EXTERNAL_HOOK_FILES`) registers `PetriScheduler`
-  when `N8N_EXECUTION_ENGINE=libpetri`; `docker/` builds the same on `n8nio/n8n`. v1 only;
+  `n8n-core` an installed n8n loads; a `NODE_OPTIONS` preload (`hook/n8n-preload.mjs`) registers
+  `PetriScheduler` when `N8N_EXECUTION_ENGINE=libpetri`, and the hook (`EXTERNAL_HOOK_FILES`)
+  confirms it (row 40 above); `docker/` builds the same on `n8nio/n8n`. v1 only;
   nothing is published (`docs/install.md`).
   - Supported: n8n 2.41.5/2.41.6 (n8n-core 2.41.4) and 2.42.2. Both manifests carry a passing
     release-neutrality record: with 0001/0002 applied and nothing registered, n8n-core's

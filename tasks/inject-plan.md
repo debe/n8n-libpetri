@@ -66,6 +66,7 @@ Repository HEAD is e2f9fbe (the ADR 0015 amendment). Nothing was committed or pu
    - **Amended 2026-10-04 (owner: "once libpetri is there and should be used, then we also use it"):** the gap is closed in this repository, not upstream. `hook/n8n-preload.mjs`, in `NODE_OPTIONS` as `--import`, registers through `preloadFromEnv` before n8n's entry module runs, so no execution can start first. The "reaches children" objection above is met in code: the preload registers only when the process entry belongs to the `n8n` package and it is the main thread, and n8n gives its task runners an allowlisted environment without `NODE_OPTIONS` or `N8N_EXECUTION_ENGINE`. The hook stays, as the check: `confirmBooted` refuses to start n8n when the engine is requested and nothing registered, so a forgotten preload is a refusal, never n8n's loop under our name. `env` prints all three variables; the image sets both and its wrapper appends them to a user's own values. Smoke leg 5 now asserts the order, and leg 8 asserts the refusal.
 
 8. **What the hook does.**
+   - **Amended 2026-10-04 (with decision 7):** on `libpetri` the preload registers and the hook confirms. Activation, resolution, the seam and record-hash refusals, the settings and the `scheduler registered` line below now run in `preloadFromEnv` (`hook/n8n-preload.mjs`); the hook calls only `confirmBooted`, which refuses to start n8n when the engine is requested and nothing registered, and writes `hook confirmed the preload registration`. The preload tells n8n's own command first, so a typo refuses n8n and leaves other processes running; `N8N_LIBPETRI_RESOLVE_FROM` also overrides that check, for a launcher whose `argv[1]` is not n8n's `bin`. The rows below are kept as written; read "the preload" for "the hook".
    - **Activation:**
      - `N8N_EXECUTION_ENGINE` unset or empty: the hook does nothing.
      - `libpetri`: the hook registers the scheduler.
@@ -219,7 +220,7 @@ Repository HEAD is e2f9fbe (the ADR 0015 amendment). Nothing was committed or pu
 - **The transpile stops reproducing the release.** The step 5 gate fails. Use the fallback build, and if that fails too, do not ship the version.
 - **A type error hidden by the type-blind transpile.** `tsc --noEmit` in step 9 fails.
 - **The wrong map.** The step 5 stack-trace probe maps to the wrong TS line.
-- **A loader hole beyond `WaitTracker`.** Any execution without `engine entered` in an activated process. Smoke leg 5 measures the known hole; an unknown one would show in leg 3 or in the testbed.
+- **A loader hole beyond `WaitTracker`.** Any execution without `engine entered` in an activated process. Smoke leg 5 asserts that the preload registers before n8n's first line and that the overdue wait shows `engine entered`, and leg 8 that n8n refuses without the preload; an unknown hole would show in leg 3 or in the testbed.
 - **The hook set without activation, or activation without the hook.** On npm this cannot be detected without changing n8n. The evidence is a log without `scheduler registered` next to `status` showing the environment. In Docker the wrapper prevents it.
 - **The image's n8n-core differs from npm's** for a release. The build's `status` gate refuses. (No CI image job was built; see the step 4 record's deviation.)
 - **Several n8n-core copies under `npm i -g`.** Step 8 records the layout, and the installer refuses.
@@ -242,7 +243,7 @@ Repository HEAD is e2f9fbe (the ADR 0015 amendment). Nothing was committed or pu
   2. `"private": true` lifted deliberately.
   3. A passing neutrality record in every shipped manifest.
   4. The npm end-to-end run (`scripts/release/e2e-npm.sh`, a local release step: the step 8 CI job was not built) and the global-install check green.
-  5. Docker smoke legs 1-4, 6 and 7 green, and the leg 5 outcome documented.
+  5. Docker smoke legs 1-8 green on every shipped version. Recorded so far: all eight on 2.41.6 (2897b46); 2.42.2 has only seven-leg runs (before leg 8 existed), so its eight-leg run is still to do.
   6. Engine v2 absent from the install path and its docs.
   7. The divergences rows written.
   8. A decision on the v2 library entry (`exports` `./n8n-v2`, `./n8n-v2-vitest-setup`): the packed tarball and the image contain `dist/n8n-v2.js` though nothing installs or activates it (`tasks/todo.md` §10).

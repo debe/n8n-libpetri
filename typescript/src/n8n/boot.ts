@@ -1,14 +1,15 @@
 /**
  * Registers `PetriScheduler` in a running n8n process from its environment — the one boot path
- * both loaders share (`tasks/inject-plan.md` decisions 7 and 8):
- *
- * - `hook/n8n-hook.cjs`, the `EXTERNAL_HOOK_FILES` entry an installed n8n loads; and
- * - `scripts/testbed/preload.mjs`, the `--import` preload of the source-built testbed.
+ * both registering loaders share (`tasks/inject-plan.md` decisions 7 and 8):
  *
  * - `hook/n8n-preload.mjs`, the `--import` preload an installed n8n carries in `NODE_OPTIONS`
- *   ({@link preloadFromEnv}).
+ *   ({@link preloadFromEnv}); and
+ * - `scripts/testbed/preload.mjs`, the `--import` preload of the source-built testbed
+ *   ({@link bootFromEnv}).
  *
- * Keeping the env parsing and the seam check here means the loaders cannot drift.
+ * `hook/n8n-hook.cjs`, the `EXTERNAL_HOOK_FILES` entry, registers nothing: it only calls
+ * {@link confirmBooted}. Keeping the env parsing and the seam check here means the loaders
+ * cannot drift.
  *
  * **Registered before n8n runs anything** (divergence row 40). n8n `start` arms the
  * `WaitTracker`, which resumes executions that went overdue while n8n was down, before it loads
@@ -278,14 +279,27 @@ export function n8nEntry(entry: string | undefined): string | undefined {
  * process the environment does, so the preload registers only in n8n's own command on its main
  * thread: a script an Execute Command node starts, or a worker thread, is `not-n8n` and left
  * alone. n8n's task runners get neither variable (n8n passes them an allowlisted environment).
+ *
+ * The process is told before the value is checked, so a mistyped `N8N_EXECUTION_ENGINE` refuses
+ * only n8n's own command and leaves every other process (`n8n-libpetri status`, npm) running.
+ *
+ * `N8N_LIBPETRI_RESOLVE_FROM`, when set, overrides the entry check: for a launcher whose
+ * `argv[1]` is not n8n's `bin` (a process manager's fork wrapper), the main thread counts as
+ * n8n and `n8n-core` is resolved from that file. It then applies to every main thread that
+ * inherits the variable, so set it only in n8n's own environment.
+ *
  * Throws {@link BootError} like {@link bootFromEnv}; thrown from a preload, n8n never starts.
  */
 export function preloadFromEnv(options: PreloadOptions): PreloadResult {
   const env = options.env ?? process.env;
-  if (!engineRequested(env)) return { status: 'inert' };
-  const entry = options.isMainThread ? n8nEntry(options.entry ?? process.argv[1]) : undefined;
-  if (entry === undefined) return { status: 'not-n8n' };
-  return bootFromEnv({ ...options, resolveFrom: options.resolveFrom ?? entry });
+  const value = env[ENGINE_ENV];
+  if (value === undefined || value === '') return { status: 'inert' };
+  if (!options.isMainThread) return { status: 'not-n8n' };
+  const override = env[RESOLVE_FROM_ENV];
+  const from = override !== undefined && override !== '' ? override : n8nEntry(options.entry ?? process.argv[1]);
+  if (from === undefined) return { status: 'not-n8n' };
+  // bootFromEnv validates the value: a typo throws here, in n8n's own command only.
+  return bootFromEnv({ ...options, resolveFrom: options.resolveFrom ?? from });
 }
 
 /** The line the hook writes when it finds the preload's registration in place. */
