@@ -72,15 +72,10 @@ and validator at `944afe5` (`upstream/count-agent-entries.mjs`):
 
 Before a tool call, an agent fails at its model lookup ("A Chat Model sub-node must be
 connected and enabled"). `docs/testbed.md` already records that for three agent workflows,
-under the engine v2 seed table. The RFC uses the corrected figures. These places still carry
-the old claim (`grep -rn 'first tool call' docs tasks`, plus the 85 in `tasks/todo.md`). Fix
-them before anyone outside reads them:
-- `docs/adr/0012-engine-v2-target.md` line 42 (Context) and line 178 (Evidence);
-- `docs/adr/0013-engine-v2-primary.md` line 64;
-- `tasks/todo.md` §8, lines 999–1001 ("throws … at the first tool call. That affects 85 of the
-  209 accepted entries");
-- `tasks/v2-profile-plan.md` lines 249 and 257;
-- `tasks/spike-v2-settlement.mts`, the comment at line 126 and the log line at line 193.
+under the engine v2 seed table. The RFC uses the corrected figures. The places that carried
+the old claim (ADRs 0012 and 0013, `tasks/todo.md` §8, `tasks/v2-profile-plan.md` and
+`tasks/spike-v2-settlement.mts`) are corrected as of 2026-10-04; `grep -rn 'first tool call'
+docs tasks` now finds only the correction notes in ADR 0012.
 
 ## Checklist
 

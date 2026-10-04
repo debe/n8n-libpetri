@@ -2,6 +2,7 @@
  * The installer's command lines: `install`, `uninstall`, `status` and `env`
  * (`tasks/inject-plan.md` decisions 10 and 11). `src/cli/main.ts` dispatches to them.
  */
+import { sep } from 'node:path';
 import type { CliOutput } from '../cli/io.js';
 import { parseFlags, UsageError } from '../cli/flags.js';
 import { install, uninstall } from './apply.js';
@@ -19,7 +20,7 @@ export const INSTALL_USAGE = `usage:
   n8n-libpetri install   [--n8n <dir|bin>] [--allow-unverified] [--allow-npx] [--json]
   n8n-libpetri uninstall [--n8n <dir|bin>] [--allow-npx] [--json]
   n8n-libpetri status    [--n8n <dir|bin>] [--allow-npx] [--json]
-  n8n-libpetri env
+  n8n-libpetri env       [--allow-npx]
 
 install    adds the scheduler seam (n8n's patches 0001/0002, rebuilt for the installed release)
            to the n8n-core an installed n8n loads, after checking every file's sha256
@@ -32,7 +33,8 @@ env        prints the two variables that activate it:  eval "$(n8n-libpetri env)
 --n8n <path>        n8n's package directory, a prefix above it, or its bin/n8n
                     (default: n8n on PATH, then $(npm root -g)/n8n)
 --allow-unverified  install seams whose release-neutrality record is not yet filled in
---allow-npx         accept an n8n inside npm's npx cache
+--allow-npx         accept an n8n inside npm's npx cache; for env, accept this package
+                    running from that cache (its hook path would vanish with the cache)
 --seams <dir>       use seams from <dir> instead of the shipped ones
 --json              print the result as JSON
 
@@ -79,7 +81,8 @@ export function runInstallCli(command: InstallCommand, argv: readonly string[], 
       },
       switches: {
         '--help': () => { throw new UsageError(''); },
-        ...(command === 'env' ? {} : { '--json': () => { json = true; }, '--allow-npx': () => { allowNpx = true; } }),
+        '--allow-npx': () => { allowNpx = true; },
+        ...(command === 'env' ? {} : { '--json': () => { json = true; } }),
         ...(command === 'install' ? { '--allow-unverified': () => { allowUnverified = true; } } : {}),
       },
       positional: (word) => { throw new UsageError(`unexpected argument ${word}`); },
@@ -95,7 +98,15 @@ export function runInstallCli(command: InstallCommand, argv: readonly string[], 
   }
 
   const hook = deps.hook ?? hookPath();
+  // The hook path names this package's own directory. Run through `npx`, that is inside npm's
+  // cache, which npm replaces without notice (the reason `locate` refuses an n8n there), and
+  // n8n then stops at boot on a hook file that is gone.
+  const hookInNpx = hook.split(sep).includes('_npx');
   if (command === 'env') {
+    if (hookInNpx && !allowNpx) {
+      out.stderr(`n8n-libpetri env: this n8n-libpetri runs from npm's npx cache (${hook}), which npm replaces without notice; install it with npm i -g, or pass --allow-npx\n`);
+      return EXIT.refused;
+    }
     out.stdout(renderEnv(hook));
     return EXIT.ok;
   }
@@ -130,6 +141,7 @@ export function runInstallCli(command: InstallCommand, argv: readonly string[], 
       }
       if (result.status === 'installed' && result.staleLock !== null) out.stderr(staleNote(result.staleLock));
       if (result.status === 'installed' && result.record.unverified) out.stderr('warning: installed seams without a release-neutrality record (--allow-unverified)\n');
+      if (hookInNpx) out.stderr(`warning: this n8n-libpetri runs from npm's npx cache, so the hook path above vanishes when npm clears it; install n8n-libpetri with npm i -g and take EXTERNAL_HOOK_FILES from its \`n8n-libpetri env\`\n`);
       return EXIT.ok;
     }
     const result = uninstall({ located, ...ops }, manifests.get(located.coreVersion));

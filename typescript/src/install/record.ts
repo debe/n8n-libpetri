@@ -70,19 +70,48 @@ export function stateDir(coreDir: string): string {
   return join(coreDir, STATE_DIR);
 }
 
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * Whether `p` names a file inside the n8n-core directory: relative, `/`-separated, with no
+ * empty, `.` or `..` segment. The same rule `validateManifest` applies to manifest paths.
+ */
+function isInsidePath(p: unknown): p is string {
+  return typeof p === 'string' && p !== '' && !p.startsWith('/') && !p.includes('\\') && !p.includes('\0')
+    && p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+}
+
+/**
+ * Checks the files a record or journal lists. `uninstall` writes and removes at each path, so
+ * a path that leaves n8n-core (`../`, absolute) would let whoever can write the state
+ * directory have a more privileged `uninstall` write or delete outside it.
+ */
+function checkFiles(files: unknown, path: string): void {
+  if (!Array.isArray(files)) throw new Error(`${path} is not an n8n-libpetri ${path.endsWith(JOURNAL_FILE) ? 'journal' : 'install record'}`);
+  for (const f of files as Partial<RecordedFile>[]) {
+    if (typeof f !== 'object' || f === null || !isInsidePath(f.path)) throw new Error(`${path} lists a path outside n8n-core: ${JSON.stringify(f)}`);
+    if ((f.before !== null && !HEX64.test(String(f.before))) || !HEX64.test(String(f.after))) throw new Error(`${path} has a bad hash for ${f.path}`);
+  }
+}
+
 /** The record, or null when none exists. Throws on a record that is not one. */
 export function readRecord(coreDir: string): InstallRecord | null {
   const path = join(stateDir(coreDir), RECORD_FILE);
   if (!existsSync(path)) return null;
   const record = JSON.parse(readFileSync(path, 'utf8')) as InstallRecord;
-  if (record.schema !== 1 || !Array.isArray(record.files)) throw new Error(`${path} is not an n8n-libpetri install record`);
+  if (typeof record !== 'object' || record === null || record.schema !== 1) throw new Error(`${path} is not an n8n-libpetri install record`);
+  checkFiles(record.files, path);
   return record;
 }
 
+/** The journal, or null when none exists. Throws on a journal that is not one. */
 export function readJournal(coreDir: string): InstallJournal | null {
   const path = join(stateDir(coreDir), JOURNAL_FILE);
   if (!existsSync(path)) return null;
-  return JSON.parse(readFileSync(path, 'utf8')) as InstallJournal;
+  const journal = JSON.parse(readFileSync(path, 'utf8')) as InstallJournal;
+  if (typeof journal !== 'object' || journal === null || journal.schema !== 1) throw new Error(`${path} is not an n8n-libpetri journal`);
+  checkFiles(journal.files, path);
+  return journal;
 }
 
 /** Each recorded file whose bytes are no longer what the installer wrote. */

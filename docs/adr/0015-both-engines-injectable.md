@@ -7,7 +7,10 @@ built.
 **Scope amendment (2026-10-03, owner):** engine v2 is left out of the product work for now. The
 install step, the Docker image and the docs cover the v1 path only (patches 0001/0002). The v2 seam
 (patches 0003/0004, `src/settlement/`, the engineV2 profile) stays in the repository, maintained
-and tested, and is not shipped. Engine v2 itself is too limited today (no Code node with task
+and tested, and is not shipped: nothing installs patches 0003/0004 or activates the policy. The
+packed tarball, and so the image, still contains its library entry (`n8n-libpetri/n8n-v2`,
+`dist/n8n-v2.js`) as an unused file; whether a published package keeps it is open
+(`tasks/todo.md` §10). Engine v2 itself is too limited today (no Code node with task
 runners, no agents, no sub-workflows, no retries) to offer it to users. The compile default is
 `v1`.
 
@@ -46,7 +49,8 @@ there, and it freezes the only path that runs n8n's default agent.
    - v2 is fully maintained and gains features as n8n builds them in v2 (the Agent V3 tool round
      is the clearest candidate, `upstream/rfc-tool-call-round.md`).
 3. **Injection into a stock n8n: an install step and a Docker image.**
-   - `npx n8n-libpetri install` applies the seams to an installed n8n's compiled packages:
+   - `n8n-libpetri install`, from a global install (`npm i -g`, `docs/install.md`; not `npx`,
+     whose cache would also hold the hook path n8n loads), applies the seams to an installed n8n's compiled packages:
      `n8n-core` for v1 and `@n8n/engine` for v2. It refuses any file whose content hash it does
      not know, records what it changed, and `n8n-libpetri uninstall` restores the files byte for
      byte. `status` reports both.
@@ -79,7 +83,12 @@ there, and it freezes the only path that runs n8n's default agent.
   2.42.2, the hook, and the image. Both manifests carry a passing neutrality record
   (`docs/conformance-release.md`: the patched release with nothing registered is identical to its
   unpatched baseline). The licensing note is the `NOTICE` files in `patches/n8n/` and
-  `typescript/seams/`; the owner's review is still open (`tasks/todo.md` §10).
+  `typescript/seams/`; the owner settled the licensing on 2026-10-04 (`tasks/todo.md` §10), and
+  publishing remains a separate, explicit step.
+  Two parts of decision 3 are narrower as built. The installer hashes only the files it replaces
+  and the names it creates, not every file of the package (`docs/install.md`; a whole-package
+  check is open in `tasks/todo.md` §10). The `@n8n/engine` half, its `status` line and the v2
+  activation variable are deferred by the scope amendment.
 
 ## Evidence
 

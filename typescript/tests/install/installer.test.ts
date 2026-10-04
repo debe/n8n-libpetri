@@ -5,7 +5,7 @@
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { install } from '../../src/install/apply.js';
 import { runInstallCli, renderEnv, type InstallCliDeps } from '../../src/install/cli.js';
 import { EXIT } from '../../src/install/errors.js';
@@ -155,6 +155,10 @@ describe('refusals', () => {
 
   it('refuses seams without a neutrality record unless --allow-unverified, and records that it was given', () => {
     const { tree, seamsDir } = seamsAndTree({}, { neutrality: null });
+    const s = run('status', ['--n8n', tree.n8nDir], { seamsDir });
+    expect(s.out).toMatch(/^state: stock$/m);
+    expect(s.out).not.toContain('would patch');
+    expect(s.out).toContain('`n8n-libpetri install` refuses these seams without --allow-unverified (no neutrality record)');
     const r = run('install', ['--n8n', tree.n8nDir], { seamsDir });
     expect(r.code).toBe(EXIT.refused);
     expect(r.err).toContain('no neutrality record');
@@ -169,6 +173,7 @@ describe('refusals', () => {
 
   it('refuses a failed neutrality record the same way', () => {
     const { tree, seamsDir } = seamsAndTree({}, { neutrality: { date: '2026-10-03', passed: false, summary: 'x' } });
+    expect(run('status', ['--n8n', tree.n8nDir], { seamsDir }).out).toContain('refuses these seams without --allow-unverified (a failed neutrality record)');
     expect(run('install', ['--n8n', tree.n8nDir], { seamsDir }).err).toContain('a failed neutrality record');
   });
 
@@ -370,6 +375,92 @@ describe('rollback', () => {
   });
 });
 
+describe('plan', () => {
+  it('writes nothing when a delta that matches its recorded hash rebuilds other bytes than the manifest\'s after', () => {
+    const { tree, seamsDir } = seamsAndTree();
+    const path = join(seamsDir, CORE_VERSION, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(path, 'utf8')) as { files: { path: string; after: string }[] };
+    manifest.files[1]!.after = 'a'.repeat(64);
+    writeFileSync(path, JSON.stringify(manifest));
+    const stock = snapshot(tree.coreDir);
+    const r = run('install', ['--n8n', tree.n8nDir], { seamsDir });
+    expect(r.code).toBe(EXIT.refused);
+    expect(r.err).toContain(`rebuilding ${DIST}/index.js gave sha256 ${sha256(Buffer.from(PATCHED['index.js']!))}, expected ${'a'.repeat(64)}`);
+    expect(snapshot(tree.coreDir)).toEqual(stock);
+  });
+
+  it('writes nothing when a delta that matches its recorded hash does not decode', () => {
+    const { tree, seamsDir } = seamsAndTree();
+    const dir = join(seamsDir, CORE_VERSION);
+    const bad = '{"ops":[{"copy":[0,999999999]}]}\n';
+    writeFileSync(join(dir, 'index.js.delta.json'), bad);
+    const path = join(dir, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(path, 'utf8')) as { files: { delta: string; deltaSha256: string }[] };
+    manifest.files.find((f) => f.delta === 'index.js.delta.json')!.deltaSha256 = sha256(Buffer.from(bad));
+    writeFileSync(path, JSON.stringify(manifest));
+    const stock = snapshot(tree.coreDir);
+    const r = run('install', ['--n8n', tree.n8nDir], { seamsDir });
+    expect(r.code).toBe(EXIT.refused);
+    expect(r.err).toContain('the shipped index.js.delta.json does not decode');
+    expect(snapshot(tree.coreDir)).toEqual(stock);
+  });
+});
+
+describe('state files', () => {
+  /** A file outside n8n-core, and its path as a record entry relative to n8n-core. */
+  function victim(tree: Tree): { file: string; rel: string } {
+    const file = join(tree.root, 'victim.txt');
+    writeFileSync(file, 'victim\n');
+    return { file, rel: relative(tree.coreDir, file).split(sep).join('/') };
+  }
+
+  it('refuses a journal whose path leaves n8n-core, and writes nothing outside it (exit 3)', () => {
+    const { tree, seamsDir } = seamsAndTree();
+    const { file, rel } = victim(tree);
+    const state = join(tree.coreDir, STATE_DIR);
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, JOURNAL_FILE), JSON.stringify({ schema: 1, version: CORE_VERSION, files: [{ path: rel, before: sha256(Buffer.from('attacker')), after: sha256(Buffer.from('victim\n')) }] }));
+    const backup = join(state, 'backup', rel);
+    mkdirSync(dirname(backup), { recursive: true });
+    writeFileSync(backup, 'attacker');
+    const u = run('uninstall', ['--n8n', tree.n8nDir], { seamsDir });
+    expect(u.code).toBe(EXIT.inconsistent);
+    expect(u.err).toContain('lists a path outside n8n-core');
+    expect(readFileSync(file, 'utf8')).toBe('victim\n');
+  });
+
+  it('refuses a record whose created file leaves n8n-core, and deletes nothing outside it (exit 3)', () => {
+    const { tree, seamsDir } = seamsAndTree();
+    expect(run('install', ['--n8n', tree.n8nDir], { seamsDir }).code).toBe(EXIT.ok);
+    const { file, rel } = victim(tree);
+    const path = join(tree.coreDir, STATE_DIR, RECORD_FILE);
+    const record = JSON.parse(readFileSync(path, 'utf8')) as { files: unknown[] };
+    record.files.push({ path: rel, before: null, after: sha256(Buffer.from('victim\n')) });
+    writeFileSync(path, JSON.stringify(record));
+    for (const bad of [rel, file, `${DIST}/./index.js`]) {
+      (record.files[record.files.length - 1] as { path: string }).path = bad;
+      writeFileSync(path, JSON.stringify(record));
+      const u = run('uninstall', ['--n8n', tree.n8nDir], { seamsDir });
+      expect(u.code, bad).toBe(EXIT.inconsistent);
+      expect(u.err, bad).toContain('lists a path outside n8n-core');
+    }
+    expect(readFileSync(file, 'utf8')).toBe('victim\n');
+    expect(existsSync(join(tree.coreDir, DIST, 'stack-scheduler.js'))).toBe(true);
+  });
+
+  it('refuses a record with a malformed hash (exit 3)', () => {
+    const { tree, seamsDir } = seamsAndTree();
+    expect(run('install', ['--n8n', tree.n8nDir], { seamsDir }).code).toBe(EXIT.ok);
+    const path = join(tree.coreDir, STATE_DIR, RECORD_FILE);
+    const record = JSON.parse(readFileSync(path, 'utf8')) as { files: { after: string }[] };
+    record.files[0]!.after = 'not-a-hash';
+    writeFileSync(path, JSON.stringify(record));
+    const u = run('uninstall', ['--n8n', tree.n8nDir], { seamsDir });
+    expect(u.code).toBe(EXIT.inconsistent);
+    expect(u.err).toContain('has a bad hash');
+  });
+});
+
 describe('states', () => {
   it('reports modified, lists the file, and refuses to uninstall over it (exit 3)', () => {
     const { tree, seamsDir } = seamsAndTree();
@@ -438,6 +529,22 @@ describe('states', () => {
     // Byte-identical: no lock, no journal, no temp file.
     expect(snapshot(tree.coreDir)).toEqual(stock);
     expect(existsSync(state)).toBe(false);
+  });
+
+  it('refuses to finish an interrupted run over a file in neither the stock nor the installed state, and leaves it', () => {
+    const { tree, seamsDir } = seamsAndTree();
+    expect(run('install', ['--n8n', tree.n8nDir], { seamsDir }).code).toBe(EXIT.ok);
+    const state = join(tree.coreDir, STATE_DIR);
+    const record = JSON.parse(readFileSync(join(state, RECORD_FILE), 'utf8')) as { version: string; files: unknown[] };
+    writeFileSync(join(state, JOURNAL_FILE), JSON.stringify({ schema: 1, version: record.version, operation: 'install', files: record.files }));
+    rmSync(join(state, RECORD_FILE));
+    writeFileSync(join(tree.coreDir, DIST, 'index.js'), 'edited by hand\n');
+    writeFileSync(join(tree.coreDir, DIST, 'stack-scheduler.js'), 'also edited\n');
+    const before = snapshot(tree.coreDir);
+    const u = run('uninstall', ['--n8n', tree.n8nDir], { seamsDir });
+    expect(u.code).toBe(EXIT.inconsistent);
+    expect(u.err).toContain(`left ${DIST}/stack-scheduler.js, ${DIST}/index.js in neither the stock nor the installed state`);
+    expect(snapshot(tree.coreDir)).toEqual(before);
   });
 
   it('removes what a run killed before its journal left, and installs over it', () => {
@@ -509,6 +616,23 @@ describe('status environment and env', () => {
 
     const typo = run('status', ['--n8n', tree.n8nDir, '--json'], { seamsDir, env: { PATH: '', N8N_EXECUTION_ENGINE: 'libpetrx' } });
     expect(JSON.parse(typo.out).environment.active).toContain("is not 'libpetri'");
+  });
+
+  it('refuses to print a hook path inside npm\'s npx cache unless --allow-npx, and install warns about it', () => {
+    const npxHook = '/home/u/.npm/_npx/abc123/node_modules/n8n-libpetri/hook/n8n-hook.cjs';
+    const r = run('env', [], { seamsDir: tempDir(), hook: npxHook });
+    expect(r.code).toBe(EXIT.refused);
+    expect(r.out).toBe('');
+    expect(r.err).toContain("npm's npx cache");
+    const ok = run('env', ['--allow-npx'], { seamsDir: tempDir(), hook: npxHook });
+    expect(ok.code).toBe(EXIT.ok);
+    expect(ok.out).toBe(renderEnv(npxHook));
+
+    const { tree, seamsDir } = seamsAndTree();
+    const i = run('install', ['--n8n', tree.n8nDir], { seamsDir, hook: npxHook });
+    expect(i.code).toBe(EXIT.ok);
+    expect(i.err).toContain("runs from npm's npx cache");
+    expect(run('install', ['--n8n', tree.n8nDir], { seamsDir }).err).toBe('');
   });
 
   it('prints the two exports, appending to any hook files already set', () => {

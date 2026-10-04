@@ -64,10 +64,13 @@ describe('committed seams', () => {
         expect(total).toBeLessThanOrEqual(MAX_INSERTED_BYTES);
       });
 
-      it('decodes only within its source: every copy is inside a file of the recorded size class', () => {
-        // Without the stock bytes (they are n8n's, not ours) the after hash cannot be checked
-        // here; the installer checks it on the user's machine before writing. What can be
-        // checked is that a decode against a source of plausible length does not read past it.
+      it('decodes: every op is a well-formed copy or insert', () => {
+        // Without the stock bytes (they are n8n's, not ours) neither the after hash nor whether
+        // a copy stays inside the stock file can be checked here: the manifest records no stock
+        // size, and the source below is sized from the delta's own furthest copy, so it cannot
+        // be read past. The installer checks both on the user's machine before writing (a copy
+        // outside the source refuses as "does not decode", installer.test.ts). What this checks
+        // is that each copy has integer bounds and a positive length and each insert is a string.
         for (const f of manifest.files) {
           const delta = parseDelta(JSON.parse(readFileSync(join(dir, f.delta), 'utf8')));
           const furthest = Math.max(0, ...delta.ops.map((op) => ('copy' in op ? op.copy[0] + op.copy[1] : 0)));

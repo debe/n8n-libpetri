@@ -2,7 +2,8 @@
  * `n8n-libpetri status`: what state an n8n-core is in, and whether this shell would activate
  * the engine (`tasks/inject-plan.md` decision 10).
  *
- * - `stock`: no seam, and every file matches a shipped manifest's `before`; `install` would work.
+ * - `stock`: no seam, and every file matches a shipped manifest's `before`; `install` would work
+ *   (without `--allow-unverified` only when the manifest's neutrality record passed).
  * - `stock-unsupported`: no seam, but no manifest for this n8n-core version or its files differ.
  * - `installed`: the record's files all hash to what was written.
  * - `modified`: there is a record but some files changed since (each one is listed).
@@ -152,6 +153,10 @@ export function renderStatus(r: StatusReport): string {
   if ((r.state === 'stock' || r.state === 'stock-unsupported') && e.active === true && e.hookListed) {
     lines.push('  n8n started from this shell refuses to start: the hook finds no scheduler seam');
   }
-  if (r.state === 'stock') lines.push('  `n8n-libpetri install` would patch this n8n-core');
+  if (r.state === 'stock') {
+    lines.push(r.neutrality?.passed
+      ? '  `n8n-libpetri install` would patch this n8n-core'
+      : `  \`n8n-libpetri install\` refuses these seams without --allow-unverified (${r.neutrality === null ? 'no neutrality record' : 'a failed neutrality record'})`);
+  }
   return `${lines.join('\n')}\n`;
 }

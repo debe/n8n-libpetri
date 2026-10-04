@@ -42,6 +42,13 @@ budget, marking codec) and the design principles live in the root
   byte-identical by `tests/compiler/v1-identity.test.ts`. Engine v2 stays in the repository,
   maintained and tested, and is left out of the install path, the Docker image and their docs
   (ADR 0015 scope amendment).
+- **Licensing and publishing (owner's decision, 2026-10-04).** Files derived from n8n
+  (`patches/n8n/*`, `typescript/seams/**`, n8n's layers in the image) stay under n8n's
+  Sustainable Use License, with their `NOTICE` files; everything else is Apache-2.0
+  (`package.json`: `Apache-2.0 AND LicenseRef-n8n-sustainable-use`). Never relabel a derived
+  file, drop a `NOTICE` or narrow the licence string. The package stays `"private": true` and
+  nothing is published (no `npm publish`, no image push, no upstream post) until the owner signs
+  off (`tasks/inject-plan.md`, "Licensing and publishing preconditions"; `tasks/todo.md` §10).
 - **The engine v2 policy has no fallback to n8n's planner** (ADR 0014, plan decision 8). A compile
   refusal, a `CodecError` or a malformed store answer is a `settlement policy error` and a throw,
   and the execution stays `running` (divergence row 38). Named races (a failed row, a cancelled
@@ -156,10 +163,36 @@ settlement leg (policy registered, `--settlement-mode=primary|shadow|primary-sha
 `-int` legs were measured with `--maxWorkers=1` on a 0.95 GB Docker VM. `verify-patch.sh` must
 leave `.n8n` at the detached pin with 0001–0004 applied and no commits or branches.
 
-Pinned n8n: master `944afe5` (2026-10-02; ADR 0013 puts engine v2 first, and it moves on
-master), defined once in `scripts/n8n-pin.sh`.
+Pinned n8n: master `944afe5` (2026-10-02; ADR 0013 decision 1, kept by ADR 0015), defined once
+in `scripts/n8n-pin.sh`. The installer targets released n8n-core versions instead, one seam
+manifest each under `typescript/seams/n8n-core/` (2.41.4 for n8n 2.41.5/2.41.6, 2.42.2), each
+with its own neutrality record (below).
 `scripts/check-n8n-drift.sh` reports, read-only, whether the patches still apply to `stable`,
 `beta`, the newest release and master, and what touched the seam or engine v2 since the pin.
+
+### Install path (v1 only, ADR 0015)
+
+```bash
+n8n-libpetri install | uninstall | status | env      # the package bin; docs/install.md
+node scripts/release/build-seams.mjs [--check] n8n@2.41.5 n8n@2.41.6 n8n@2.42.2   # seams from .n8n tags
+scripts/release/neutrality.sh n8n@<version>          # release neutrality, one tag; docs/conformance-release.md
+scripts/release/e2e-npm.sh <work-dir> <tarball.tgz>  # a real npm i -g n8n, end to end (local)
+scripts/docker/build.sh [n8n-version]                # local image from npm pack; nothing pushed
+scripts/docker/smoke.sh <version>                    # seven legs, one container at a time
+```
+
+The installer patches the `n8n-core` an installed n8n loads with patches 0001/0002, rebuilt per
+release as copy/insert deltas plus regenerated maps (`typescript/seams/n8n-core/<version>/`),
+after checking the sha256 of every file it replaces or creates. `typescript/hook/n8n-hook.cjs` is
+the `EXTERNAL_HOOK_FILES` entry; it calls `bootFromEnv` (`src/n8n/boot.ts`) only when
+`N8N_EXECUTION_ENGINE` is non-empty. **A change to patch 0001 or 0002 means regenerating the
+seams (`build-seams.mjs`) and re-running `neutrality.sh` for every shipped manifest:**
+`tests/install/seams.test.ts` pins each manifest to the committed patches' sha256, a changed
+`after` hash resets a manifest's `neutrality` record to null, and `install` refuses such seams
+without `--allow-unverified`. `hook-dist.test.ts` needs `npm run build`; CI runs it after the
+build with `N8N_LIBPETRI_REQUIRE_DIST=1`. The e2e, the image smoke legs and neutrality runs are
+release steps outside CI; the first two are integration results, and a neutrality run is a
+patch-neutrality leg, never an engine result.
 
 ### Node-type catalogue (`scripts/node-types/`)
 
@@ -243,7 +276,10 @@ proof — and never widen a check's claim past its query.
   rounds (ADR 0008). `payloads.ts` is the token vocabulary the codec shares.
 - `codec.ts`, `codec/` — the marking codec: n8n's execution state ↔ a marking (ADR 0005).
 - `n8n/` — `host.ts` mirrors patch 0001's interfaces; `adapter.ts` turns an n8n `Workflow`
-  into a compiler description. `v2-host.ts` mirrors patches 0003/0004's types, and
+  into a compiler description. `boot.ts` (`bootFromEnv`, tsup entry `n8n/boot`) is the one boot
+  path the hook and the testbed preload share: it reads `N8N_EXECUTION_ENGINE` and the knobs,
+  resolves n8n-core, refuses a core without the seam or one that drifted from the install
+  record, and registers `PetriScheduler`. `v2-host.ts` mirrors patches 0003/0004's types, and
   `v2-graph.ts` turns an engine v2 `WorkflowGraph` into a description (a configless `v1-node`
   is an opaque step).
 - `settlement/` — the net-backed engine v2 `SettlementPolicy` (ADR 0014): `policy.ts`
@@ -255,7 +291,15 @@ proof — and never widen a check's claim past its query.
 - `verify/` — properties over the compiled net; counterexample → node path. `families/` has one
   module per property family, and `route.ts` decides how each query is answered.
 - `conformance/` — trace recorder, differ, harness, junit → matrix report.
-- `cli/` — the I/O, flag parsing and exit handling the command lines share.
+- `cli/` — the I/O, flag parsing and exit handling the command lines share. `main.ts` is the
+  package `bin`; `dispatch.ts` routes `install | uninstall | status | env` to `install/cli.ts`
+  and everything else to `verify`.
+- `install/` — the installer (ADR 0015, `tasks/inject-plan.md`): `locate.ts` (n8n and its one
+  n8n-core), `manifest.ts` (seam manifests, path guards), `delta.ts` (copy/insert codec),
+  `plan.ts` (every output built and hash-checked before a write), `apply.ts` (install and
+  uninstall, crash-safe order), `record.ts` / `lock.ts` (state in `<n8n-core>/.n8n-libpetri/`:
+  record, journal, lock, backups), `status.ts`. Outside `src/`: `typescript/hook/` (the hook
+  file) and `typescript/seams/` (shipped seams, n8n's licence, `NOTICE`).
 - `internal/` — cross-layer helpers (`assertNever`, `messageOf`, unit tokens).
 
 ## Memory / process
@@ -263,24 +307,3 @@ proof — and never widen a check's claim past its query.
 Decisions go in `docs/adr/`. Open work goes in `tasks/todo.md`. Divergences from n8n go in
 `docs/divergences.md`.
 
-<!-- code-graph-mcp:begin v2 -->
-## Code Graph (repo-wide AST index)
-
-AST + FTS + vector index of the whole repo — prefer over multi-round Grep/Read for
-structural queries (LSP only sees open files; this sees everything). Fastest path = Bash CLI:
-
-| Intent | Command |
-|--------|---------|
-| Who calls X / what X calls | `code-graph-mcp callgraph X` |
-| Impact before editing a fn | `code-graph-mcp impact X` |
-| Unfamiliar dir / module | `code-graph-mcp overview <dir>` |
-| Symbol source / signature | `code-graph-mcp show X` |
-| Concept search (no exact name) | `code-graph-mcp search "…"` (vector: MCP `semantic_code_search`) |
-| grep + AST context | `code-graph-mcp grep "pat" [paths] [-t lang] [-g glob] [-c]` |
-
-Not on PATH? A plugin-only install keeps its own copy — same commands, run
-`~/.cache/code-graph/bin/code-graph-mcp` (or `npm i -g @sdsrs/code-graph` once).
-
-Still use Grep for literal strings/regex in non-code files; still Read files you'll edit.
-Full command + MCP-tool table: `.claude/plugin_code_graph_mcp.md`
-<!-- code-graph-mcp:end -->

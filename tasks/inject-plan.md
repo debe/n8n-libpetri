@@ -220,9 +220,9 @@ Repository HEAD is e2f9fbe (the ADR 0015 amendment). Nothing was committed or pu
 - **The wrong map.** The step 5 stack-trace probe maps to the wrong TS line.
 - **A loader hole beyond `WaitTracker`.** Any execution without `engine entered` in an activated process. Smoke leg 5 measures the known hole; an unknown one would show in leg 3 or in the testbed.
 - **The hook set without activation, or activation without the hook.** On npm this cannot be detected without changing n8n. The evidence is a log without `scheduler registered` next to `status` showing the environment. In Docker the wrapper prevents it.
-- **The image's n8n-core differs from npm's** for a release. The build's `status` gate refuses, and the CI image pull compares hashes.
+- **The image's n8n-core differs from npm's** for a release. The build's `status` gate refuses. (No CI image job was built; see the step 4 record's deviation.)
 - **Several n8n-core copies under `npm i -g`.** Step 8 records the layout, and the installer refuses.
-- **`require(esm)` fails on Node 24,** or a future dist uses top-level await (`ERR_REQUIRE_ASYNC_MODULE`). The step 3 CI matrix catches it.
+- **`require(esm)` fails on Node 24,** or a future dist uses top-level await (`ERR_REQUIRE_ASYNC_MODULE`). CI's post-build `hook-dist` step catches it on Node 24 for our own dist (the Node 24/26 matrix was not built, step 2 deviation 10). No CI job loads a real n8n-core tarball; `scripts/release/e2e-npm.sh` is a local release step.
 - **The profile flip changes a runtime result.** The v1 fingerprint or the v2 golden moves in step 1.
 - **The v2 code rots while it is not shipped.** Its tests leave CI, or a step touches `src/settlement`/0003/0004. Reviewers check the diff of each step for this.
 - **The delta grows.** A future release's inserted bytes jump; the generator reports the totals and the fixture test pins them.
@@ -240,10 +240,11 @@ Repository HEAD is e2f9fbe (the ADR 0015 amendment). Nothing was committed or pu
   1. Owner sign-off and the NOTICE files.
   2. `"private": true` lifted deliberately.
   3. A passing neutrality record in every shipped manifest.
-  4. The npm end-to-end job and the global-install check green.
+  4. The npm end-to-end run (`scripts/release/e2e-npm.sh`, a local release step: the step 8 CI job was not built) and the global-install check green.
   5. Docker smoke legs 1-4, 6 and 7 green, and the leg 5 outcome documented.
   6. Engine v2 absent from the install path and its docs.
   7. The divergences rows written.
+  8. A decision on the v2 library entry (`exports` `./n8n-v2`, `./n8n-v2-vitest-setup`): the packed tarball and the image contain `dist/n8n-v2.js` though nothing installs or activates it (`tasks/todo.md` §10).
 
 ## Step 1 record (2026-10-03): profile default back to v1
 
@@ -291,9 +292,10 @@ Deviations:
 10. **The CI matrix stays Node 24 only.** Step 3 asked for Node 24 and 26. `npm ci` fails on 26 because of isolated-vm (see `ci.yml`). Locally, the hook was exercised on Node 26.8.1 (vitest) and on 24.21.0 (the e2e).
 11. **The e2e ran on Node 24.21.0**, a checksum-verified nodejs.org binary in the e2e directory. Under Node 26, `npm i -g n8n@2.41.6` fails: `@confluentinc/kafka-javascript` has no node-v147 prebuild and its source build fails.
 12. **`scripts/README.md`** now lists the two release scripts. `.github/workflows/ci.yml` gained the post-build `hook-dist` step.
+13. **Step 8's CI job was not built** (network, `npm i n8n-core@<v>`, install, hash check, `registerPetriScheduler`, uninstall), and neither was a CI image check. CI has one job (z3, `npm ci`, check, test, build, `hook-dist`). The end to end against real packages is the local `scripts/release/e2e-npm.sh` run above, a release step; nothing in CI covers a real n8n-core tarball.
 
 Open (for later steps):
-- The package's `exports` still list `./n8n-v2` and `./n8n-v2-vitest-setup`, library entries that predate this work. The install path does not use them. Whether a published package keeps them is a step 7/11 packaging call.
+- The package's `exports` still list `./n8n-v2` and `./n8n-v2-vitest-setup`, library entries that predate this work. The install path does not use them. Whether a published package keeps them is a step 7/11 packaging call. (Still open after step 4; now tracked in `tasks/todo.md` §10 and publishing precondition 8.)
 - `docker/` and the smoke test are step 10. The docs, the NOTICE files, the divergences rows and the license field are step 11. Neutrality records are step 9.
 - `renderEnv` appends the hook every time it is evaluated, so evaluating it twice lists the hook twice. n8n would then require one file twice, and its module cache makes the second require a no-op.
 

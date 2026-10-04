@@ -26,6 +26,11 @@ All notable changes to this project are documented here. The format follows
     they name their profile. The v1 net is byte-identical (`tests/fixtures/v1-fingerprint.json`).
 
 ### Added
+- **Divergence rows 40-43.** Row 40: in regular mode `n8n start` starts its `WaitTracker` before
+  it loads hook files, so an overdue wait may resume on n8n's own loop (install path, open race).
+  Rows 41-43 (`proposed`; from a 419-scenario comparison whose harness is not in the repository):
+  concurrent producers into one slot are paired positionally, a stuck chooseBranch Merge blocks a
+  descendant join's flush, and a `null` return by the last activation skips R6.
 - **`n8n-libpetri install | uninstall | status | env`: the v1 seam in a released n8n (ADR 0015).**
   The installer adds patches 0001/0002, rebuilt per release (`typescript/seams/`), to the
   `n8n-core` an installed n8n loads; the hook (`EXTERNAL_HOOK_FILES`) registers `PetriScheduler`
@@ -104,11 +109,20 @@ All notable changes to this project are documented here. The format follows
   `SettlementPolicy` seam second, and the upstream offer leads with the differential.
 
 ### Changed
-- **The pin is now n8n master `944afe5` (2026-10-02), and engine v2 is primary (ADR 0013).**
-  - v1 is frozen, not deleted.
+- **Package licence.** `package.json` declares `Apache-2.0 AND LicenseRef-n8n-sustainable-use`,
+  with `NOTICE` files in `patches/n8n/` and `typescript/seams/`: files derived from n8n stay
+  under n8n's Sustainable Use License, everything else is Apache-2.0 (owner's decision,
+  2026-10-04). The package stays `"private": true`; nothing is published.
+- **Divergence row 2** now also records the multi-producer input slot on a multi-input node:
+  the join gadget's empty arm claims the slot, so the engine runs the node early and strands the
+  later data, which n8n waits for. 1 of 211 workflows has the shape (2026-10-04,
+  `tasks/scan-multi-producer-slots.mjs`); not built, by decision.
+- **The pin is now n8n master `944afe5` (2026-10-02; ADR 0013 decision 1).** ADR 0013 also made
+  engine v2 primary and froze v1 (its decisions 2 and 3); ADR 0015 superseded both before any
+  release, so v1 is the product path (see Breaking).
   - Patches 0001/0002 rebased with offset-only changes (`--onto`, since a release tag is not
     an ancestor of master).
-  - Frozen v1 path: execution-engine and core both 41/45 loop-driving, the same four
+  - v1 path: execution-engine and core both 41/45 loop-driving, the same four
     regressions, legacy identical to baseline.
   - Engine v2: decision core unchanged. Acceptance, differential and exhaustive check give
     0 disagreements at master. The golden was re-recorded and only its version label moved.

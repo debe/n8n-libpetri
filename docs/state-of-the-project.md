@@ -102,7 +102,8 @@ fourth is an `EngineRequest` naming a node with no `ai_tool` connection to its a
 (divergence #22), which only a hand-built request can produce. The broader run covered 38,217
 cases without finding another failure class.
 
-The exact case matrix at this pin is in [`conformance-2.41.3.md`](conformance-2.41.3.md); the
+The exact case matrix at this pin is in [`conformance-master.md`](conformance-master.md); the
+earlier `n8n@2.41.3` pin's report is [`conformance-2.41.3.md`](conformance-2.41.3.md), and the
 M4 report at `441970b` is [`conformance-final.md`](conformance-final.md). Do not infer
 full n8n compatibility from the summary table.
 

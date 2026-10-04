@@ -14,9 +14,9 @@
 | [0010](0010-bounds-at-the-entry.md) | Bounds at the entry, not a global concurrency counter | **proposed** — nothing built; would supersede the budget half of 0004 and the k-safety half of 0006 |
 | [0011](0011-composition-theorem.md) | The composition theorem: per-gadget contracts to a whole-workflow claim | **proposed** — proof sketch, not mechanised; measured to cover 40.5% of the template corpus |
 | [0012](0012-engine-v2-target.md) | Engine v2 as a second target: model first, seam second | **proposed**: nothing built; plan for n8n's `packages/@n8n/engine` |
-| [0013](0013-engine-v2-primary.md) | Engine v2 is the primary target; v1 is frozen | accepted (2026-10-02) |
+| [0013](0013-engine-v2-primary.md) | Engine v2 is the primary target; v1 is frozen | accepted (2026-10-02); decisions 2 and 3 superseded by 0015 |
 | [0014](0014-settlement-policy-seam.md) | The engine v2 settlement seam, and the net behind it | accepted as built (2026-10-03); the upstream shape of 0004 is open |
-| [0015](0015-both-engines-injectable.md) | Both engines, injectable into a stock n8n; the engine picks the path | accepted (2026-10-03); supersedes 0013 decisions 2 and 3 |
+| [0015](0015-both-engines-injectable.md) | Both engines, injectable into a stock n8n; the engine picks the path | accepted (2026-10-03); supersedes 0013 decisions 2 and 3; scope amendment (2026-10-03): the install path, the image and their docs cover v1 only |
 
 Each ADR has Context / Decision / Consequences / Evidence; Evidence names the spike under
 `typescript/tests/spikes/` that pins the behaviour it rests on.
@@ -47,7 +47,10 @@ families, the `SmtVerifier` is the fallback for a truncated graph, and a fourth 
 primary target and froze v1, and 0014 records the seam as built: patches 0003/0004, the
 net-backed `SettlementPolicy` behind them, and what each falsifier changed. 0012 keeps its
 **proposed** status as the record of the plan at the time. 0013 is the decision to move, and 0014
-records what the move built.
+records what the move built. 0015 then un-froze v1, made the compile profile follow the engine
+(`v1` unless a workflow sets `settings.engineType: 'v2'`) and added the install path; its
+2026-10-03 scope amendment limits that path, the image and their docs to v1, so v1 is the
+product path and engine v2 stays in the repository, maintained and tested, but not shipped.
 
 For what the decisions add up to — what exists, what it is measured to do and what it
 deliberately does not — see

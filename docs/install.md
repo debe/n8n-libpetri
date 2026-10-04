@@ -4,8 +4,9 @@ n8n-libpetri is an alternative intra-workflow scheduler for n8n. This page cover
 released n8n, either installed with npm or run from the official Docker image. It covers the
 **v1 path only**: patches 0001/0002 and `PetriScheduler`, activated by
 `N8N_EXECUTION_ENGINE=libpetri`. Engine v2 support (patches 0003/0004, `SettlementPolicy`) is not
-part of the install path yet. It stays in the repository and its tests, and is neither installed
-nor activated by anything on this page (ADR 0015, scope amendment of 2026-10-03).
+part of the install path yet. It stays in the repository and its tests. Nothing on this page
+installs patches 0003/0004 or activates the policy (ADR 0015, scope amendment of 2026-10-03); the
+package still contains its library entry (`n8n-libpetri/n8n-v2`) as a file nothing loads.
 
 > **Nothing is published yet.** There is no npm package and no image on a registry. Everything
 > below builds from a checkout of this repository. The package stays `"private": true` until
@@ -93,7 +94,11 @@ n8n-libpetri install
 `install` finds n8n through `--n8n <dir|bin>`, then `n8n` on `PATH`, then `$(npm root -g)/n8n`.
 It writes into n8n's `node_modules`, so run it as the user who owns that directory. It refuses
 an n8n inside npm's npx cache unless you pass `--allow-npx`, because npx can replace that
-directory at any time. Running `install` a second time does nothing.
+directory at any time. Running `install` a second time does nothing. Run `n8n-libpetri` itself
+from a global install too, not through `npx`: the hook path that `env` prints is inside this
+package, and npm can clear its npx cache at any time, after which n8n stops at boot on the missing
+hook file. `env` refuses to print a path inside that cache unless you pass `--allow-npx`, and
+`install` warns.
 
 Activate the engine in the shell that starts n8n:
 
@@ -112,8 +117,10 @@ to n8n's own loop without uninstalling.
 installs the packed tarball globally, runs `n8n-libpetri install`, and fails the build unless
 `status` reports `installed`. A wrapper entrypoint, `docker/entrypoint.sh`, runs before n8n's own
 `/docker-entrypoint.sh`: when `N8N_EXECUTION_ENGINE` is non-empty it appends the hook to
-`EXTERNAL_HOOK_FILES` and keeps any hook files you listed. Activation is therefore one variable,
-and the hook catches a typo in it.
+`EXTERNAL_HOOK_FILES` and keeps any hook files you listed. The image also sets
+`EXTERNAL_HOOK_FILES` to the hook, so a container started without the wrapper still loads it; with
+`N8N_EXECUTION_ENGINE` unset the hook loads nothing. Activation is therefore one variable, and the
+hook catches a typo in it.
 
 ```bash
 scripts/docker/build.sh 2.41.6      # npm run build + npm pack, then a local image n8n-libpetri:0.1.0-n8n2.41.6
@@ -151,7 +158,10 @@ executions, and the main process runs manual ones (unless
 `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true`). Set `N8N_EXECUTION_ENGINE=libpetri` on **every**
 main, worker and webhook process, and on npm installs `EXTERNAL_HOOK_FILES` as well (`eval
 "$(n8n-libpetri env)"` in each process's environment). With the image, the variable alone is
-enough on each container. Check each process's log for `scheduler registered`: a worker without
+enough on each container: the image lists the hook in `EXTERNAL_HOOK_FILES`, and its entrypoint
+appends it again to a value of your own. If you replace the entrypoint (`--entrypoint`, a
+Kubernetes `command:`) and also set your own `EXTERNAL_HOOK_FILES`, list
+`/usr/local/lib/node_modules/n8n-libpetri/hook/n8n-hook.cjs` in it yourself. Check each process's log for `scheduler registered`: a worker without
 it runs n8n's own loop. A workflow that is not `executionOrder: "v1"` runs on n8n's own loop on
 every process (see the `legacy route` line above). This covers the v1 path only; engine v2 is not
 part of the install path yet. A full queue-mode execution is exercised by

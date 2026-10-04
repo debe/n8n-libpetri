@@ -194,7 +194,7 @@ for (const file of files) {
 }
 
 console.log(`workflows ${files.length}, (workflow, fired trigger) entries ${entries}`);
-console.log(`accepted by the v2 converter + validator ${accepted}: ${withLoops} with a batch loop, ${toolAgents} in a workflow with an ai_tool connection (accepted; v2 fails the agent at its first tool call, EngineRequestNotSupportedError)`);
+console.log(`accepted by the v2 converter + validator ${accepted}: ${withLoops} with a batch loop, ${toolAgents} in a workflow with an ai_tool connection (accepted; every agent fails first at its missing Chat Model sub-node)`);
 console.log(`rejected ${entries - accepted}:`);
 for (const [why, n] of [...rejected].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(4)}  ${why}`);
 console.log(`runs ${runs}: completed ${ends.completed}, failed ${ends.failed}, drained-unfinished ${ends['drained-unfinished']}`);

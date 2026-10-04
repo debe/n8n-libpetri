@@ -799,14 +799,15 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       `notes/n8n-agent-runtime.md`
 
 - [ ] **Multi-producer input slot on a multi-input node (divergence row 2): not built, by decision
-      (2026-10-04).** Frequency, measured 2026-10-04 (`tasks/scan-multi-producer-slots.mjs`): 1 of 211 workflows (the 200 templates plus the 11 testbed workflows) has a multi-producer slot on a multi-input node, and its producers are concurrent. 0 are causally ordered, which is the class an arrival form could fix. Revisit if users report the in-class shape. Analysed 2026-10-04 (419 scenarios, n8n's real loop = our port on all 419). No
+      (2026-10-04).** Frequency, measured 2026-10-04 (`tasks/scan-multi-producer-slots.mjs`): 1 of 211 workflows (the 200 templates plus the 11 testbed workflows) has a multi-producer slot on a multi-input node, and its producers are concurrent. 0 are causally ordered, which is the class an arrival form could fix. Revisit if users report the in-class shape. Analysed 2026-10-03 (419 scenarios, n8n's real loop = our port on all 419; the scenario
+      harness and its list are not in the repository, so rows 41-43 stay `proposed`). No
       construct is exact on every case: concurrent producers are paired positionally (row 41). An
       exact causal 'arrival form' exists for causally ordered producers, the smoke shape included:
       empty tokens only report closure, data fills slots FIFO, a missing slot is padded `[]` once
       all of its edges are closed. That is n8n's R6, justified because R6 implies causal closure
-      when every node runs once. Design: workflow wf_19d47b6e-d54 judge plan (class predicate in
-      `analysis/inputs.ts`, a new `gadget/input-arrival.ts`, a codec re-derivation of
-      report/close places, ADR 0016). Not built
+      when every node runs once. Design (recorded only here; the plan it came from is not in the
+      repository): a class predicate in `analysis/inputs.ts`, a new `gadget/input-arrival.ts`, a
+      codec re-derivation of report/close places, ADR 0016. Not built
 ### 5. Harness and CI
 
 - [ ] **CI runs on Node 24 and cannot move up yet.** `n8n-workflow` pulls
@@ -950,7 +951,8 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       fates and the golden's failed runs can be: a step completes in the reference where n8n leaves
       it queued, and then cancels it. A fix likely changes the golden's failed runs (not measured): re-record with
       `--force` and say what moved
-- [x] **(b)** `engineV2` is the default profile (`DEFAULT_COMPILE_PROFILE`) of `analyse`,
+- [x] **(b)** (reversed by ADR 0015: the default is `v1` again, and the verify CLI defaults to
+      `--profile auto`) `engineV2` is the default profile (`DEFAULT_COMPILE_PROFILE`) of `analyse`,
       `compile`, `verify()`, `describeWorkflowJson` and the verify CLI. Every v1 consumer names
       `profile: 'v1'`: the scheduler's `compileCached`, `verify()`'s v1 branch, the fingerprint,
       the tests and the v1 spikes. The codec, conformance and testbed reach the compiler only
@@ -972,8 +974,8 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       (`--profile v1`, and compiling is not verifying), and gives exit 3's meaning per profile
 - [ ] **v1: the CLI exits 0 for a run that decided nothing** when z3 resolved (for example
       `--smt-fallback off` and a truncated graph, 79 of the v1 survey's 200). Exit 3 under v1
-      means no usable z3 only. v1 is frozen (ADR 0013), so this is recorded, not changed; the
-      survey now separates those runs itself
+      means no usable z3 only. Open v1 product work since ADR 0015 un-froze v1; until it is
+      changed, the survey separates those runs itself
 - [ ] **The engineV2 survey names no trigger**: 52 of its 109 refusals are workflows with
       several triggers (`AmbiguousTriggerError`). Enumerating triggers per workflow, as
       `tasks/v2-acceptance.mts` does (310 entries), would make the survey cover them
@@ -1115,8 +1117,15 @@ records; `docs/install.md`). Nothing is published. Open:
       starts its `WaitTracker` before it loads `EXTERNAL_HOOK_FILES`, so an execution that became
       overdue while n8n was down may resume on n8n's own loop. Smoke leg 5 measured the safe order
       in every run; nothing guarantees it. The fix is an ordering change in n8n's `start.ts`
-- [ ] **n8n 2.40.3.** Same `before` hashes as 2.41.x per the plan; supporting it costs one
-      `scripts/release/neutrality.sh n8n@2.40.3` run and a seam build
+- [ ] **n8n-core 2.40.3 (n8n 2.40.5/2.40.6).** `n8n@2.40.3` and `2.40.4` pin n8n-core 2.40.2,
+      not 2.40.3. Checked 2026-10-04 against the npm tarball: n8n-core 2.40.3's
+      `workflow-execute.js`, `index.js` and their maps hash to the same `before` values as the
+      2.41.4 manifest. Supporting it costs one `scripts/release/neutrality.sh n8n@2.40.6` run and a
+      seam build
+- [ ] **The v2 library entry in the package.** `package.json` still exports `./n8n-v2` and
+      `./n8n-v2-vitest-setup`, so the packed tarball, and the image built from it, contain
+      `dist/n8n-v2.js` (the settlement policy) though nothing installs or activates it (ADR 0015
+      scope amendment). Decide before publishing whether the published package keeps it
 - [ ] **Whole-package check (optional).** The installer hashes only the files it replaces and
       the names it creates (`docs/install.md`, pinned by an installer test). Refusing a modified
       n8n-core anywhere would need the release tarball's full file list in the manifest
