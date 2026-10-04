@@ -45,22 +45,22 @@ describe('hook/n8n-hook.cjs under n8n\'s loader', () => {
     expect(loadLikeN8n(fakePackage(null), { N8N_EXECUTION_ENGINE: '' }).status).toBe(0);
   });
 
-  it('requires the ESM dist synchronously from CommonJS and calls bootFromEnv with n8n\'s entry and its own path', () => {
-    const root = fakePackage('export function bootFromEnv(options) { globalThis.__n8nLibpetriBooted = options; }\n');
+  it('requires the ESM dist synchronously from CommonJS and only confirms: it calls confirmBooted, never bootFromEnv', () => {
+    const root = fakePackage(
+      'export function confirmBooted() { globalThis.__n8nLibpetriBooted = { confirmed: true }; }\n' +
+        "export function bootFromEnv() { throw new Error('the hook must not register'); }\n",
+    );
     const r = loadLikeN8n(root, { N8N_EXECUTION_ENGINE: 'libpetri' });
     expect(r.stderr).toBe('');
     expect(r.status).toBe(0);
-    const out = JSON.parse(r.stdout) as { registered: object; booted: { mainFilename: string; loader: string } };
-    expect(out.registered).toEqual({});
-    expect(out.booted.loader).toBe(join(root, 'hook', 'n8n-hook.cjs'));
-    expect(out.booted.mainFilename).toBe(join(root, 'n8n-main.cjs'));
+    expect(JSON.parse(r.stdout)).toEqual({ registered: {}, booted: { confirmed: true } });
   });
 
   it('stops n8n on a refusal, and writes the reason to stderr first (n8n keeps it only in the error\'s extra)', () => {
-    const root = fakePackage("export function bootFromEnv() { throw new Error('n8n-core 1.0.0 at /x has no scheduler seam'); }\n");
+    const root = fakePackage("export function confirmBooted() { throw new Error('no scheduler was registered before n8n started'); }\n");
     const r = loadLikeN8n(root, { N8N_EXECUTION_ENGINE: 'libpetri' });
     expect(r.status).toBe(42);
-    expect(r.stderr).toContain('[n8n-libpetri] refusing to start n8n: n8n-core 1.0.0 at /x has no scheduler seam');
+    expect(r.stderr).toContain('[n8n-libpetri] refusing to start n8n: no scheduler was registered before n8n started');
     expect(r.stderr).toContain('Problem loading external hook file');
   });
 });

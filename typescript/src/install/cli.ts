@@ -10,7 +10,7 @@ import { EXIT, InstallError } from './errors.js';
 import type { FileOps } from './fs-ops.js';
 import { locate, type LocateOptions } from './locate.js';
 import { loadManifests, manifestFor } from './manifest.js';
-import { defaultSeamsDir, hookPath, packageRoot } from './package-root.js';
+import { defaultSeamsDir, hookPath, packageRoot, preloadFor } from './package-root.js';
 import { renderStatus, status, statusExitCode } from './status.js';
 
 export const INSTALL_COMMANDS = ['install', 'uninstall', 'status', 'env'] as const;
@@ -56,9 +56,16 @@ export interface InstallCliDeps {
 /** Shell-quotes one word for `eval`. */
 const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 
+/** One `NODE_OPTIONS` word, in the double quotes Node's own parser understands when it needs them. */
+export const importOption = (preload: string): string =>
+  `--import=${/[\s"\\]/.test(preload) ? `"${preload.replace(/["\\]/g, '\\$&')}"` : preload}`;
+
 export function renderEnv(hook: string): string {
   return [
     'export N8N_EXECUTION_ENGINE=libpetri',
+    // Appended, so a user's own options (a heap size, say) stay. The preload registers the
+    // scheduler before n8n runs anything; the hook confirms it (divergence row 40).
+    `export NODE_OPTIONS="\${NODE_OPTIONS:+$NODE_OPTIONS }"${quote(importOption(preloadFor(hook)))}`,
     // Appended, so a user's own hook files keep loading.
     `export EXTERNAL_HOOK_FILES="\${EXTERNAL_HOOK_FILES:+$EXTERNAL_HOOK_FILES\${EXTERNAL_HOOK_FILES_SEPARATOR:-:}}"${quote(hook)}`,
     '',
@@ -136,7 +143,7 @@ export function runInstallCli(command: InstallCommand, argv: readonly string[], 
             result.plan.writes.map((w) => `  ${w.before === null ? 'created ' : 'replaced'} ${w.path}\n`).join('') +
             `${result.plan.maps ? '' : '  (this n8n-core ships no source maps, so none were installed)\n'}` +
             'n8n still runs its own loop until the engine is activated:\n' +
-            `  eval "$(n8n-libpetri env)"   # N8N_EXECUTION_ENGINE=libpetri and EXTERNAL_HOOK_FILES=${hook}\n`,
+            `  eval "$(n8n-libpetri env)"   # N8N_EXECUTION_ENGINE=libpetri, NODE_OPTIONS --import=${preloadFor(hook)}, EXTERNAL_HOOK_FILES=${hook}\n`,
         );
       }
       if (result.status === 'installed' && result.staleLock !== null) out.stderr(staleNote(result.staleLock));

@@ -21,22 +21,31 @@ and after, keeps backups, and records what it changed in `<n8n-core>/.n8n-libpet
 alone changes nothing: with no scheduler registered, n8n runs its own stack loop exactly as
 before.
 
-Activation is a separate run-time choice made through two environment variables:
+Activation is a separate run-time choice made through three environment variables
+(`n8n-libpetri env` prints all three):
 
 | Variable | Value | Effect |
 |---|---|---|
-| `N8N_EXECUTION_ENGINE` | unset or empty | n8n runs its own loop. The hook file does nothing. |
-| | `libpetri` | The hook registers `PetriScheduler` at boot. |
-| | anything else | The hook stops n8n at boot, so a typo cannot quietly run stock n8n. |
-| `EXTERNAL_HOOK_FILES` | lists `…/n8n-libpetri/hook/n8n-hook.cjs` | n8n `require()`s the hook in `start`, `worker`, `webhook`, `execute` and `execute-batch`. |
+| `N8N_EXECUTION_ENGINE` | unset or empty | n8n runs its own loop. The preload and the hook do nothing. |
+| | `libpetri` | The preload registers `PetriScheduler` before n8n runs anything. |
+| | anything else | n8n does not start, so a typo cannot quietly run stock n8n. |
+| `NODE_OPTIONS` | contains `--import=…/n8n-libpetri/hook/n8n-preload.mjs` | Node loads the preload before n8n's own code. It registers only in n8n's own command; any other Node process that inherits the variable, such as a script an Execute Command node starts, is left alone. n8n's task runners receive neither variable. |
+| `EXTERNAL_HOOK_FILES` | lists `…/n8n-libpetri/hook/n8n-hook.cjs` | n8n `require()`s the hook in `start`, `worker`, `webhook`, `execute` and `execute-batch`. The hook checks that the preload registered the scheduler and stops n8n if it did not. |
 
-The hook also refuses to boot when `n8n-core` has no seam (n8n was upgraded or reinstalled
-after the install) or when a patched file no longer hashes to what the installer wrote. It
-names the fix in both cases. An activated process logs these lines on stderr:
+Why the preload: n8n `start` arms its `WaitTracker`, which resumes executions that became
+overdue while n8n was down, before it loads hook files. A scheduler registered from a hook file
+could therefore arrive after such a resume had already started on n8n's own loop. The preload
+runs before n8n's entry module, so registration comes first by construction (divergence row 40),
+and the hook turns a forgotten preload into a refusal instead of a silent fallback.
+
+n8n also refuses to start when `n8n-core` has no seam (n8n was upgraded or reinstalled
+after the install) or when a patched file no longer hashes to what the installer wrote. The
+message names the fix in both cases. An activated process logs these lines on stderr:
 
 | Line | When | What it shows |
 |---|---|---|
-| `[n8n-libpetri] scheduler registered: …` | once, at boot | The hook registered `PetriScheduler`. Registering is not running anything. |
+| `[n8n-libpetri] scheduler registered: …` | once, at boot, before n8n's first line | The preload registered `PetriScheduler`. Registering is not running anything. |
+| `[n8n-libpetri] hook confirmed the preload registration …` | once, when n8n loads hook files | n8n-core's registry still holds that scheduler. |
 | `[n8n-libpetri] engine entered: …` | once per process, the first time n8n constructs a scheduler | n8n asked the registered factory for a scheduler. It does not show that the net ran an execution. |
 | `[n8n-libpetri] legacy route: executionOrder '<v0>' is not 'v1', …` | every execution of a workflow that is not `executionOrder: "v1"` | That execution ran on n8n's own stack loop, not on the net. |
 
@@ -95,32 +104,34 @@ n8n-libpetri install
 It writes into n8n's `node_modules`, so run it as the user who owns that directory. It refuses
 an n8n inside npm's npx cache unless you pass `--allow-npx`, because npx can replace that
 directory at any time. Running `install` a second time does nothing. Run `n8n-libpetri` itself
-from a global install too, not through `npx`: the hook path that `env` prints is inside this
-package, and npm can clear its npx cache at any time, after which n8n stops at boot on the missing
-hook file. `env` refuses to print a path inside that cache unless you pass `--allow-npx`, and
+from a global install too, not through `npx`: the preload and hook paths that `env` prints are
+inside this package, and npm can clear its npx cache at any time, after which n8n stops at boot on
+the missing files. `env` refuses to print a path inside that cache unless you pass `--allow-npx`, and
 `install` warns.
 
 Activate the engine in the shell that starts n8n:
 
 ```bash
-eval "$(n8n-libpetri env)"    # N8N_EXECUTION_ENGINE=libpetri, and our hook appended to EXTERNAL_HOOK_FILES
+eval "$(n8n-libpetri env)"    # N8N_EXECUTION_ENGINE=libpetri; the preload appended to NODE_OPTIONS, the hook to EXTERNAL_HOOK_FILES
 n8n start
 ```
 
-`env` appends to any `EXTERNAL_HOOK_FILES` you already set, using n8n's
-`EXTERNAL_HOOK_FILES_SEPARATOR`. Unset both variables, or just `N8N_EXECUTION_ENGINE`, to go back
-to n8n's own loop without uninstalling.
+`env` appends to any `NODE_OPTIONS` (a heap size, say) and `EXTERNAL_HOOK_FILES` you already
+set, the latter with n8n's `EXTERNAL_HOOK_FILES_SEPARATOR`. Unset `N8N_EXECUTION_ENGINE` to go
+back to n8n's own loop without uninstalling; the preload and the hook then do nothing. A process
+manager that does not run a shell (systemd, pm2) needs the three values in its own environment
+settings.
 
 ## Docker
 
 `docker/Dockerfile` starts from the official `n8nio/n8n:<version>` image. At build time it
 installs the packed tarball globally, runs `n8n-libpetri install`, and fails the build unless
 `status` reports `installed`. A wrapper entrypoint, `docker/entrypoint.sh`, runs before n8n's own
-`/docker-entrypoint.sh`: when `N8N_EXECUTION_ENGINE` is non-empty it appends the hook to
-`EXTERNAL_HOOK_FILES` and keeps any hook files you listed. The image also sets
-`EXTERNAL_HOOK_FILES` to the hook, so a container started without the wrapper still loads it; with
-`N8N_EXECUTION_ENGINE` unset the hook loads nothing. Activation is therefore one variable, and the
-hook catches a typo in it.
+`/docker-entrypoint.sh`: when `N8N_EXECUTION_ENGINE` is non-empty it appends the preload to
+`NODE_OPTIONS` and the hook to `EXTERNAL_HOOK_FILES`, keeping any options and hook files you set.
+The image also sets both variables, so a container started without the wrapper still loads them;
+with `N8N_EXECUTION_ENGINE` unset they do nothing. Activation is therefore one variable, and a
+typo in it stops n8n.
 
 ```bash
 scripts/docker/build.sh 2.41.6      # npm run build + npm pack, then a local image n8n-libpetri:0.1.0-n8n2.41.6
@@ -134,20 +145,23 @@ The image is tagged locally and never pushed. `scripts/docker/build.sh --allow-u
 passes that flag to the installer, for seams that have no neutrality record yet; the shipped
 ones do not need it.
 
-`scripts/docker/smoke.sh <version>` checks an image in seven legs, one container at a time
+`scripts/docker/smoke.sh <version>` checks an image in eight legs, one container at a time
 under `--memory=700m`, and removes every container, volume and network it created:
 
 1. `status` reports `installed`.
 2. With the engine off, an imported workflow with a join and a retry runs through
    `n8n execute --id`, and no `[n8n-libpetri]` line appears.
 3. With `N8N_EXECUTION_ENGINE=libpetri` and a user hook file already set, both hooks load,
-   `scheduler registered` and `engine entered` appear, and the run data and node order equal
-   leg 2's.
+   `scheduler registered`, the hook's confirmation and `engine entered` appear, and the run data
+   and node order equal leg 2's.
 4. `N8N_EXECUTION_ENGINE=libpetrx` stops n8n with our message.
-5. A Wait-node execution that became overdue while n8n was down is resumed by `n8n start`. The
-   leg records whether the resume ran through the engine (see [Known gaps](#known-gaps)).
+5. A Wait-node execution that became overdue while n8n was down is resumed by `n8n start`:
+   `scheduler registered` comes before n8n's first log line, and the resume enters the engine.
 6. `uninstall` restores every `n8n-core` file byte for byte to the base image's.
-7. A queue-mode `n8n worker` next to a Redis container logs `scheduler registered`.
+7. A queue-mode `n8n worker` next to a Redis container, with its own `NODE_OPTIONS`, logs
+   `scheduler registered` and the hook's confirmation.
+8. With the entrypoint replaced and a `NODE_OPTIONS` of your own that lacks the preload, the
+   engine on stops n8n: the hook finds no registration.
 
 These are integration results, not conformance numbers.
 
@@ -156,13 +170,15 @@ These are integration results, not conformance numbers.
 In queue mode the main process only enqueues: workers construct the scheduler for queued
 executions, and the main process runs manual ones (unless
 `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true`). Set `N8N_EXECUTION_ENGINE=libpetri` on **every**
-main, worker and webhook process, and on npm installs `EXTERNAL_HOOK_FILES` as well (`eval
-"$(n8n-libpetri env)"` in each process's environment). With the image, the variable alone is
-enough on each container: the image lists the hook in `EXTERNAL_HOOK_FILES`, and its entrypoint
-appends it again to a value of your own. If you replace the entrypoint (`--entrypoint`, a
-Kubernetes `command:`) and also set your own `EXTERNAL_HOOK_FILES`, list
-`/usr/local/lib/node_modules/n8n-libpetri/hook/n8n-hook.cjs` in it yourself. Check each process's log for `scheduler registered`: a worker without
-it runs n8n's own loop. A workflow that is not `executionOrder: "v1"` runs on n8n's own loop on
+main, worker and webhook process, and on npm installs `NODE_OPTIONS` and `EXTERNAL_HOOK_FILES`
+as well (`eval "$(n8n-libpetri env)"` in each process's environment). With the image, the
+variable alone is enough on each container: the image sets both, and its entrypoint appends ours
+again to values of your own. If you replace the entrypoint (`--entrypoint`, a Kubernetes
+`command:`) and also set your own `NODE_OPTIONS` or `EXTERNAL_HOOK_FILES`, include
+`--import=/usr/local/lib/node_modules/n8n-libpetri/hook/n8n-preload.mjs` and
+`/usr/local/lib/node_modules/n8n-libpetri/hook/n8n-hook.cjs` yourself; a process with the hook
+and without the preload refuses to start. A process with neither runs n8n's own loop, so check
+each process's log for `scheduler registered`. A workflow that is not `executionOrder: "v1"` runs on n8n's own loop on
 every process (see the `legacy route` line above). This covers the v1 path only; engine v2 is not
 part of the install path yet. A full queue-mode execution is exercised by
 `scripts/testbed/n8n-testbed.sh --queue` on the pinned n8n master (`docs/testbed.md`), not by the
@@ -218,11 +234,6 @@ exit 3 ("no solver resolved") belongs to a different command.
   the empty branch, where n8n waits for the fallback. The shape is rare (0 of 211 corpus
   workflows; row 2). Wire the fallback into its own Merge input, or merge the two paths before the
   join, and the verifier proves proper completion.
-- **Overdue waits at boot.** In regular mode n8n starts its `WaitTracker` before it loads hook
-  files, so an execution that became overdue while n8n was down could resume on n8n's own loop.
-  Smoke leg 5 measured the resume going through the engine on 2.41.6 (two runs) and on 2.42.2
-  (one run), because the tracker's timer fired after the hook had loaded. Nothing guarantees that
-  order (divergence row 40; the fix is upstream). Workers load hooks before they take jobs.
 - **Source maps.** The installer regenerates the maps of the touched files. Stack traces map to
   the patched TypeScript lines, and the map of the stock release cannot be reproduced.
 

@@ -62,7 +62,7 @@ Error: N8N_LIBPETRI_RESOLVE_FROM is not set          # refuses rather than degra
 The log carries them separately, because they are not the same statement:
 
 ```
-[n8n-libpetri] scheduler registered: budget=4, hook=…/typescript/dist/index.js
+[n8n-libpetri] scheduler registered: budget=4, loader=…/typescript/dist/index.js
 [n8n-libpetri] engine entered: n8n constructed a scheduler through the registered factory
 ```
 

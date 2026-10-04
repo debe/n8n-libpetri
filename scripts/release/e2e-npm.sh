@@ -12,7 +12,8 @@
 #   1. npm i -g <tarball> into the same prefix; `n8n-libpetri status` finds n8n on PATH: stock
 #   2. `install` (the shipped seams carry a passing neutrality record, so no flag) installs and
 #      the record is not `unverified`; a second install is a no-op; `status` reports installed
-#   3. engine on (`eval "$(n8n-libpetri env)"`): n8n starts, logs `scheduler registered`; one
+#   3. engine on (`eval "$(n8n-libpetri env)"`): n8n starts, logs `scheduler registered` (the
+#      NODE_OPTIONS preload) and `hook confirmed the preload registration`; one
 #      workflow (a fan-out joined by a Merge) runs through POST /rest/workflows/:id/run and
 #      succeeds, and the log then shows `engine entered`
 #   4. engine off, same database: the same workflow's run data equals leg 3's; no
@@ -99,16 +100,17 @@ run_workflow() { # <out.json>
 log "leg 3: engine on"
 eval "$(n8n-libpetri env)"
 [ "$N8N_EXECUTION_ENGINE" = libpetri ] || die "env did not set N8N_EXECUTION_ENGINE"
-start_n8n "$LOGS/n8n-on.log" N8N_EXECUTION_ENGINE="$N8N_EXECUTION_ENGINE" EXTERNAL_HOOK_FILES="$EXTERNAL_HOOK_FILES"
+start_n8n "$LOGS/n8n-on.log" N8N_EXECUTION_ENGINE="$N8N_EXECUTION_ENGINE" NODE_OPTIONS="$NODE_OPTIONS" EXTERNAL_HOOK_FILES="$EXTERNAL_HOOK_FILES"
 wait_rest || die "n8n did not come up with the engine on; see $LOGS/n8n-on.log"
 grep -q '\[n8n-libpetri\] scheduler registered' "$LOGS/n8n-on.log" || die "no 'scheduler registered' in $LOGS/n8n-on.log"
+grep -q '\[n8n-libpetri\] hook confirmed the preload registration' "$LOGS/n8n-on.log" || die "the hook did not confirm the registration; see $LOGS/n8n-on.log"
 log "  $(grep -m1 'scheduler registered' "$LOGS/n8n-on.log")"
 run_workflow "$WORK/run-on.json" || die "the workflow run failed with the engine on"
 for _ in $(seq 1 20); do grep -q 'engine entered' "$LOGS/n8n-on.log" && break; sleep 0.25; done
 grep -q '\[n8n-libpetri\] engine entered' "$LOGS/n8n-on.log" || die "the run did not enter the engine"
 log "  $(grep -m1 'engine entered' "$LOGS/n8n-on.log")"
 stop_n8n
-unset N8N_EXECUTION_ENGINE EXTERNAL_HOOK_FILES
+unset N8N_EXECUTION_ENGINE NODE_OPTIONS EXTERNAL_HOOK_FILES
 
 # --- 4 ---------------------------------------------------------------------------------------
 log "leg 4: engine off"

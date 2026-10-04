@@ -1113,7 +1113,10 @@ records; `docs/install.md`). Nothing is published. Open:
       License. Everything of the owner's is Apache-2.0. `package.json` declares
       `Apache-2.0 AND LicenseRef-n8n-sustainable-use`, and the NOTICE files say so. Publishing
       itself (lifting `"private": true`, pushing the image) is still a separate, explicit step
-- [ ] **Upstream: hook files before the `WaitTracker`.** Divergence row 40: in regular mode n8n
+- [x] **Overdue waits at boot (row 40), fixed here 2026-10-04:** the `NODE_OPTIONS` preload
+      registers before n8n runs anything and the hook refuses without it (`tasks/inject-plan.md`
+      decision 7, amended). What follows stays only as a possible upstream simplification.
+- [ ] **Upstream (optional): hook files before the `WaitTracker`.** Divergence row 40: in regular mode n8n
       starts its `WaitTracker` before it loads `EXTERNAL_HOOK_FILES`, so an execution that became
       overdue while n8n was down may resume on n8n's own loop. Smoke leg 5 measured the safe order
       in every run; nothing guarantees it. The fix is an ordering change in n8n's `start.ts`

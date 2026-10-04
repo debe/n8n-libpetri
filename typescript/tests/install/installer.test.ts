@@ -7,7 +7,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symli
 import { hostname } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { install } from '../../src/install/apply.js';
-import { runInstallCli, renderEnv, type InstallCliDeps } from '../../src/install/cli.js';
+import { importOption, runInstallCli, renderEnv, type InstallCliDeps } from '../../src/install/cli.js';
+import { importedModules } from '../../src/install/status.js';
 import { EXIT } from '../../src/install/errors.js';
 import { nodeFileOps, type FileOps } from '../../src/install/fs-ops.js';
 import { locate } from '../../src/install/locate.js';
@@ -16,6 +17,7 @@ import { JOURNAL_FILE, LOCK_FILE, RECORD_FILE, readRecord, sha256, STATE_DIR } f
 import { CORE_VERSION, DIST, PATCHED, captureIo, cleanupTrees, makeSeams, makeTree, snapshot, tempDir, type Tree } from './support.js';
 
 const HOOK = '/opt/n8n-libpetri/hook/n8n-hook.cjs';
+const PRELOAD = '/opt/n8n-libpetri/hook/n8n-preload.mjs';
 
 function run(command: 'install' | 'uninstall' | 'status' | 'env', argv: string[], deps: InstallCliDeps & { seamsDir: string }) {
   const io = captureIo();
@@ -611,11 +613,34 @@ describe('status environment and env', () => {
     expect(JSON.parse(off.out).environment).toMatchObject({ engine: null, active: false, hookListed: false });
     expect(run('status', ['--n8n', tree.n8nDir], { seamsDir }).out).toContain('runs its own loop');
 
-    const on = run('status', ['--n8n', tree.n8nDir, '--json'], { seamsDir, env: { PATH: '', N8N_EXECUTION_ENGINE: 'libpetri', EXTERNAL_HOOK_FILES: `/x/other.js:${HOOK}` } });
-    expect(JSON.parse(on.out).environment).toMatchObject({ engine: 'libpetri', active: true, hookListed: true, hookFiles: ['/x/other.js', HOOK] });
+    const full = { PATH: '', N8N_EXECUTION_ENGINE: 'libpetri', NODE_OPTIONS: `--max-old-space-size=256 --import=${PRELOAD}`, EXTERNAL_HOOK_FILES: `/x/other.js:${HOOK}` };
+    const on = run('status', ['--n8n', tree.n8nDir, '--json'], { seamsDir, env: full });
+    expect(JSON.parse(on.out).environment).toMatchObject({ engine: 'libpetri', active: true, hookListed: true, hookFiles: ['/x/other.js', HOOK], preloadListed: true, preload: PRELOAD });
+    const onText = run('status', ['--n8n', tree.n8nDir], { seamsDir, env: full }).out;
+    expect(onText).toContain(`NODE_OPTIONS imports ${PRELOAD}`);
+    expect(onText).not.toMatch(/refuses|own loop|nothing checks/);
 
     const typo = run('status', ['--n8n', tree.n8nDir, '--json'], { seamsDir, env: { PATH: '', N8N_EXECUTION_ENGINE: 'libpetrx' } });
     expect(JSON.parse(typo.out).environment.active).toContain("is not 'libpetri'");
+  });
+
+  it('says what n8n does with each missing piece: no preload refuses through the hook, neither runs n8n\'s loop unrefused', () => {
+    const { tree, seamsDir } = seamsAndTree();
+    run('install', ['--n8n', tree.n8nDir], { seamsDir });
+    const text = (env: NodeJS.ProcessEnv): string => run('status', ['--n8n', tree.n8nDir], { seamsDir, env: { PATH: '', N8N_EXECUTION_ENGINE: 'libpetri', ...env } }).out;
+    expect(text({ EXTERNAL_HOOK_FILES: HOOK })).toContain('refuses to start: the hook finds no scheduler registered by the preload');
+    expect(text({})).toContain('runs its own loop although N8N_EXECUTION_ENGINE asks for the engine, and nothing refuses');
+    expect(text({ NODE_OPTIONS: `--import ${PRELOAD}` })).toContain('nothing checks it at boot');
+    const stock = seamsAndTree();
+    expect(run('status', ['--n8n', stock.tree.n8nDir], { seamsDir: stock.seamsDir, env: { PATH: '', N8N_EXECUTION_ENGINE: 'libpetri', NODE_OPTIONS: `--import=${PRELOAD}` } }).out)
+      .toContain('refuses to start: the preload finds no scheduler seam');
+  });
+
+  it('reads NODE_OPTIONS the way Node splits it, and quotes a preload path that needs it', () => {
+    expect(importedModules(`--max-old-space-size=256 --import=${PRELOAD} --import /b.mjs --import=file:///c%20d.mjs`)).toEqual([PRELOAD, '/b.mjs', '/c d.mjs']);
+    const odd = '/opt/my n8n/"x"\\/n8n-preload.mjs';
+    expect(importedModules(`--inspect ${importOption(odd)}`)).toEqual([odd]);
+    expect(importOption(PRELOAD)).toBe(`--import=${PRELOAD}`);
   });
 
   it('refuses to print a hook path inside npm\'s npx cache unless --allow-npx, and install warns about it', () => {
@@ -635,7 +660,15 @@ describe('status environment and env', () => {
     expect(run('install', ['--n8n', tree.n8nDir], { seamsDir }).err).toBe('');
   });
 
-  it('prints the two exports, appending to any hook files already set', () => {
+  it('prints the three exports; evaluated, they append to the NODE_OPTIONS and hook files already set', () => {
+    const out = run('env', [], { seamsDir: tempDir() }).out;
+    const sh = spawnSync('sh', ['-c', `NODE_OPTIONS=--max-old-space-size=256; EXTERNAL_HOOK_FILES=/x/own.js; ${out}\nprintf '%s\\n%s\\n%s' "$N8N_EXECUTION_ENGINE" "$NODE_OPTIONS" "$EXTERNAL_HOOK_FILES"`], { encoding: 'utf8' });
+    expect(sh.stdout).toBe(`libpetri\n--max-old-space-size=256 --import=${PRELOAD}\n/x/own.js:${HOOK}`);
+    const bare = spawnSync('sh', ['-c', `unset NODE_OPTIONS EXTERNAL_HOOK_FILES; ${out}\nprintf '%s|%s' "$NODE_OPTIONS" "$EXTERNAL_HOOK_FILES"`], { encoding: 'utf8' });
+    expect(bare.stdout).toBe(`--import=${PRELOAD}|${HOOK}`);
+  });
+
+  it('prints the exports, appending to any hook files already set', () => {
     const r = run('env', [], { seamsDir: tempDir() });
     expect(r.code).toBe(EXIT.ok);
     expect(r.out).toBe(renderEnv(HOOK));

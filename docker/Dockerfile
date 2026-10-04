@@ -5,9 +5,10 @@
 # The image is the stock n8n image plus two things, both inert until activated:
 #   1. the scheduler seam (patches 0001/0002, rebuilt for this release) installed into the
 #      image's n8n-core by `n8n-libpetri install`, after checking every file's sha256;
-#   2. the hook listed in EXTERNAL_HOOK_FILES, and a wrapper entrypoint that adds it again
-#      when N8N_EXECUTION_ENGINE is set and the user's own EXTERNAL_HOOK_FILES replaced it,
-#      then hands over to n8n's own /docker-entrypoint.sh.
+#   2. the preload in NODE_OPTIONS (it registers the scheduler before n8n runs anything) and
+#      the hook in EXTERNAL_HOOK_FILES (it confirms the registration), and a wrapper entrypoint
+#      that adds them again when N8N_EXECUTION_ENGINE is set and the user's own values replaced
+#      them, then hands over to n8n's own /docker-entrypoint.sh.
 # With N8N_EXECUTION_ENGINE unset, n8n runs its own stack loop exactly as in the base image.
 #
 # Built from a local `npm pack` tarball by scripts/docker/build.sh, which stages the build
@@ -40,13 +41,15 @@ RUN set -eu; \
 
 COPY --chmod=0755 entrypoint.sh /n8n-libpetri-entrypoint.sh
 
-# The hook is also listed here, not only by the wrapper: a deployment that replaces the
-# entrypoint (`docker run --entrypoint`, a Kubernetes `command:`) would otherwise run n8n's own
-# loop while N8N_EXECUTION_ENGINE=libpetri claims the engine, with nothing refusing. With the
-# variable unset the hook loads nothing and exports `{}`. A user's own EXTERNAL_HOOK_FILES
-# replaces this value; the wrapper then appends the hook again, but without the wrapper it is
-# up to that value to list it.
-ENV EXTERNAL_HOOK_FILES=/usr/local/lib/node_modules/n8n-libpetri/hook/n8n-hook.cjs
+# Both are also set here, not only by the wrapper: a deployment that replaces the entrypoint
+# (`docker run --entrypoint`, a Kubernetes `command:`) would otherwise run n8n's own loop while
+# N8N_EXECUTION_ENGINE=libpetri claims the engine, with nothing refusing. With the variable
+# unset the preload loads nothing and the hook exports `{}`. A user's own NODE_OPTIONS or
+# EXTERNAL_HOOK_FILES replaces this value; the wrapper then appends ours again, but without the
+# wrapper it is up to that value to keep them. A hook without the preload refuses to start n8n
+# (divergence row 40).
+ENV NODE_OPTIONS=--import=/usr/local/lib/node_modules/n8n-libpetri/hook/n8n-preload.mjs \
+    EXTERNAL_HOOK_FILES=/usr/local/lib/node_modules/n8n-libpetri/hook/n8n-hook.cjs
 
 LABEL org.opencontainers.image.title="n8n with n8n-libpetri" \
       org.opencontainers.image.description="The official n8n ${N8N_VERSION} image with n8n-libpetri, an alternative intra-workflow scheduler, installed and inactive until N8N_EXECUTION_ENGINE=libpetri" \

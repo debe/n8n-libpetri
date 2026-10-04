@@ -26,8 +26,16 @@ All notable changes to this project are documented here. The format follows
     they name their profile. The v1 net is byte-identical (`tests/fixtures/v1-fingerprint.json`).
 
 ### Added
+- **The scheduler is registered before n8n runs anything (divergence row 40, fixed).** A
+  `NODE_OPTIONS` `--import` preload, `hook/n8n-preload.mjs`, registers it in n8n's own command
+  before n8n's entry module runs, so an overdue wait that `n8n start`'s `WaitTracker` resumes at
+  boot goes through the engine. The `EXTERNAL_HOOK_FILES` hook now only confirms the
+  registration and refuses to start n8n without it. `n8n-libpetri env` prints the third
+  variable, `status` reports it, the image sets it, and smoke legs 5 and 8 assert the order and
+  the refusal.
 - **Divergence rows 40-43.** Row 40: in regular mode `n8n start` starts its `WaitTracker` before
-  it loads hook files, so an overdue wait may resume on n8n's own loop (install path, open race).
+  it loads hook files, so an overdue wait could resume on n8n's own loop; resolved by the preload
+  above.
   Rows 41-43 (`proposed`; from a 419-scenario comparison whose harness is not in the repository):
   concurrent producers into one slot are paired positionally, a stuck chooseBranch Merge blocks a
   descendant join's flush, and a `null` return by the last activation skips R6.

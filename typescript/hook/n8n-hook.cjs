@@ -1,15 +1,16 @@
 'use strict';
 /**
- * n8n-libpetri's `EXTERNAL_HOOK_FILES` entry (`tasks/inject-plan.md` decision 7).
+ * n8n-libpetri's `EXTERNAL_HOOK_FILES` entry (`tasks/inject-plan.md` decision 7): the check that
+ * the scheduler is registered, not the registration.
  *
- *   export N8N_EXECUTION_ENGINE=libpetri
- *   export EXTERNAL_HOOK_FILES=/path/to/n8n-libpetri/hook/n8n-hook.cjs   # `n8n-libpetri env` prints both
- *
+ * `hook/n8n-preload.mjs` registers the scheduler from `NODE_OPTIONS`, before n8n runs anything.
  * n8n `require()`s every hook file in `ExternalHooks.init()`, in each command that runs
  * executions (`start`, `worker`, `webhook`, `execute`, `execute-batch`), and a file that throws
- * stops that command. This one registers no hooks (it exports `{}`); requiring it is what
- * registers the scheduler, through `bootFromEnv` (`dist/n8n/boot.js`), the same boot path the
- * testbed's preload calls.
+ * stops that command. In `start` that is after the `WaitTracker` may have resumed an overdue
+ * wait (divergence row 40), so registering here would be too late. This file registers no hooks
+ * (it exports `{}`); requiring it calls `confirmBooted` (`dist/n8n/boot.js`), which throws when
+ * the engine is requested and the preload did not register, so a missing preload stops n8n
+ * instead of running n8n's own loop under `N8N_EXECUTION_ENGINE=libpetri`.
  *
  * With `N8N_EXECUTION_ENGINE` unset or empty the dist is not even loaded. Any refusal is
  * written to stderr before it is rethrown, because n8n reports a failing hook file as
@@ -21,8 +22,8 @@
 const value = process.env.N8N_EXECUTION_ENGINE;
 if (value !== undefined && value !== '') {
   try {
-    const { bootFromEnv } = require('../dist/n8n/boot.js');
-    bootFromEnv({ mainFilename: require.main ? require.main.filename : undefined, loader: __filename });
+    const { confirmBooted } = require('../dist/n8n/boot.js');
+    confirmBooted();
   } catch (error) {
     process.stderr.write(`[n8n-libpetri] refusing to start n8n: ${error instanceof Error ? error.message : String(error)}\n`);
     throw error;

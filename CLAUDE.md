@@ -183,9 +183,13 @@ scripts/docker/smoke.sh <version>                    # seven legs, one container
 
 The installer patches the `n8n-core` an installed n8n loads with patches 0001/0002, rebuilt per
 release as copy/insert deltas plus regenerated maps (`typescript/seams/n8n-core/<version>/`),
-after checking the sha256 of every file it replaces or creates. `typescript/hook/n8n-hook.cjs` is
-the `EXTERNAL_HOOK_FILES` entry; it calls `bootFromEnv` (`src/n8n/boot.ts`) only when
-`N8N_EXECUTION_ENGINE` is non-empty. **A change to patch 0001 or 0002 means regenerating the
+after checking the sha256 of every file it replaces or creates. `typescript/hook/n8n-preload.mjs`
+is the `NODE_OPTIONS` `--import` preload that registers the scheduler (`preloadFromEnv`,
+`src/n8n/boot.ts`) before n8n runs anything, and only in n8n's own command on its main thread;
+`typescript/hook/n8n-hook.cjs` is the `EXTERNAL_HOOK_FILES` entry and only confirms the
+registration (`confirmBooted`). **Never register from the hook file:** n8n `start` can resume an
+overdue wait before it loads hook files (divergence row 40, fixed by the preload). Both do
+nothing unless `N8N_EXECUTION_ENGINE` is non-empty. **A change to patch 0001 or 0002 means regenerating the
 seams (`build-seams.mjs`) and re-running `neutrality.sh` for every shipped manifest:**
 `tests/install/seams.test.ts` pins each manifest to the committed patches' sha256, a changed
 `after` hash resets a manifest's `neutrality` record to null, and `install` refuses such seams

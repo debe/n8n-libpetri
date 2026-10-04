@@ -3,7 +3,7 @@
 # smoke.sh — smoke-test a locally built n8n-libpetri image (tasks/inject-plan.md step 10; v1
 # path only). An integration result, never a conformance number.
 #
-#   scripts/docker/smoke.sh [n8n-version] [--image <tag>] [--legs 1,2,3,4,5,6,7] [--out <dir>]
+#   scripts/docker/smoke.sh [n8n-version] [--image <tag>] [--legs 1,2,3,4,5,6,7,8] [--out <dir>]
 #
 # Default n8n version 2.41.6, image n8n-libpetri:<package version>-n8n<version> (build it with
 # scripts/docker/build.sh), base image n8nio/n8n:<version>. One n8n container at a time, each
@@ -14,16 +14,20 @@
 #   2. engine off: import:workflow, then `execute --id` on a fixture with a join and a retry and
 #      no Code node; succeeds, and no `[n8n-libpetri]` line appears
 #   3. engine on (N8N_EXECUTION_ENGINE=libpetri, plus a user's own EXTERNAL_HOOK_FILES entry):
-#      the user's hook still loads, `scheduler registered` and `engine entered` appear, and the
-#      run data and node order equal leg 2's (error stacks stripped)
+#      the user's hook still loads, `scheduler registered`, `hook confirmed the preload
+#      registration` and `engine entered` appear, and the run data and node order equal leg 2's
+#      (error stacks stripped)
 #   4. N8N_EXECUTION_ENGINE=libpetrx: n8n refuses to start, with our message
 #   5. overdue wait: a Wait-node execution (70 s) put to wait with the engine on, its waitTill
-#      passed while no n8n runs, then `n8n start` with the engine on: records whether the resume
-#      printed `engine entered` before `scheduler registered` (the decision 7 gap) — measured,
-#      not asserted
+#      passed while no n8n runs, then `n8n start` with the engine on: `scheduler registered` comes
+#      before n8n's first line (`Initializing n8n process`), so before the `WaitTracker` can resume
+#      anything (divergence row 40), and the resume prints `engine entered` and succeeds
 #   6. `uninstall` (as root), then every n8n-core file hashes as in the base image
-#   7. queue-mode worker boot: a Redis container plus `n8n worker` (--max-old-space-size=256)
-#      logs `scheduler registered`
+#   7. queue-mode worker boot: a Redis container plus `n8n worker` with the user's own
+#      NODE_OPTIONS (--max-old-space-size=256, which the wrapper appends the preload to) logs
+#      `scheduler registered` and the hook's confirmation
+#   8. no preload: the entrypoint replaced (`--entrypoint n8n`) and the user's own NODE_OPTIONS
+#      without the preload, engine on: the hook finds no registration and n8n refuses to start
 #
 # Logs and outputs go to --out (default: a fresh directory under ${TMPDIR:-/tmp}).
 set -euo pipefail
@@ -31,7 +35,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 N8N_VERSION=2.41.6
 IMAGE=""
-LEGS="1,2,3,4,5,6,7"
+LEGS="1,2,3,4,5,6,7,8"
 OUT=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -140,6 +144,7 @@ if want 3; then
     execute --id=LpSmokeJoinRtry1 --rawOutput > "$OUT/on.stdout" 2> "$OUT/on.stderr" || die "execute with the engine on exited $?; see $OUT/on.*"
   grep -q '\[smoke\] user hook loaded' "$OUT/on.stderr" || die "the user's own hook file did not load next to ours; see $OUT/on.stderr"
   grep -q '\[n8n-libpetri\] scheduler registered' "$OUT/on.stderr" || die "no 'scheduler registered'; see $OUT/on.stderr"
+  grep -q '\[n8n-libpetri\] hook confirmed the preload registration' "$OUT/on.stderr" || die "the hook did not confirm the registration; see $OUT/on.stderr"
   grep -q '\[n8n-libpetri\] engine entered' "$OUT/on.stderr" || die "no 'engine entered'; see $OUT/on.stderr"
   sed 's/^/    /' "$OUT/on.stderr"
   node -e "$EXTRACT" < "$OUT/on.stdout" > "$OUT/on.json" || die "no run JSON in $OUT/on.stdout"
@@ -211,13 +216,12 @@ if want 5; then
   case "$state" in *'"status":"success"'*) ;; *) die "the overdue execution did not finish within 120 s: ${state:-no row}; see $OUT/wait-resume.log" ;; esac
   reg_line="$(grep -n '\[n8n-libpetri\] scheduler registered' "$OUT/wait-resume.log" | head -1 | cut -d: -f1)"
   ent_line="$(grep -n '\[n8n-libpetri\] engine entered' "$OUT/wait-resume.log" | head -1 | cut -d: -f1)"
-  if [ -n "$ent_line" ]; then
-    log "  MEASURED: the overdue resume ran through the engine (registered at log line ${reg_line:-?}, engine entered at line $ent_line): $state"
-    echo engine > "$OUT/wait-resume.outcome"
-  else
-    log "  MEASURED: the overdue resume ran on n8n's own loop (no 'engine entered'; registered at log line ${reg_line:-?}): $state"
-    echo stack > "$OUT/wait-resume.outcome"
-  fi
+  init_line="$(grep -n 'Initializing n8n process' "$OUT/wait-resume.log" | head -1 | cut -d: -f1)"
+  [ -n "$reg_line" ] || die "no 'scheduler registered'; see $OUT/wait-resume.log"
+  [ -n "$init_line" ] || die "no 'Initializing n8n process' line to order against; see $OUT/wait-resume.log"
+  [ "$reg_line" -lt "$init_line" ] || die "registered at log line $reg_line, after n8n's first line ($init_line): the WaitTracker could resume first; see $OUT/wait-resume.log"
+  [ -n "$ent_line" ] || die "the overdue resume ran on n8n's own loop (no 'engine entered'); see $OUT/wait-resume.log"
+  log "  registered at log line $reg_line, before n8n's first line ($init_line); engine entered at line $ent_line: $state"
 fi
 
 # --- 6 ---------------------------------------------------------------------------------------
@@ -249,8 +253,23 @@ if want 7; then
   docker logs "$cid" > "$OUT/worker.log" 2>&1
   mem="$(docker stats --no-stream --format '{{.MemUsage}}' "$cid" 2>/dev/null || true)"
   [ "$ok" = 1 ] || die "the worker did not log 'scheduler registered'; see $OUT/worker.log"
+  grep -q '\[n8n-libpetri\] hook confirmed the preload registration' "$OUT/worker.log" || die "the worker's hook did not confirm the registration; see $OUT/worker.log"
   log "  $(grep -m1 'scheduler registered' "$OUT/worker.log")"
   log "  $(grep -m1 'worker is now ready' "$OUT/worker.log" || echo 'no ready line'); memory ${mem:-?}"
+fi
+
+# --- 8 ---------------------------------------------------------------------------------------
+if want 8; then
+  log "leg 8: engine on without the preload (entrypoint replaced, the user's own NODE_OPTIONS)"
+  cid="$(n8n_run -d --entrypoint n8n -e N8N_EXECUTION_ENGINE=libpetri -e NODE_OPTIONS=--max-old-space-size=256 "$IMAGE" start)"
+  wait_exit "$cid" 120 || die "n8n kept running with the engine on and no preload"
+  docker logs "$cid" > "$OUT/no-preload.log" 2>&1
+  code="$(docker inspect -f '{{.State.ExitCode}}' "$cid")"
+  docker rm -f "$cid" >/dev/null
+  [ "$code" != 0 ] || die "n8n exited 0 with the engine on and no preload"
+  grep -q 'no scheduler was registered before n8n started' "$OUT/no-preload.log" || die "the refusal does not name the missing preload; see $OUT/no-preload.log"
+  if grep -q '\[n8n-libpetri\] engine entered' "$OUT/no-preload.log"; then die "an execution ran before the refusal"; fi
+  log "  refused (exit $code): $(grep -m1 'refusing to start' "$OUT/no-preload.log" | cut -c1-160)"
 fi
 
 log "legs $LEGS passed"

@@ -4,9 +4,9 @@
  * without patch 0002's seam. Each case names one row of `tasks/inject-plan.md` decision 8.
  */
 import { createRequire } from 'node:module';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BootError, bootFromEnv, ENGINE_ENV, readKnobs, REGISTERED_LINE } from '../../src/n8n/boot.js';
+import { BootError, bootFromEnv, confirmBooted, CONFIRMED_LINE, ENGINE_ENV, n8nEntry, preloadFromEnv, readKnobs, REGISTERED_LINE } from '../../src/n8n/boot.js';
 import { JOURNAL_FILE, RECORD_FILE, STATE_DIR, sha256 } from '../../src/install/record.js';
 import { ENGINE_ENTERED_DIAGNOSTIC, PetriScheduler } from '../../src/scheduler/index.js';
 import { cleanupTrees, tempDir } from '../install/support.js';
@@ -37,6 +37,7 @@ function fakeN8n(options: { seam?: boolean } = {}): FakeN8n {
           'let factory = null;',
           'exports.setWorkflowSchedulerFactory = (next) => { factory = next; };',
           'exports.getRegistered = () => factory;',
+          'exports.getWorkflowSchedulerFactory = () => factory;',
           'exports.StackScheduler = class StackScheduler { run() {} };',
           '',
         ].join('\n'),
@@ -72,7 +73,7 @@ describe('bootFromEnv', () => {
     expect(result.coreVersion).toBe('9.9.9');
     expect(result.knobs).toEqual({ budget: 3, maxAgentRounds: undefined, maxAgentToolCalls: undefined });
     expect(result.installed).toBe(false);
-    expect(messages).toEqual([`${REGISTERED_LINE}: budget=3, n8n-core=9.9.9, hook=/hook.cjs`]);
+    expect(messages).toEqual([`${REGISTERED_LINE}: budget=3, n8n-core=9.9.9, loader=/hook.cjs`]);
     // The factory n8n's registry now holds is ours, and entering it is the second claim.
     const factory = n8n.registered();
     expect(factory).toBe(result.registration.factory);
@@ -135,5 +136,86 @@ describe('bootFromEnv', () => {
   it('says where it looked when n8n-core cannot be resolved', () => {
     const dir = tempDir();
     expect(() => bootFromEnv({ env: { [ENGINE_ENV]: 'libpetri' }, resolveFrom: join(dir, 'x.js') })).toThrow(/cannot resolve n8n-core from/);
+  });
+});
+
+/** The record a registration leaves for the hook; cleared so each case starts with none. */
+const BOOT_RECORD = Symbol.for('n8n-libpetri.boot');
+const clearBootRecord = (): void => {
+  delete (globalThis as Record<symbol, unknown>)[BOOT_RECORD];
+};
+
+describe('preloadFromEnv (divergence row 40: registered before n8n runs anything)', () => {
+  beforeEach(clearBootRecord);
+  afterEach(clearBootRecord);
+
+  it('tells n8n\'s own command from any other Node process by the package above the entry\'s realpath', () => {
+    const n8n = fakeN8n();
+    const bin = join(n8n.n8nDir, 'bin', 'n8n');
+    expect(n8nEntry(bin)).toBe(realpathSync(bin));
+    // n8n-core's own files sit under a package named n8n-core, the nearest manifest wins.
+    expect(n8nEntry(join(n8n.coreDir, 'dist', 'index.js'))).toBeUndefined();
+    const other = tempDir();
+    writeFileSync(join(other, 'script.js'), '');
+    expect(n8nEntry(join(other, 'script.js'))).toBeUndefined();
+    expect(n8nEntry(undefined)).toBeUndefined();
+    expect(n8nEntry('/nonexistent/bin/n8n')).toBeUndefined();
+  });
+
+  it('registers through a global install\'s bin symlink, which is what a preload sees as argv[1]', () => {
+    const n8n = fakeN8n();
+    const binDir = tempDir();
+    symlinkSync(join(n8n.n8nDir, 'bin', 'n8n'), join(binDir, 'n8n'));
+    const result = preloadFromEnv({ env: { [ENGINE_ENV]: 'libpetri' }, entry: join(binDir, 'n8n'), isMainThread: true, onDiagnostic: () => {} });
+    expect(result.status).toBe('registered');
+    expect(n8n.registered()).not.toBeNull();
+  });
+
+  it('registers from n8n\'s entry on the main thread, resolving n8n-core from that entry', () => {
+    const n8n = fakeN8n();
+    const messages: string[] = [];
+    const result = preloadFromEnv({ env: { [ENGINE_ENV]: 'libpetri' }, entry: join(n8n.n8nDir, 'bin', 'n8n'), isMainThread: true, onDiagnostic: (m) => messages.push(m), loader: '/preload.mjs' });
+    expect(result.status).toBe('registered');
+    expect(messages).toEqual([`${REGISTERED_LINE}: budget=1, n8n-core=9.9.9, loader=/preload.mjs`]);
+    expect(n8n.registered()).not.toBeNull();
+  });
+
+  it('leaves a worker thread and a process that is not n8n alone, and is inert without the variable', () => {
+    const n8n = fakeN8n();
+    const entry = join(n8n.n8nDir, 'bin', 'n8n');
+    expect(preloadFromEnv({ env: { [ENGINE_ENV]: 'libpetri' }, entry, isMainThread: false })).toEqual({ status: 'not-n8n' });
+    const other = tempDir();
+    writeFileSync(join(other, 'script.js'), '');
+    expect(preloadFromEnv({ env: { [ENGINE_ENV]: 'libpetri' }, entry: join(other, 'script.js'), isMainThread: true })).toEqual({ status: 'not-n8n' });
+    expect(preloadFromEnv({ env: {}, entry, isMainThread: true })).toEqual({ status: 'inert' });
+    expect(n8n.registered()).toBeNull();
+  });
+
+  it('refuses a typo even outside n8n, since the variable is read first', () => {
+    expect(() => preloadFromEnv({ env: { [ENGINE_ENV]: 'libpetrx' }, entry: '/x', isMainThread: true })).toThrow(BootError);
+  });
+});
+
+describe('confirmBooted (the hook file\'s check)', () => {
+  beforeEach(clearBootRecord);
+  afterEach(clearBootRecord);
+
+  it('is inert without the variable, whatever was registered', () => {
+    expect(confirmBooted({ env: {} })).toBe('inert');
+  });
+
+  it('refuses when nothing registered before n8n loaded its hook files, naming the preload', () => {
+    expect(() => confirmBooted({ env: { [ENGINE_ENV]: 'libpetri' } })).toThrow(/no scheduler was registered before n8n started.*NODE_OPTIONS/);
+  });
+
+  it('confirms a registration n8n-core still holds, and refuses one that was replaced', () => {
+    const n8n = fakeN8n();
+    boot(n8n, { [ENGINE_ENV]: 'libpetri' });
+    const messages: string[] = [];
+    expect(confirmBooted({ env: { [ENGINE_ENV]: 'libpetri' }, onDiagnostic: (m) => messages.push(m) })).toBe('registered');
+    expect(messages).toEqual([`${CONFIRMED_LINE} (/hook.cjs)`]);
+    const req = createRequire(join(n8n.n8nDir, 'package.json'));
+    (req('n8n-core') as { setWorkflowSchedulerFactory: (f: unknown) => void }).setWorkflowSchedulerFactory(() => ({}));
+    expect(() => confirmBooted({ env: { [ENGINE_ENV]: 'libpetri' } })).toThrow(/was replaced before n8n loaded its hook files/);
   });
 });

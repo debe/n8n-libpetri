@@ -18,6 +18,9 @@
  * The first three exit 0, the last three 3 (inconsistent state).
  */
 import { existsSync, realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { preloadFor } from './package-root.js';
 import { interruptedRun, seamWithoutRecord } from './apply.js';
 import { EXIT, type ExitCode } from './errors.js';
 import type { Located } from './locate.js';
@@ -38,6 +41,53 @@ export interface EnvironmentReport {
   /** Whether one of them is this package's hook. */
   readonly hookListed: boolean;
   readonly hook: string;
+  /** Whether `NODE_OPTIONS` imports this package's preload, which registers the scheduler. */
+  readonly preloadListed: boolean;
+  readonly preload: string;
+}
+
+/** The words of a `NODE_OPTIONS` value, split the way Node splits it (double quotes, backslash escapes inside them). */
+export function nodeOptionWords(value: string): string[] {
+  const words: string[] = [];
+  let word: string | null = null;
+  let quoted = false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i]!;
+    if (quoted) {
+      if (c === '\\' && i + 1 < value.length) word += value[++i]!;
+      else if (c === '"') quoted = false;
+      else word += c;
+    } else if (/\s/.test(c)) {
+      if (word !== null) words.push(word);
+      word = null;
+    } else if (c === '"') {
+      quoted = true;
+      word ??= '';
+    } else {
+      word = (word ?? '') + c;
+    }
+  }
+  if (word !== null) words.push(word);
+  return words;
+}
+
+/** The modules `NODE_OPTIONS` preloads with `--import`, as paths where they are `file:` URLs. */
+export function importedModules(value: string): string[] {
+  const words = nodeOptionWords(value);
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    const spec = w.startsWith('--import=') ? w.slice('--import='.length) : w === '--import' ? words[++i] : undefined;
+    if (spec === undefined) continue;
+    if (spec.startsWith('file:')) {
+      try {
+        out.push(fileURLToPath(spec));
+      } catch {
+        out.push(spec);
+      }
+    } else out.push(spec);
+  }
+  return out;
 }
 
 export interface StatusReport {
@@ -70,7 +120,10 @@ export function environmentReport(env: NodeJS.ProcessEnv, hook: string): Environ
     }
   };
   const ours = real(hook);
-  return { engine: engine ?? null, active, hookFiles, hookListed: hookFiles.some((f) => real(f) === ours), hook };
+  const preload = preloadFor(hook);
+  const preloadReal = real(preload);
+  const preloadListed = importedModules(env.NODE_OPTIONS ?? '').some((m) => real(resolve(m)) === preloadReal);
+  return { engine: engine ?? null, active, hookFiles, hookListed: hookFiles.some((f) => real(f) === ours), hook, preloadListed, preload };
 }
 
 export function status(located: Located, manifests: ReadonlyMap<string, LoadedManifest>, env: NodeJS.ProcessEnv, hook: string): StatusReport {
@@ -146,12 +199,23 @@ export function renderStatus(r: StatusReport): string {
   if (r.installedBy !== null) lines.push(`installed by: ${r.installedBy}${r.unverified ? ' (with --allow-unverified)' : ''}`);
   for (const d of r.details) lines.push(`  ${d}`);
   const e = r.environment;
-  lines.push(`environment: N8N_EXECUTION_ENGINE=${e.engine ?? '(unset)'}${typeof e.active === 'string' ? ` (${e.active})` : ''}; EXTERNAL_HOOK_FILES ${e.hookListed ? 'lists' : 'does not list'} ${e.hook}`);
-  if (r.state === 'installed' && (e.active !== true || !e.hookListed)) {
-    lines.push(`  n8n started from this shell runs its own loop; \`eval "$(n8n-libpetri env)"\` sets both variables`);
-  }
-  if ((r.state === 'stock' || r.state === 'stock-unsupported') && e.active === true && e.hookListed) {
-    lines.push('  n8n started from this shell refuses to start: the hook finds no scheduler seam');
+  lines.push(
+    `environment: N8N_EXECUTION_ENGINE=${e.engine ?? '(unset)'}${typeof e.active === 'string' ? ` (${e.active})` : ''}; ` +
+      `NODE_OPTIONS ${e.preloadListed ? 'imports' : 'does not import'} ${e.preload}; EXTERNAL_HOOK_FILES ${e.hookListed ? 'lists' : 'does not list'} ${e.hook}`,
+  );
+  const seamed = r.state === 'installed';
+  const fix = '`eval "$(n8n-libpetri env)"` sets all three variables';
+  if (e.active === true && e.preloadListed && (r.state === 'stock' || r.state === 'stock-unsupported')) {
+    lines.push('  n8n started from this shell refuses to start: the preload finds no scheduler seam');
+  } else if (e.active === true && !e.preloadListed && e.hookListed) {
+    // The hook alone would register too late for an overdue wait (divergence row 40), so it refuses.
+    lines.push(`  n8n started from this shell refuses to start: the hook finds no scheduler registered by the preload; ${fix}`);
+  } else if (e.active === true && !e.preloadListed) {
+    lines.push(`  n8n started from this shell runs its own loop although N8N_EXECUTION_ENGINE asks for the engine, and nothing refuses; ${fix}`);
+  } else if (e.active === true && !e.hookListed) {
+    lines.push(`  n8n started from this shell runs the engine, but nothing checks it at boot: EXTERNAL_HOOK_FILES does not list the hook; ${fix}`);
+  } else if (seamed && e.active !== true) {
+    lines.push(`  n8n started from this shell runs its own loop; ${fix}`);
   }
   if (r.state === 'stock') {
     lines.push(r.neutrality?.passed

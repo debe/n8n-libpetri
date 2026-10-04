@@ -40,3 +40,5 @@ export function packageRoot(): PackageRoot {
 export const defaultSeamsDir = (): string => join(packageRoot().dir, 'seams', 'n8n-core');
 /** The `EXTERNAL_HOOK_FILES` entry. */
 export const hookPath = (): string => join(packageRoot().dir, 'hook', 'n8n-hook.cjs');
+/** The `NODE_OPTIONS` `--import` preload that registers the scheduler; it ships beside the hook. */
+export const preloadFor = (hook: string): string => join(dirname(hook), 'n8n-preload.mjs');

@@ -5,7 +5,17 @@
  * - `hook/n8n-hook.cjs`, the `EXTERNAL_HOOK_FILES` entry an installed n8n loads; and
  * - `scripts/testbed/preload.mjs`, the `--import` preload of the source-built testbed.
  *
- * Keeping the env parsing and the seam check here means the two cannot drift.
+ * - `hook/n8n-preload.mjs`, the `--import` preload an installed n8n carries in `NODE_OPTIONS`
+ *   ({@link preloadFromEnv}).
+ *
+ * Keeping the env parsing and the seam check here means the loaders cannot drift.
+ *
+ * **Registered before n8n runs anything** (divergence row 40). n8n `start` arms the
+ * `WaitTracker`, which resumes executions that went overdue while n8n was down, before it loads
+ * hook files, so a scheduler registered from the hook file can come too late for them. The
+ * preload runs before n8n's entry module, so nothing of n8n has run when it registers; that
+ * order is Node's, not a race. The hook file then only confirms ({@link confirmBooted}): with
+ * the engine requested and no preload registration it refuses to start n8n.
  *
  * **Activation** is `N8N_EXECUTION_ENGINE`: unset or empty does nothing; `libpetri` registers
  * the scheduler; any other value throws, so a typo cannot silently run n8n's own loop under a
@@ -21,9 +31,9 @@
  * n8n's own entry file, so the registry written here is the one n8n's `WorkflowExecute` reads:
  * Node resolves symlinks (npm, pnpm, Docker) to one realpath, one CJS instance.
  */
-import { realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { driftedFiles, readJournal, readRecord } from '../install/record.js';
 import { registerPetriScheduler, type PetriSchedulerRegistration } from '../scheduler/register.js';
 import type { NodeHelpersLike, SetWorkflowSchedulerFactory, WorkflowScheduler } from './host.js';
@@ -62,7 +72,7 @@ export interface BootOptions {
   readonly mainFilename?: string;
   /** Where the diagnostics go. Default: stderr, one `[n8n-libpetri] …` line each. */
   readonly onDiagnostic?: (message: string) => void;
-  /** What the boot line names as the loader (`hook=…`). */
+  /** What the boot line names as the loader (`loader=…`). */
   readonly loader?: string;
 }
 
@@ -86,8 +96,25 @@ export type BootResult =
 /** The parts of `n8n-core` the boot path reads. */
 interface CoreModule {
   readonly setWorkflowSchedulerFactory?: SetWorkflowSchedulerFactory;
+  readonly getWorkflowSchedulerFactory?: () => unknown;
   readonly StackScheduler?: new () => WorkflowScheduler;
 }
+
+/**
+ * What a registration leaves in the process for {@link confirmBooted}. Kept on `globalThis`
+ * under a registered symbol, not in a module variable, so the CommonJS hook and the ESM preload
+ * see one record whichever way each loaded this module.
+ */
+interface BootRecord {
+  readonly loader: string | undefined;
+  readonly coreDir: string;
+  readonly factory: unknown;
+  readonly currentFactory: (() => unknown) | undefined;
+}
+
+const BOOT_RECORD = Symbol.for('n8n-libpetri.boot');
+
+const bootRecord = (): BootRecord | undefined => (globalThis as Record<symbol, BootRecord | undefined>)[BOOT_RECORD];
 
 const stderrDiagnostic = (message: string): void => {
   // stderr, not console: n8n installs its own logger over the console early in boot.
@@ -193,9 +220,97 @@ export function bootFromEnv(options: BootOptions = {}): BootResult {
     ...(knobs.maxAgentToolCalls === undefined ? {} : { maxAgentToolCalls: knobs.maxAgentToolCalls }),
     onDiagnostic,
   });
+  const getFactory = core.getWorkflowSchedulerFactory;
+  (globalThis as Record<symbol, BootRecord | undefined>)[BOOT_RECORD] = {
+    loader: options.loader,
+    coreDir,
+    factory: registration.factory,
+    currentFactory: typeof getFactory === 'function' ? () => getFactory() : undefined,
+  };
   onDiagnostic(
     `${REGISTERED_LINE}: budget=${knobs.budget}, n8n-core=${coreVersion}` +
-      `${record === null ? '' : ' (installed)'}${options.loader === undefined ? '' : `, hook=${options.loader}`}`,
+      `${record === null ? '' : ' (installed)'}${options.loader === undefined ? '' : `, loader=${options.loader}`}`,
   );
   return { status: 'registered', coreDir, coreVersion, knobs, installed: record !== null, registration };
+}
+
+export type PreloadResult = BootResult | { readonly status: 'not-n8n' };
+
+export interface PreloadOptions extends BootOptions {
+  /** The process's entry script; default `process.argv[1]`. */
+  readonly entry?: string;
+  /** Whether this is the main thread; the preload passes `worker_threads.isMainThread`. */
+  readonly isMainThread: boolean;
+}
+
+/**
+ * The realpath of `entry` when it is n8n's own command: the nearest `package.json` above that
+ * realpath is named `n8n` (`bin/n8n` of an npm, pnpm, Docker or source install). Otherwise
+ * `undefined`. A preload sees `process.argv[1]` before Node resolves the main module, so on a
+ * global install it is still the `bin` symlink (`/usr/local/bin/n8n`), from which n8n-core does
+ * not resolve; the realpath is n8n's own file.
+ */
+export function n8nEntry(entry: string | undefined): string | undefined {
+  if (entry === undefined || entry === '') return undefined;
+  let real: string;
+  try {
+    real = realpathSync(entry);
+  } catch {
+    return undefined;
+  }
+  for (let dir = dirname(real); ; ) {
+    const manifest = join(dir, 'package.json');
+    if (existsSync(manifest)) {
+      try {
+        return (JSON.parse(readFileSync(manifest, 'utf8')) as { name?: unknown }).name === 'n8n' ? real : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+/**
+ * The `--import` preload's boot (`hook/n8n-preload.mjs`). `NODE_OPTIONS` reaches every Node
+ * process the environment does, so the preload registers only in n8n's own command on its main
+ * thread: a script an Execute Command node starts, or a worker thread, is `not-n8n` and left
+ * alone. n8n's task runners get neither variable (n8n passes them an allowlisted environment).
+ * Throws {@link BootError} like {@link bootFromEnv}; thrown from a preload, n8n never starts.
+ */
+export function preloadFromEnv(options: PreloadOptions): PreloadResult {
+  const env = options.env ?? process.env;
+  if (!engineRequested(env)) return { status: 'inert' };
+  const entry = options.isMainThread ? n8nEntry(options.entry ?? process.argv[1]) : undefined;
+  if (entry === undefined) return { status: 'not-n8n' };
+  return bootFromEnv({ ...options, resolveFrom: options.resolveFrom ?? entry });
+}
+
+/** The line the hook writes when it finds the preload's registration in place. */
+export const CONFIRMED_LINE = 'hook confirmed the preload registration';
+
+/**
+ * The hook file's check (`hook/n8n-hook.cjs`). By the time n8n loads hook files it may already
+ * have resumed an overdue wait (row 40), so the hook does not register: it requires that the
+ * preload did, and that n8n-core's registry still holds that factory. Otherwise it throws
+ * {@link BootError}, which stops n8n.
+ */
+export function confirmBooted(options: { readonly env?: NodeJS.ProcessEnv; readonly onDiagnostic?: (message: string) => void } = {}): BootResult['status'] {
+  const env = options.env ?? process.env;
+  if (!engineRequested(env)) return 'inert';
+  const record = bootRecord();
+  if (record === undefined) {
+    throw new BootError(
+      `${ENGINE_ENV}=${ENGINE_VALUE} but no scheduler was registered before n8n started; add ` +
+        '--import=<n8n-libpetri>/hook/n8n-preload.mjs to NODE_OPTIONS (`n8n-libpetri env` prints it). ' +
+        'The hook file alone loads too late: n8n can resume an overdue wait before it loads hook files',
+    );
+  }
+  if (record.currentFactory !== undefined && record.currentFactory() !== record.factory) {
+    throw new BootError(`the scheduler registered at boot in n8n-core at ${record.coreDir} was replaced before n8n loaded its hook files`);
+  }
+  (options.onDiagnostic ?? stderrDiagnostic)(`${CONFIRMED_LINE}${record.loader === undefined ? '' : ` (${record.loader})`}`);
+  return 'registered';
 }
