@@ -10,8 +10,8 @@
     "integrity": "sha512-mUs5pEOuUTCjQkJBg9b8WCCYLmhPZfIefFsqhCPbwyR9TPr2bQoCB0ILNe61+QiEXg/f+3Wo0UJF1yJLC69wUg=="
   },
   "sourcePatches": {
-    "0001-extract-scheduler-loop.patch": "ea664636cd440d873e6b74961201833d015c16108eda1daed1ec552b18e7ced4",
-    "0002-scheduler-registry.patch": "66feeb99aae714dcefafb8225dee48594deeb333ef42f8f6f0793a0fa8d630ad"
+    "0001-extract-scheduler-loop.patch": "555f9fb8d51a8e33e5c3c488ef0cedbea2c735f8d2a7b59d269b04571b69cf2e",
+    "0002-scheduler-registry.patch": "c8ec07814c79e942bda7ee024659571d3eee4e1a057add3034c1a575e08f6a04"
   },
   "toolchain": {
     "generator": "scripts/release/build-seams.mjs",
