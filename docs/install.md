@@ -205,7 +205,9 @@ exit 3 ("no solver resolved") belongs to a different command.
   activating it for a workflow. For example, a node whose success output and error-fallback
   branch both feed the same input of one Merge is a recorded divergence (#2): the verifier
   reports `proper-completion` violated on that input, and the live run completes the Merge with
-  the empty branch, where n8n waits for the fallback.
+  the empty branch, where n8n waits for the fallback. The shape is rare (0 of 211 corpus
+  workflows; row 2). Wire the fallback into its own Merge input, or merge the two paths before the
+  join, and the verifier proves proper completion.
 - **Overdue waits at boot.** In regular mode n8n starts its `WaitTracker` before it loads hook
   files, so an execution that became overdue while n8n was down could resume on n8n's own loop.
   Smoke leg 5 measured the resume going through the engine on 2.41.6 (two runs) and on 2.42.2

@@ -798,8 +798,8 @@ and `scripts/verify-patch.sh` is the gate that proves it. These are asks the pol
       are designed terminals for exactly that reason. Detailed observations are in the untracked
       `notes/n8n-agent-runtime.md`
 
-- [ ] **Multi-producer input slot on a multi-input node (divergence row 2), owner decision
-      pending.** Analysed 2026-10-04 (419 scenarios, n8n's real loop = our port on all 419). No
+- [ ] **Multi-producer input slot on a multi-input node (divergence row 2): not built, by decision
+      (2026-10-04).** Frequency, measured 2026-10-04 (`tasks/scan-multi-producer-slots.mjs`): 1 of 211 workflows (the 200 templates plus the 11 testbed workflows) has a multi-producer slot on a multi-input node, and its producers are concurrent. 0 are causally ordered, which is the class an arrival form could fix. Revisit if users report the in-class shape. Analysed 2026-10-04 (419 scenarios, n8n's real loop = our port on all 419). No
       construct is exact on every case: concurrent producers are paired positionally (row 41). An
       exact causal 'arrival form' exists for causally ordered producers, the smoke shape included:
       empty tokens only report closure, data fills slots FIFO, a missing slot is padded `[]` once
